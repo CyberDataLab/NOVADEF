@@ -1,0 +1,20 @@
+# sudo docker compose up -d
+# sudo docker exec -it IDCONTAINER bash
+---
+services:
+  alert_module:
+    image: alert_module_novadef:latest
+    container_name: alert_module_novadef
+    profiles: ["alert_module.alert_module"]
+    restart: unless-stopped
+    depends_on:
+      kafka_novadef:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      - KAFKA_BOOTSTRAP=kafka_novadef:29092            # same Docker network
+    # If host.docker.internal is used in Linux:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: #local_folder : #container_folder
+      - ${PFD}/Results/Alerts:/home/Alert_Module/Alerts

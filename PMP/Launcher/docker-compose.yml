@@ -1,0 +1,11 @@
+
+---
+include:
+  #COMPOSE_PROFILES=kafka,filebeat,flow_module,...
+  - path: ${PFD}/Communication_Bus/Docker/communication_bus_compose.yml
+  - path: ${PFD}/Alert_Module/Docker/alert_module_compose.yml
+  - path: ${PFD}/Data_Collection_Module/Docker/data_collection_module_compose.yml
+  - path: ${PFD}/Flow_Module/Docker/flow_module_compose.yml
+  - path: ${PFD}/Databases_module/Docker/db_module_compose.yml
+
+# Add more paths if necessary.

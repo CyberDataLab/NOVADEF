@@ -1,0 +1,16 @@
+- macro: trusted_containers
+  condition: (container.name in (container_ignore_list))
+
+- rule: Write below etc
+  desc: Writing in /etc
+  condition: evt.type = write and fd.name startswith /etc
+  output: "Falco: Writing in /etc detected (user=%user.name command=%proc.cmdline file=%fd.name)"
+  priority: WARNING
+  tags: [filesystem]
+
+- rule: Shell in container
+  desc: Shell running inside a container
+  condition: container.id != host and proc.name in (bash, sh, zsh) and evt.type = execve
+  output: "Falco: Shell detected in container (user=%user.name command=%proc.cmdline container=%container.name)"
+  priority: WARNING
+  tags: [container, shell]

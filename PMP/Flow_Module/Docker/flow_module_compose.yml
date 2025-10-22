@@ -1,0 +1,23 @@
+# sudo docker compose up -d
+# sudo docker exec -it IDCONTAINER bash
+---
+services:
+
+  flow_module:
+    image: flow_module_novadef:latest
+    container_name: flow_module_novadef
+    profiles: ["flow_module.flow_module"]
+    restart: unless-stopped
+    depends_on:
+      kafka_novadef:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      - KAFKA_BOOTSTRAP=kafka_novadef:29092            # same Docker network
+      - KAFKA_ENABLE_AUTO_COMMIT=false
+    # If host.docker.internal is used in Linux:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${PFD}/Results/Flows:/home/Flow_Module/Results/Flows
+      - ${PFD}/Results/Traces_Flow_Module:/home/Flow_Module/Scripts/Parsing/PCAP_Files/

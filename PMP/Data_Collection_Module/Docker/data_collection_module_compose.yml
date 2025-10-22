@@ -1,0 +1,79 @@
+
+---
+services:
+  fluentd:
+    image: fluentd_novadef:latest
+    container_name: fluentd_novadef
+    profiles: ["collection_module.fluentd"]
+    environment:
+      - TZ=UTC
+      - MACHINE_ID=${MACHINE_ID}
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/log/journal:/var/log/journal:ro
+      - ${PFD}/Results/fluentd_logs:/fluentd/log/out
+    ports:
+      - "24231:24231"
+      - "24220:24220" # This is a test to access via web using localhost:24220/api/plugins.json
+    restart: unless-stopped
+  
+  telegraf:
+    image: telegraf:1.33.2
+    container_name: telegraf
+    profiles: ["collection_module.telegraf"]
+    restart: unless-stopped
+    depends_on:
+      kafka_novadef:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      - MACHINE_ID=${MACHINE_ID}
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc:/host/etc:ro
+      - /var:/host/var:ro
+      - ${PFD}/Data_Collection_Module/Configuration_Files/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      
+  tshark:
+    image: tshark_novadef:latest
+    container_name: tshark_novadef
+    profiles: ["collection_module.tshark"]
+    restart: unless-stopped
+    depends_on:
+      - kafka_novadef
+    environment:
+      - TZ=UTC
+    network_mode: "${NETWORK_MODE}" # Allows container to see host interfaces
+    cap_add:
+      # https://man7.org/linux/man-pages/man7/capabilities.7.html
+      - NET_ADMIN # Modify network interfaces and adjust iptables rules
+      - NET_RAW   # Capture packets without restrictions
+    volumes:
+      - ${PFD}/Results/tshark/traces:/data/traces # Tshark logs accessible to Filebeat
+      - /sys/class/net:/sys/class/net    # Allows script to see host interfaces
+
+  falco:
+    image: falco_novadef:latest
+    container_name: falco_novadef
+    profiles: ["collection_module.falco"]
+    restart: unless-stopped
+    depends_on:
+      - kafka_novadef
+    environment:
+      - TZ=UTC
+      - MACHINE_ID=${MACHINE_ID}
+      - SKIP_DRIVER_LOADER=1
+    network_mode: "${NETWORK_MODE}"
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+      - SYS_RESOURCE
+    cap_drop:
+      - ALL
+    volumes:
+      - /proc:/host/proc:ro
+      - /boot:/host/boot:ro
+      - /lib/modules:/host/lib/modules:ro
+      - /usr:/host/usr:ro
+      - ${PFD}/Results/falco/logs:/var/log/falco/

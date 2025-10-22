@@ -1,0 +1,15 @@
+services:
+  #sudo docker exec -it mongodb_novadef mongo -u admin -p admin123
+  mongodb:
+    image: mongo:4.4.29
+    container_name: mongodb_novadef
+    profiles: ["db_module.mongodb"]
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      TZ: "UTC"
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+    volumes:
+      - ${PFD}/Results/mongo_data:/data/db

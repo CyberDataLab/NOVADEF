@@ -1,0 +1,61 @@
+---
+filebeat.inputs:
+  - type: filestream # log is deprecated from version 7.16
+    id: syslog_logs
+    enable: true
+    paths:
+      - "/fluentd/log/syslog_output.log.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].log"
+        # It does not work with [0-9]{8} sentence, it only works with several [0-9] sentences
+    tags: ["syslog_logs"]
+    fields:
+      kafka_topic: "syslog_logs"
+    fields_under_root: true
+
+  - type: filestream #log
+    id: systemd_logs
+    enable: true
+    paths:
+      - "/fluentd/log/systemd_output.log.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].log"
+        # Example: /fluentd/log/systemd_output.log.20250124.log
+    tags: ["systemd_logs"]
+    fields:
+      kafka_topic: "systemd_logs"
+    fields_under_root: true
+
+  - type: filestream #log
+    id: tshark_ndjson_traces
+    enable: true
+    paths:
+      - "/tshark/traces/infile.ndjson"
+    tags: ["tshark_ndjson_traces"]
+    fields:
+      kafka_topic: "tshark_traces"
+    fields_under_root: true
+    parsers:
+      - ndjson:
+          target: ""           # deja el JSON plano en la raíz del evento
+          add_error_key: true
+    close.reader.on_eof: true              # closes when it finishes reading a file (EOF)
+    close.on_state_change.renamed: true    # closes when it detects that the file has been renamed
+    clean_removed: true                    # clears the status when the file is no longer present
+  
+  - type: filestream #log
+    id: falco_events
+    enable: true
+    paths:
+      - "/falco/logs/falco_events.json"
+    tags: ["falco_events"]
+    fields:
+      kafka_topic: "falco_events"
+    fields_under_root: true
+
+output.kafka:
+  hosts: ["kafka_novadef:29092"] # Internal broker to be used by containers -> need to be changed to kafka_novadef-node1.lan:9094 if it is located in another machine
+  topic: '%{[kafka_topic]}'
+  compression: lz4
+  required_acks: 1
+  partition.round_robin.reachable_only: true
+  bulk_max_size: 4096
+# Filebeat logs by stdout
+logging.to_files: false
+logging.level: info

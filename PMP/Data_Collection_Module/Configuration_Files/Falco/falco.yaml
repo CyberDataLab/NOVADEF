@@ -1,0 +1,19 @@
+engine:
+  kind: modern_ebpf
+log_output:
+  enabled: true
+
+stdout_output:
+  enabled: false
+json_output: true
+
+file_output:
+  enabled: true
+  keep_alive: false
+  filename: /var/log/falco/falco_events.json
+
+append_output:
+  - extra_fields:
+      - machine_id: "${MACHINE_ID}"
+
+rules_file: /etc/falco_rules.yaml
