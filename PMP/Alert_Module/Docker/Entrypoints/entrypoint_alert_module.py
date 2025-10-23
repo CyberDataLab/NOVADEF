@@ -116,11 +116,11 @@ def run_snort_on_pcap(pcap_path, producer):
     '''
     proc.wait()
     print(f"✅ Snort3 ended with {pcap_path}")
-    os.chmod(alert_path,0o664) #It needs octal permissions
 
 
     #Read alert_parth and send it directly to Kafka with the producer.
     if os.path.exists(alert_path):
+        os.chmod(alert_path,0o664) #It needs octal permissions
         with open(alert_path, "r") as data:
             lines = data.readlines()
         if not lines:
@@ -128,6 +128,9 @@ def run_snort_on_pcap(pcap_path, producer):
 
         if data:
             producer.produce_lines(lines)
+    else:
+        print(f"⚠️ Snort3 did not detect any alerts in {alert_path}")
+        
     # By default, the database is not used. If needed, uncomment the line below.
     #save_to_database(alert_path, alerts_collection)
 
