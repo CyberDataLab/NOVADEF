@@ -194,41 +194,7 @@ class KafkaLineConsumer:
 
         # If none of the above -> Return the original JSON in text
         return txt
-    '''
-    def iter_lines(self) -> Generator[str, None, None]:
-        """Itera sólo la línea decodificada (para casos simples)."""
-        self._trap_signals()
-        while not self._closing:
-            try:
-                msg = self._consumer.poll(self.poll_timeout)
-                if msg is None:
-                    continue
-                if msg.error():
-                    err = msg.error()
-                    if err.code() == KafkaError._PARTITION_EOF:
-                        if DEFAULT_ENABLE_PARTITION_EOF:
-                            print(f"ℹ️  EOF {msg.topic()}[{msg.partition()}] offset {msg.offset()}", flush=True)
-                        continue
-                    print(f"⚠️  Error consumer: {err}", flush=True)
-                    continue
 
-                line = self._extract_line(msg.value())
-                if line is not None:
-                    yield line
-                    if not DEFAULT_ENABLE_AUTO_COMMIT:
-                        try:
-                            self._consumer.commit(asynchronous=True)
-                        except KafkaException as ke:
-                            print(f"⚠️  Commit error: {ke}", flush=True)
-            except KeyboardInterrupt:
-                break
-            except KafkaException as ke:
-                print(f"❌ KafkaException: {ke}", flush=True)
-            except Exception as ex:
-                print(f"❌ Exception: {ex}", flush=True)
-
-        self.close()
-        '''
     def iter_records(self) -> Generator[Tuple[object, Optional[str]], None, None]:
         """Como iter_lines(), pero rinde (msg, line) para poder hacer commit tras procesar."""
         self._trap_signals()
