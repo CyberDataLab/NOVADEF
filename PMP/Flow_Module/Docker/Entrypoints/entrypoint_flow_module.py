@@ -164,10 +164,10 @@ class CICWorker:
             print("❌ MongoDB connection timeout. Retrying later...")
             _errors = len(docs)
         except Exception as e:
-            print(f"❌ Error inserting alerts: {e}")
+            print(f"❌ Error inserting flows: {e}")
             _errors = len(docs)
 
-        print(f"✅ Inserted {inserted} new alerts, skipped {duplicates} duplicates and errors {_errors}.")
+        print(f"✅ Inserted {inserted} new flows, skipped {duplicates} duplicates and errors {_errors}.")
 
 
 

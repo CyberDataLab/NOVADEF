@@ -44,8 +44,29 @@ SNORT_BASE_CMD = [
     "-A", ALERT_FILE,
     "--lua",
     f"{ALERT_FILE} = {{file = true, fields = 'msg timestamp pkt_num proto pkt_gen pkt_len dir src_ap dst_ap rule action'}}",
-    "-l", ALERT_DIR
+    "-l", ALERT_DIR,
+    "-k", "none"
  ]
+
+
+def ensure_mode_644(path: str):
+    """Set permissions to 0644 only if necessary (avoid redundant chmod)."""
+    try:
+        st_mode = os.stat(path).st_mode & 0o777
+        if st_mode != 0o644:
+            os.chmod(path, 0o644)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️  Could not ensure 0644 on {path}: {e}")
+
+def truncate_alert_file(alert_path:str):
+        try:
+            with open(alert_path, "w"):
+                pass
+            print(f"🧹 Truncated {alert_path}")
+        except Exception as e:
+            print(f"⚠️ Could not truncate {alert_path}: {e}")
 
 def save_to_database(alert_path, alerts_collection):
     """
@@ -86,16 +107,14 @@ def save_to_database(alert_path, alerts_collection):
 
     print(f"✅ Inserted {inserted} new alerts, skipped {duplicates} duplicates and errors {_errors}.")
 
-def run_snort_on_pcap(pcap_path, producer):
-    """Run Snort3 in a separate thread on a rotated PCAP."""
+def run_snort_on_pcap(pcap_path, producer, alerts_collection):
+    """
+    Run Snort3 in a separate thread on a rotated PCAP.
+    Publish in Kafka topic the new alerts.
+    Save the alerts in de historical database.
+    Truncate the file to clean the alert file.
+    """
     alert_path = os.path.join(ALERT_DIR,f"{ALERT_FILE}.txt")
-
-    if os.path.exists(alert_path) and os.path.getsize(alert_path) >= ALERT_ROTATE_SIZE_MB:
-        try:
-            os.remove(alert_path)
-            print(f"✅ Alert file successfully rotated: {alert_path}")
-        except Exception as e:
-            print(f"❌ Error deleting the alert file: {e}")
 
     cmd = SNORT_BASE_CMD + ["-r", pcap_path]
     print(f"⚡ Running Snort3 on {pcap_path}")
@@ -107,34 +126,43 @@ def run_snort_on_pcap(pcap_path, producer):
         text=True
     )
 
+    '''Only for debugging
     def log_output(stream, prefix):
         for line in stream:
             print(f"[{prefix}] {line.strip()}")
-    '''Only for debugging
     #threading.Thread(target=log_output, args=(proc.stdout, f"snort-out-{os.path.basename(pcap_path)}"), daemon=True).start()
     #threading.Thread(target=log_output, args=(proc.stderr, f"snort-err-{os.path.basename(pcap_path)}"), daemon=True).start()
     '''
     proc.wait()
     print(f"✅ Snort3 ended with {pcap_path}")
 
-
     #Read alert_parth and send it directly to Kafka with the producer.
     if os.path.exists(alert_path):
-        os.chmod(alert_path,0o664) #It needs octal permissions
-        with open(alert_path, "r") as data:
-            lines = data.readlines()
+        ensure_mode_644(alert_path)
+        with open(alert_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = [ln for ln in f if ln.strip()]
         if not lines:
-            print(f"⚠️ File {alert_path} empty")
-
-        if data:
+            print(f"ℹ️ No alerts to publish in {alert_path}")
+            return
+        #Publishing Kafka topic
+        try:
             producer.produce_lines(lines)
+        except Exception as e:
+            print(f"❌ Error publishing to Kafka: {e}")
+            return
+    
+        # Saving in historical database
+        if alerts_collection is not None:
+            try:
+                save_to_database(alert_path=alert_path, alerts_collection=alerts_collection) 
+            except Exception as e:
+                print(f"❌ Error saving alerts in database: {e}")
+            return
+
+        truncate_alert_file(alert_path=alert_path)
+
     else:
         print(f"⚠️ Snort3 did not detect any alerts in {alert_path}")
-        
-    # By default, the database is not used. If needed, uncomment the line below.
-    #save_to_database(alert_path, alerts_collection)
-
-
         
 class Json2PcapWorker:
     """JSON2PCAP process to parse JSON → PCAP"""
@@ -190,13 +218,14 @@ class Json2PcapWorker:
 
 class PacketWriter:
     """Manage file rotation and launch Snort at each rotation (with queue and backoff)."""
-    def __init__(self, output_dir, j2p_path, rotate_size_mb, producer):
+    def __init__(self, output_dir, j2p_path, rotate_size_mb, producer, alerts_collection):
         self.output_dir = output_dir
         self.j2p_path = j2p_path
         self.rotate_size = rotate_size_mb
         self.file_index = 0
         self.j2p_worker = None
         self.producer = producer
+        self.alerts_collection = alerts_collection
         os.makedirs(output_dir, exist_ok=True)
 
         self.q = Queue(maxsize=PACKET_QUEUE_MAX)
@@ -287,7 +316,7 @@ class PacketWriter:
             self._running = False
 
     def _run_snort_and_delete(self, old_trace):
-        run_snort_on_pcap(old_trace, self.producer)
+        run_snort_on_pcap(old_trace, self.producer, self.alerts_collection)
         try:
             os.remove(old_trace)
             print(f"✅ File {old_trace} successfully deleted")
@@ -296,8 +325,7 @@ class PacketWriter:
 
 
 def main():
-    '''
-    # By default, the database is not used. If needed, uncomment the lines below and add a new parameter in the PacketWriter.
+
     mongo_uri = os.getenv("MONGO_URI", "mongodb://admin:admin123@mongodb:27017/")
     client = MongoClient(mongo_uri)
     db = client["snort_db"]
@@ -312,7 +340,6 @@ def main():
             print(f"⚠️ Could not create unique index on 'timestamp': {e}")
     else:
         print("ℹ️ Unique index on 'timestamp' already exists.")
-    '''
 
     kafka_producer = KafkaAlertProducer(
         topic=KAFKA_TOPIC_OUT,
@@ -323,7 +350,8 @@ def main():
         output_dir=OUTPUT_DIR,
         j2p_path=J2P_PATH,
         rotate_size_mb=PCAP_ROTATE_SIZE_MB,
-        producer=kafka_producer
+        producer=kafka_producer,
+        alerts_collection = alerts_collection
     )
 
     consumer = KafkaLineConsumer(

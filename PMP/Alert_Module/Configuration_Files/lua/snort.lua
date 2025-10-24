@@ -86,6 +86,7 @@ ftp_data = { }
 
 http_inspect = { }
 http2_inspect = { }
+-- decoder = {checksum.mode = "none"}
 
 -- see file_magic.rules for file id rules
 file_id = { rules_file = 'file_magic.rules' }
