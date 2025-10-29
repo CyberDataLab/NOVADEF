@@ -34,7 +34,9 @@ WATCHDOG_STALL_SECS = 120                # watchdog de inactividad
 
 
 class CICWorker:
-    """Gestiona la ejecución de CICFlowMeter y rotación del CSV global."""
+    """
+    Manages the execution of CICFlowMeter and global CSV rotation.
+    """
     def __init__(self, cic_results, rotate_size_mb, c2k_producer, db_collection):
         self.cic_results = cic_results
         self.rotate_size = rotate_size_mb
@@ -45,8 +47,11 @@ class CICWorker:
         self.flow_collection = db_collection
 
     def _rotate_global(self):
+        """
+        Rotation of global CSV when it exceeds a file size.
+        """
         if os.path.exists(self.global_csv) and os.path.getsize(self.global_csv) >= self.rotate_size:
-            print(f"♻️ Rotando CSV global: {self.global_csv}")
+            print(f"♻️ Rotating global CSV: {self.global_csv}")
             os.remove(self.global_csv)
             if self.file_index <= 5:
                 self.file_index += 1
@@ -55,9 +60,13 @@ class CICWorker:
             self.global_csv = os.path.join(self.cic_results, f"flow_global_{self.file_index:02d}.csv")
 
     def run_cic_on_pcap(self, pcap_path):
-        """Ejecuta CICFlowMeter en un PCAP rotado, volcándolo al global con rotación."""
+        """
+        Run CICFlowMeter in a separate thread on a rotated PCAP.
+        Save the flows in the historical database.
+        [OPTIONAL] Publish in Kafka topic the flows.
+        """
         CICFLOWMETER_COMMAND = [CIC_LAUNCHER, pcap_path, self.tmp_csv]
-        print(f"⚡ Lanzando CICFlowMeter sobre {pcap_path}")
+        print(f"⚡ Running CICFlowMeter in {pcap_path}")
         proc = subprocess.Popen(
             CICFLOWMETER_COMMAND,
             stdout=subprocess.PIPE,
@@ -65,15 +74,16 @@ class CICWorker:
             text=True
         )
 
+        '''Only for debugging
         def log_output(stream, prefix):
             for line in stream:
                 print(f"[{prefix}] {line.strip()}")
 
         threading.Thread(target=log_output, args=(proc.stdout, f"CIC-out-{os.path.basename(pcap_path)}"), daemon=True).start()
         threading.Thread(target=log_output, args=(proc.stderr, f"CIC-err-{os.path.basename(pcap_path)}"), daemon=True).start()
-
+        '''
         proc.wait()
-        print(f"✅ CICFlowMeter terminó con {pcap_path}")
+        print(f"✅ CICFlowMeter ended with  {pcap_path}")
 
         if os.path.exists(self.tmp_csv):
             self._rotate_global()
@@ -81,7 +91,7 @@ class CICWorker:
                 lines = tmpf.readlines()
 
             if not lines:
-                print(f"⚠️ CSV temporal vacío para {pcap_path}")
+                print(f"⚠️ Temporary CSV file empty for  {pcap_path}")
                 return
 
             header, data = lines[0], lines[1:]
@@ -92,20 +102,28 @@ class CICWorker:
             with open(self.global_csv, "a") as gf:
                 gf.writelines(data)
 
-            print(f"📊 {len(data)} flujos añadidos a {self.global_csv}")
+            print(f"📊 {len(data)} flows added to {self.global_csv}")
+
         '''
             # Uncomment if you want to publish on Kafka.
             if data:
                 self.c2k_producer.produce_lines(data)
 
         '''
-    # ============ MongoDB =======
+
         # Read flows and upload them to MongoDB
         if not os.path.exists(self.tmp_csv):
             print(f"⚠️ Flow file not found: {self.tmp_csv}")
             return
 
         def _smart_cast(val: str):
+            """
+            Assign the correct format to the different types of data that appear in the streams.
+
+            1) int: avoid converting IPs with dots to float
+            2) float: discard IP values such as ‘10.0.2.15’ that have multiple dots
+            3) datetime
+            """
             if val is None:
                 return None
             s = val.strip()
@@ -113,14 +131,12 @@ class CICWorker:
                 return None
             # int
             try:
-                # evita convertir IPs con puntos a float
                 if s.lstrip("-").isdigit():
                     return int(s)
             except Exception:
                 pass
             # float
             try:
-                # descarta valores tipo IP "10.0.2.15" que tienen varios puntos
                 if s.count(".") <= 1:
                     return float(s)
             except Exception:
@@ -139,7 +155,7 @@ class CICWorker:
         with open(self.tmp_csv, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # convierte tipos
+                # convert types
                 doc = { (k.strip() if k else k): _smart_cast(v) for k, v in row.items() }
                 # Create a stable _id from the entire line to avoid duplicates
                 raw_line = ",".join(row.get(k, "") for k in reader.fieldnames)
@@ -154,9 +170,8 @@ class CICWorker:
             self.flow_collection.insert_many(docs, ordered=False)
             inserted = len(docs)
         except errors.BulkWriteError as bwe:
-            # cuenta duplicados (código 11000) y otros errores
             for err in bwe.details.get("writeErrors", []):
-                if err.get("code") == 11000:
+                if err.get("code") == 11000: #Code 11000
                     duplicates += 1
                 else:
                     _errors += 1
@@ -172,7 +187,7 @@ class CICWorker:
 
 
 class Json2PcapWorker:
-    """Proceso json2pcap que convierte JSON → PCAP"""
+    """JSON2PCAP process to parse JSON -> PCAP"""
     def __init__(self, trace_path, j2p_path):
         self.trace_path = trace_path
         self.j2p_path = j2p_path
@@ -181,48 +196,60 @@ class Json2PcapWorker:
         self._start_proc()
 
     def _start_proc(self):
+        """
+        Launching JSON2PCAP with data intake via stdin and output to file.
+        """
         cmd = ["python3", self.j2p_path, "-i", "-o", self.trace_path]
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,   # evita bloquear por stdout
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
-        # Abrimos el array JSON
+
         self.proc.stdin.write("[")
         self.proc.stdin.flush()
         threading.Thread(target=self._log_stderr, daemon=True).start()
 
     def _log_stderr(self):
+        """
+        Provides useful JSON2PCAP error outputs when debugging.
+        """
         for line in self.proc.stderr:
             print(f"[json2pcap] {line.strip()}")
 
     def write_packet(self, packet_dict):
-        """Escribe un objeto en el array JSON (sin flush por paquete)."""
+        """
+        Writes an object to the JSON array.
+        """
         try:
             if not self.first_packet:
                 self.proc.stdin.write(",")
             else:
                 self.first_packet = False
             json.dump(packet_dict, self.proc.stdin, ensure_ascii=False)
-            # NO flush aquí: se hace por lotes en el writer
         except Exception as e:
-            print(f"❌ Error escribiendo en json2pcap: {e}")
+            print(f"❌ Error writing to JSON2PCAP: {e}")
 
     def close(self):
+        """
+        Close the process and the JSON array.
+        """
         try:
             self.proc.stdin.write("]")
             self.proc.stdin.flush()
             self.proc.stdin.close()
         except Exception as e:
-            print(f"❌ Error cerrando stdin: {e}")
+            print(f"❌ Error closing stdin: {e}")
         self.proc.wait()
 
 
 class PacketWriter:
-    """Gestiona la rotación de ficheros y lanza CICFlowMeter en cada rotación (con cola y backoff)."""
+    """
+    Manage file rotation and launch CICFlowMeter at each rotation (with queue and backoff).
+    """
     def __init__(self, output_dir, cic_results, j2p_path, rotate_size_mb, cic_rotate_size_mb, c2k_producer, db_collection):
         self.output_dir = output_dir
         self.j2p_path = j2p_path
@@ -241,23 +268,27 @@ class PacketWriter:
         self._new_file()
 
     def enqueue_packet(self, packet_dict, ack_fn=None):
-        """Encola con reintentos cortos para no bloquear el hilo de consumo."""
+        """
+        Queue with short retries so as not to block the consumer thread.
+        """
         while self._running:
             try:
                 self.q.put((packet_dict, ack_fn), timeout=0.1)
                 return
             except Full:
-                # backoff corto; el writer drenará la cola
+                # short backoff; the writer will drain the queue
                 pass
 
     def _writer_loop(self):
-        """Hilo que escribe paquetes al json2pcap y rota si toca."""
+        """
+        Thread that writes packets to json2pcap and rotates if necessary.
+        """
         while self._running:
             try:
                 packet_dict, ack_fn = self.q.get(timeout=1)
             except Empty:
                 if time.time() - self._last_write_ts > WATCHDOG_STALL_SECS:
-                    print("⏱️  Watchdog: sin escritura reciente al PCAP", flush=True)
+                    print("⏱️  Watchdog: no recent writing to PCAP", flush=True)
                 continue
 
             try:
@@ -280,18 +311,22 @@ class PacketWriter:
                     try:
                         ack_fn()
                     except Exception as e:
-                        print(f"⚠️  Error en ack_fn: {e}", flush=True)
+                        print(f"⚠️  Error in ack_fn: {e}", flush=True)
             except Exception as e:
-                print(f"❌ Error en writer_loop: {e}", flush=True)
+                print(f"❌ Error in writer_loop: {e}", flush=True)
 
     def _new_file(self):
+        """
+        Creates the JSON2PCAP stream, as well as a new PCAP file. 
+        If one is already open, it closes it and launches Snort on it using new threads.
+        """
         if self.j2p_worker:
             old_trace = self.j2p_worker.trace_path
             threading.Thread(target=self.j2p_worker.close, daemon=True).start()
             threading.Thread(target=self._run_cic_and_delete, args=(old_trace,), daemon=True).start()
 
         trace_path = os.path.join(self.output_dir, f"trace_{self.file_index:02d}.pcapng")
-        print(f"📂 Nuevo fichero abierto: {trace_path}")
+        print(f"📂 New file opened: {trace_path}")
         self.j2p_worker = Json2PcapWorker(trace_path, self.j2p_path)
 
         if self.file_index < 5:
@@ -300,12 +335,20 @@ class PacketWriter:
             self.file_index = 0
 
     def write_packet(self, packet_dict):
+        """
+        Write the network packet in JSON and rotate the PCAP if it exceeds the size limit.
+        """
         self.j2p_worker.write_packet(packet_dict)
         trace_file = self.j2p_worker.trace_path
         if os.path.exists(trace_file) and os.path.getsize(trace_file) >= self.rotate_size:
             self._new_file()
 
     def close(self):
+        """
+        Closes the PCAP file and analyses it before it is rotated.
+        Used only when the general process is about to be completed and the PCAP size 
+        does not reach the limit for rotation.
+        """
         if self.j2p_worker:
             old_trace = self.j2p_worker.trace_path
             self.j2p_worker.close()
@@ -313,12 +356,16 @@ class PacketWriter:
             self._running = False
 
     def _run_cic_and_delete(self, old_trace):
+        """
+        Start CICFlowMeter to analyse the network traces.
+        Delete the PCAP file when finished with it.
+        """
         self.cic_worker.run_cic_on_pcap(old_trace)
         try:
             os.remove(old_trace)
-            print(f"✅ Fichero {old_trace} borrado con éxito")
+            print(f"✅ File {old_trace} uccessfully deleted")
         except Exception as e:
-            print(f"❌ Error borrando {old_trace}: {e}")
+            print(f"❌ Error deleting {old_trace}: {e}")
 
 
 def main():

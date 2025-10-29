@@ -33,7 +33,7 @@ filebeat.inputs:
     fields_under_root: true
     parsers:
       - ndjson:
-          target: ""           # deja el JSON plano en la raíz del evento
+          target: ""           # Leave the flat JSON at the root of the network event
           add_error_key: true
     close.reader.on_eof: true              # closes when it finishes reading a file (EOF)
     close.on_state_change.renamed: true    # closes when it detects that the file has been renamed

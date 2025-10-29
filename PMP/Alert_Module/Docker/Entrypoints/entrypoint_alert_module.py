@@ -50,7 +50,9 @@ SNORT_BASE_CMD = [
 
 
 def ensure_mode_644(path: str):
-    """Set permissions to 0644 only if necessary (avoid redundant chmod)."""
+    """
+    Set permissions to 0644 only if necessary (avoid redundant chmod).
+    """
     try:
         st_mode = os.stat(path).st_mode & 0o777
         if st_mode != 0o644:
@@ -61,12 +63,15 @@ def ensure_mode_644(path: str):
         print(f"⚠️  Could not ensure 0644 on {path}: {e}")
 
 def truncate_alert_file(alert_path:str):
-        try:
-            with open(alert_path, "w"):
-                pass
-            print(f"🧹 Truncated {alert_path}")
-        except Exception as e:
-            print(f"⚠️ Could not truncate {alert_path}: {e}")
+    """
+    Truncate the alert file to avoid duplicates.
+    """
+    try:
+        with open(alert_path, "w"):
+            pass
+        print(f"🧹 Truncated {alert_path}")
+    except Exception as e:
+        print(f"⚠️ Could not truncate {alert_path}: {e}")
 
 def save_to_database(alert_path, alerts_collection):
     """
@@ -111,7 +116,7 @@ def run_snort_on_pcap(pcap_path, producer, alerts_collection):
     """
     Run Snort3 in a separate thread on a rotated PCAP.
     Publish in Kafka topic the new alerts.
-    Save the alerts in de historical database.
+    Save the alerts in the historical database.
     Truncate the file to clean the alert file.
     """
     alert_path = os.path.join(ALERT_DIR,f"{ALERT_FILE}.txt")
@@ -157,15 +162,17 @@ def run_snort_on_pcap(pcap_path, producer, alerts_collection):
                 save_to_database(alert_path=alert_path, alerts_collection=alerts_collection) 
             except Exception as e:
                 print(f"❌ Error saving alerts in database: {e}")
-            return
-
+                return
+        
         truncate_alert_file(alert_path=alert_path)
 
     else:
         print(f"⚠️ Snort3 did not detect any alerts in {alert_path}")
         
 class Json2PcapWorker:
-    """JSON2PCAP process to parse JSON → PCAP"""
+    """
+    JSON2PCAP process to parse JSON -> PCAP
+    """
     def __init__(self, trace_path, j2p_path):
         self.trace_path = trace_path
         self.j2p_path = j2p_path
@@ -174,7 +181,9 @@ class Json2PcapWorker:
         self._start_proc()
 
     def _start_proc(self):
-        """Launching JSON2PCAP with data intake via stdin and output to file."""
+        """
+        Launching JSON2PCAP with data intake via stdin and output to file.
+        """
         cmd = [sys.executable, self.j2p_path, "-i", "-o", self.trace_path]
         self.proc = subprocess.Popen(
             cmd,
@@ -189,24 +198,29 @@ class Json2PcapWorker:
         threading.Thread(target=self._log_stderr, daemon=True).start()
 
     def _log_stderr(self):
-        """Provides useful JSON2PCAP error outputs when debugging."""
+        """
+        Provides useful JSON2PCAP error outputs when debugging.
+        """
         for line in self.proc.stderr:
             print(f"[JSON2PCAP] {line.strip()}")
 
     def write_packet(self, packet_dict):
-        """Writes an object to the JSON array."""
+        """
+        Writes an object to the JSON array.
+        """
         try:
             if not self.first_packet:
                 self.proc.stdin.write(",")
             else:
                 self.first_packet = False
             json.dump(packet_dict, self.proc.stdin, ensure_ascii=False)
-            # NO flush aquí: se hace por lotes en el writer
         except Exception as e:
             print(f"❌ Error writing to JSON2PCAP: {e}")
 
     def close(self):
-        """Close the process and the JSON array."""
+        """
+        Close the process and the JSON array.
+        """
         try:
             self.proc.stdin.write("]")
             self.proc.stdin.flush()
@@ -217,7 +231,9 @@ class Json2PcapWorker:
 
 
 class PacketWriter:
-    """Manage file rotation and launch Snort at each rotation (with queue and backoff)."""
+    """
+    Manage file rotation and launch Snort at each rotation (with queue and backoff).
+    """
     def __init__(self, output_dir, j2p_path, rotate_size_mb, producer, alerts_collection):
         self.output_dir = output_dir
         self.j2p_path = j2p_path
@@ -237,7 +253,9 @@ class PacketWriter:
         self._new_file()
 
     def enqueue_packet(self, packet_dict, ack_fn=None):
-        """Queue with short retries so as not to block the consumer thread."""
+        """
+        Queue with short retries so as not to block the consumer thread.
+        """
         while self._running:
             try:
                 self.q.put((packet_dict, ack_fn), timeout=0.1)
@@ -247,7 +265,9 @@ class PacketWriter:
                 pass
 
     def _writer_loop(self):
-        """Thread that writes packets to json2pcap and rotates if necessary."""
+        """
+        Thread that writes packets to json2pcap and rotates if necessary.
+        """
         while self._running:
             try:
                 packet_dict, ack_fn = self.q.get(timeout=1)
@@ -281,8 +301,10 @@ class PacketWriter:
                 print(f"❌ Error in writer_loop: {e}", flush=True)
 
     def _new_file(self):
-        """Creates the JSON2PCAP stream, as well as a new PCAP file. 
-        If one is already open, it closes it and launches Snort on it using new threads."""
+        """
+        Creates the JSON2PCAP stream, as well as a new PCAP file. 
+        If one is already open, it closes it and launches Snort on it using new threads.
+        """
         if self.j2p_worker:
             old_trace = self.j2p_worker.trace_path
             threading.Thread(target=self.j2p_worker.close, daemon=True).start()
@@ -298,17 +320,20 @@ class PacketWriter:
             self.file_index = 0
 
     def write_packet(self, packet_dict):
-        """Write the network packet in JSON and rotate the PCAP if it exceeds the size limit."""
+        """
+        Write the network packet in JSON and rotate the PCAP if it exceeds the size limit.
+        """
         self.j2p_worker.write_packet(packet_dict)
         trace_file = self.j2p_worker.trace_path
         if os.path.exists(trace_file) and os.path.getsize(trace_file) >= self.rotate_size:
             self._new_file()
 
     def close(self):
-        """Closes the PCAP file and analyses it before it is rotated.
-
+        """
+        Closes the PCAP file and analyses it before it is rotated.
         Used only when the general process is about to be completed and the PCAP size 
-        does not reach the limit for rotation."""
+        does not reach the limit for rotation.
+        """
         if self.j2p_worker:
             old_trace = self.j2p_worker.trace_path
             self.j2p_worker.close()
@@ -316,6 +341,10 @@ class PacketWriter:
             self._running = False
 
     def _run_snort_and_delete(self, old_trace):
+        """
+        Start Snort to analyse the network traces.
+        Delete the PCAP file when finished with it.
+        """
         run_snort_on_pcap(old_trace, self.producer, self.alerts_collection)
         try:
             os.remove(old_trace)
@@ -369,7 +398,7 @@ def main():
         try:
             packet_dict = json.loads(line)
         except json.JSONDecodeError:
-            # Corrupted line → jumping
+            # Corrupted line -> jumping
             consumer.commit_msg(msg)
             continue
 

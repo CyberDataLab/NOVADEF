@@ -12,10 +12,13 @@ TRACES_DIR    = "/data/traces"
 LOG_PATH      = os.path.join(TRACES_DIR, "infile.ndjson")
 ROTATED_PATH  = os.path.join(TRACES_DIR, "infile.ndjson.backup")
 
-SIZE_LIMIT    = 30 * 1024 * 1024 #~30 MiB
+SIZE_LIMIT    = 30 * 1024 * 1024 # 30 MiB
 
 
 def get_interfaces():
+    """
+    Acquire the active network interfaces of the current host.
+    """
     try:
         SCRIPT_DIR = Path(__file__).resolve().parent
         result = subprocess.run(
@@ -34,6 +37,9 @@ def get_interfaces():
 
 
 def build_tshark_command(interfaces) -> str:
+    """
+    Create the command to launch Tshark
+    """
     command = ["tshark"]
     for interface in interfaces:
         new_interface = re.findall(r"'(.*?)'", interface)
@@ -47,8 +53,8 @@ def build_tshark_command(interfaces) -> str:
 
 def reap_children() -> None:
     """
-    Recolecta cualquier hijo terminado para evitar procesos <defunct> (zombies).
-    No bloquea (WNOHANG). Llamar a menudo y también desde SIGCHLD.
+    Collect any finished children to avoid <defunct> processes (zombies).
+    Does not block (WNOHANG). Call often, and also from SIGCHLD.
     """
     try:
         while True:
@@ -56,28 +62,28 @@ def reap_children() -> None:
             if pid == 0:
                 break
     except ChildProcessError:
-        # No hay hijos
-        pass
+        pass # There are no children.
     except OSError:
         pass
 
 def _sigchld_handler(signum, frame):
-    # Recolecta rápido cuando finaliza algún hijo
+    """
+    Collect quickly when a child finishes
+    """
     reap_children()
 
 def _kill_process_group(proc: subprocess.Popen, term_timeout: float = 5.0) -> None:
     """
-    Mata el grupo entero del proceso (shell + tshark + conversor) con SIGTERM
-    y, si no sale a tiempo, con SIGKILL. Luego hace reap de hijos.
+    Kill the entire process group (shell + tshark + converter) with SIGTERM
+    and, if it does not exit in time, with SIGKILL. Then reap children.
     """
     if proc is None:
         return
 
     try:
-        # Señal al grupo porque Popen se lanzó con start_new_session=True
+        # Signal to the group because Popen launched with start_new_session=True
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
-        # Ya no existe
         pass
     try:
         proc.wait(timeout=term_timeout)
@@ -91,12 +97,12 @@ def _kill_process_group(proc: subprocess.Popen, term_timeout: float = 5.0) -> No
         except Exception:
             pass
 
-    # Recolecta cualquier otro hijo colgante
+    # Collect any other hanging children
     reap_children()
 
 def run_tshark(command) -> Tuple[subprocess.Popen, "io.TextIOWrapper"]:
     """
-    Lanza el pipeline en su propia sesión (grupo nuevo) y devuelve (proc, output_file).
+    Launches the pipeline in its own session (new group) and returns (proc, output_file).
     """
 
     os.makedirs(TRACES_DIR, exist_ok=True)
@@ -119,12 +125,12 @@ def monitor_and_rotate(command: Union[str, list, tuple],
                        proc: subprocess.Popen,
                        output_file) -> None:
     """
-    Vigila LOG_PATH y, al superar SIZE_LIMIT, rota a ROTATED_PATH:
-      1) Mata grupo completo (no quedan procesos escribiendo al inode viejo)
-      2) Cierra el FD de salida
-      3) Renombra (os.replace)
-      4) Relanza pipeline y reabre LOG_PATH
-    Hace reap periódico para evitar zombies “rezagados”.
+    Monitor LOG_PATH and, when SIZE_LIMIT is exceeded, rotate to ROTATED_PATH:
+      1) Kill entire group (no processes remain writing to the old inode)
+      2) Close the output FD
+      3) Rename (os.replace)
+      4) Relaunch pipeline and reopen LOG_PATH
+    Perform periodic reap to avoid "straggler" zombies.
     """
     if not os.path.exists(LOG_PATH):
         open(LOG_PATH, "a", encoding="utf-8").close()
@@ -139,10 +145,7 @@ def monitor_and_rotate(command: Union[str, list, tuple],
             open(LOG_PATH, "a", encoding="utf-8").close()
 
         if size >= SIZE_LIMIT:
-            # 1) Parar pipeline entero
             _kill_process_group(proc, term_timeout=5)
-
-            # 2) Cerrar el descriptor ANTES de rotar
             try:
                 output_file.flush()
             except Exception:
@@ -152,13 +155,11 @@ def monitor_and_rotate(command: Union[str, list, tuple],
             except Exception:
                 pass
 
-            # 3) Rotar
             try:
                 os.replace(LOG_PATH, ROTATED_PATH)
             except FileNotFoundError:
                 pass
 
-            # 4) Relanzar
             proc, output_file = run_tshark(command)
 
 
@@ -166,7 +167,6 @@ def main():
     signal.signal(signal.SIGCHLD, _sigchld_handler)
 
     def _graceful_exit(signum, frame):
-        # Cierre limpio cuando el contenedor reciba stop/kill
         nonlocal_proc = getattr(main, "_proc", None)
         nonlocal_of   = getattr(main, "_of", None)
         try:
@@ -184,13 +184,11 @@ def main():
     signal.signal(signal.SIGTERM, _graceful_exit)
     signal.signal(signal.SIGINT,  _graceful_exit)
 
-    # Construye comando y lanza
     interfaces   = get_interfaces()
     command = build_tshark_command(interfaces)
 
     proc, output_file = run_tshark(command)
 
-    # Guarda referencias para el handler de salida
     main._proc = proc
     main._of   = output_file
 

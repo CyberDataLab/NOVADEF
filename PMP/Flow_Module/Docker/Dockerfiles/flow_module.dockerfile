@@ -12,9 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libpcap0.8 libpcap0.8-dev tcpdump && \
 rm -rf /var/lib/apt/lists/*
 
-
-
-#Crear todas las carpetas
 RUN mkdir -p /home/Flow_Module \
     /home/Flow_Module/Results/Flows \
     /home/Flow_Module/Scripts/Parsing/PCAP_Files \
@@ -27,12 +24,12 @@ COPY ./Flow_Module/Scripts/install_python3.12.sh /home/Flow_Module/Preinstall/Up
 COPY ./Flow_Module/Scripts/Automatic_cicflowmeter/. /home/Flow_Module/Preinstall/CICFlowMeter
 COPY ./Flow_Module/Docker/Entrypoints/entrypoint_flow_module.py /home/Flow_Module
 COPY ./Flow_Module/Scripts/kafka_io.py /home/Flow_Module/Scripts
-#Instalar python3.12 con script
+
+#Installing python3.12 using the script
 RUN chmod +x /home/Flow_Module/Preinstall/Updated_Python/install_python3.12.sh \
     && /home/Flow_Module/Preinstall/Updated_Python/install_python3.12.sh
-#Instalar entorno para CICFlowMeter
+#CICFlowMeter environment installing
 RUN chmod +x /home/Flow_Module/Preinstall/CICFlowMeter/launch_cfm.sh \
     && python3.12 /home/Flow_Module/Preinstall/CICFlowMeter/install_cfm.py /home/Flow_Module/Preinstall/CICFlowMeter/cfm_env /usr/bin/python3.12
 
-    #Lanzar entrypoint
 ENTRYPOINT [ "/usr/bin/python3" , "/home/Flow_Module/entrypoint_flow_module.py" ]

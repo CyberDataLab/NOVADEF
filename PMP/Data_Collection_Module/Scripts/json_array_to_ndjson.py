@@ -2,13 +2,15 @@
 import sys, json
 
 def iter_json_objects_from_array_stream(stream):
+    """
+    Collects network packets in JSON format and exports them in NDJSON format (one JSON object per line).
+    """
     buf = []
     depth = 0
     in_string = False
     escape = False
     started = False
 
-    # Leemos en bloques para throughput
     while True:
         chunk = stream.read(65536)
         if not chunk:
@@ -37,7 +39,7 @@ def iter_json_objects_from_array_stream(stream):
                 elif c == '}':
                     depth -= 1
 
-            # Cuando cerramos un objeto { ... } emitimos una línea
+            # When closing the object ({}), emit a line
             if started and depth == 0:
                 obj_text = ''.join(buf).strip()
                 l = obj_text.find('{')

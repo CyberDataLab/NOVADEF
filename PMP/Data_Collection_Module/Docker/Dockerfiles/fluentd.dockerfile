@@ -2,7 +2,6 @@
 
 FROM  fluentd:v1.16.8-debian-1.0
 
-#fluentd:v1.18.0-debian-1.0
 
 USER root
 

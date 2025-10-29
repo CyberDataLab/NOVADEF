@@ -27,7 +27,7 @@ def get_bootstrap(override: Optional[str] = None) -> str:
     Resolution order:
     1) explicit argument (override),
     2) KAFKA_BOOTSTRAP environment variable,
-    3) default ‘kafka_novadef:29092’ (best within Docker).
+    3) default "kafka_novadef:29092" (best within Docker).
     """
     if override:
         return override
@@ -196,7 +196,7 @@ class KafkaLineConsumer:
         return txt
 
     def iter_records(self) -> Generator[Tuple[object, Optional[str]], None, None]:
-        """Como iter_lines(), pero rinde (msg, line) para poder hacer commit tras procesar."""
+        """Extract lines and return (msg, line) for commit after processing."""
         self._trap_signals()
         while not self._closing:
             try:
@@ -222,7 +222,7 @@ class KafkaLineConsumer:
         self.close()
 
     def commit_msg(self, msg):
-        """Commit fuerte del mensaje procesado."""
+        """Commit the processed message."""
         try:
             self._consumer.commit(message=msg, asynchronous=False)
         except KafkaException as ke:

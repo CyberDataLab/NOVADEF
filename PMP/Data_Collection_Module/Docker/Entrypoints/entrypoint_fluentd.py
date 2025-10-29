@@ -7,7 +7,7 @@ import signal
 import subprocess
 
 WATCH_DIR = "/fluentd/log/out"
-SIZE_LIMIT = 2 * 1024 * 1024  # 20MB
+SIZE_LIMIT = 20 * 1024 * 1024  # 20MB
 PATTERNS = [
     r"syslog_output\.log\.\d{8}\.log",
     r"systemd_output\.log\.\d{8}\.log"
@@ -30,7 +30,6 @@ def match_log_files():
     return files
 
 def handle_large_file(full_path):
-    #full_path = os.path.join(WATCH_DIR, filename)
     try:
         os.remove(full_path)
     except Exception as e:

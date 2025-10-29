@@ -15,17 +15,17 @@ class cmd_parser:
     their service profiles (tools).
 
     Behaviors:
-      - 'all' positional (e.g., `python3 main.py all`) -> all modules, all tools
+      - "all" positional (e.g., "python3 main.py all") -> all modules, all tools
       - No args -> all modules, all tools
-      - Repeated pairs: `-m <module> -t <tools>`; `tools` can be:
-           * 'all' (expands to every tool in that module)
-           * a comma/space-separated list (e.g., 'telegraf, fluentd')
+      - Repeated pairs: "-m <module> -t <tools>"; "tools" can be:
+           * "all" (expands to every tool in that module)
+           * a comma/space-separated list (e.g., "telegraf, fluentd")
       - Returns:
            * selected: OrderedDict[str, List[str]]  (module -> list of tools)
-           * compose profiles: List[str]            (e.g., ["data_module.telegraf", ...])
+           * compose profiles: List[str]            (e.g., ["collection_module.telegraf", ...])
     """
 
-    # Your canonical registry of modules and their tools (profiles)
+    # Dictionary that associates a module with its service.
     MODULE_REGISTRY: Dict[str, List[str]] = {
         "alert_module":         ["alert_module"],
         "communication_module": ["kafka", "filebeat"],
@@ -37,12 +37,10 @@ class cmd_parser:
     def __init__(self) -> None:
         self._parser = self._make_parser()
 
-    # ---------- public API ----------
-
     def parse(self, argv: Optional[List[str]] = None) -> Tuple[argparse.Namespace, "OrderedDict[str, List[str]]"]:
         """
         Parse argv and return (args, selected).
-        `selected` is an OrderedDict mapping module -> list of tools.
+        "selected" is an OrderedDict mapping module -> list of tools.
         """
         args = self._parser.parse_args(argv)
 
@@ -73,9 +71,16 @@ class cmd_parser:
                 profiles.append(f"{module}.{tool}")
         return profiles
 
-    # ---------- internals ----------
 
     def _make_parser(self) -> argparse.ArgumentParser:
+        """
+        Create and return an argparse.ArgumentParser configured with the script's CLI options.
+
+        The parser supports:
+        - an optional positional "all" to select everything,
+        - repeated -m/--module and -t/--tools pairs,
+        - an optional --debug passthrough.
+        """
         p = argparse.ArgumentParser(
             prog="start_containers.py",
             description="Select docker-compose modules (files) and their service profiles (tools)."
@@ -100,6 +105,11 @@ class cmd_parser:
         return p
 
     def _validate_pair_mode(self, args: argparse.Namespace) -> None:
+        """
+        Validate that modules and tools were provided in matching pairs and that
+        module names exist in MODULE_REGISTRY. On error, call parser.error() to
+        display a helpful message and exit.
+        """
         if not args.modules or not args.tools:
             self._parser.error("You must provide matching -m/--module and -t/--tools pairs.")
         if len(args.modules) != len(args.tools):
@@ -112,12 +122,24 @@ class cmd_parser:
             self._parser.error(f"Unknown module(s): {', '.join(unknown)}. Valid modules: {choices}.")
 
     def _select_all(self) -> "OrderedDict[str, List[str]]":
+        """
+        Return an OrderedDict mapping every registered module to a copy of its
+        list of tools (i.e., select all tools for all modules).
+        """
         selected: "OrderedDict[str, List[str]]" = OrderedDict()
         for m, tools in self.MODULE_REGISTRY.items():
             selected[m] = list(tools)  # copy
         return selected
 
     def _split_tools(self, s: str) -> List[str]:
+        """
+        Split a tools specification string into individual tokens.
+
+        Behavior:
+        - If the string is 'all' (case-insensitive), return ['all'].
+        - Otherwise accept commas and/or whitespace as separators and return a
+          list of non-empty tokens in input order.
+        """
         s = s.strip()
         if s.lower() == "all":
             return ["all"]
@@ -126,6 +148,14 @@ class cmd_parser:
         return [t for t in parts if t]
 
     def _expand_tools(self, module: str, tool_tokens: List[str]) -> List[str]:
+        """
+        Expand and validate tool tokens for a given module.
+
+        - If the single token is 'all', expand to all registered tools for that module.
+        - Otherwise verify each token exists for the module; on unknown tokens call
+          parser.error() with a descriptive message.
+        - Preserve the input order and remove duplicates.
+        """
         if len(tool_tokens) == 1 and tool_tokens[0].lower() == "all":
             # Expand to every tool registered for that module
             return list(self.MODULE_REGISTRY[module])
@@ -149,6 +179,11 @@ class cmd_parser:
         return ordered
 
     def _build_selected_from_pairs(self, modules: List[str], tools: List[str]) -> "OrderedDict[str, List[str]]":
+        """
+        Build and return an OrderedDict mapping each provided module to its
+        expanded list of tools by zipping the modules and tools lists and
+        applying token splitting and expansion.
+        """
         selected: "OrderedDict[str, List[str]]" = OrderedDict()
         for m, t in zip(modules, tools):
             tokens = self._split_tools(t)
@@ -159,6 +194,14 @@ class cmd_parser:
 
 
 def detect_os():
+    """
+    Detect the host operating system and return a network mode string.
+
+    Returns:
+    - 'host' for Linux
+    - 'bridge' for Windows or macOS (darwin)
+    - 'error' for unknown systems
+    """
     system = platform.system().lower()
     print(f"Detected OS: {system}")
     if system == "linux":
@@ -171,6 +214,7 @@ def detect_os():
 
 
 def main():
+
     try:
         
         LFD = Path(__file__).resolve().parent # Launcher Folder Directory

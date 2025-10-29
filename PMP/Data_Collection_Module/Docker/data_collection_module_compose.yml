@@ -19,7 +19,7 @@ services:
   
   telegraf:
     image: telegraf:1.33.2
-    container_name: telegraf
+    container_name: telegraf_novadef
     profiles: ["collection_module.telegraf"]
     restart: unless-stopped
     depends_on:

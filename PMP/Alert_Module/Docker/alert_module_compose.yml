@@ -16,5 +16,5 @@ services:
     # If host.docker.internal is used in Linux:
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    volumes: #local_folder : #container_folder
+    volumes:
       - ${PFD}/Results/Alerts:/home/Alert_Module/Alerts

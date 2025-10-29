@@ -1,14 +1,12 @@
 #!/bin/bash
 
-# Este script instala las dependencias necesarias y luego Snort3 en Ubuntu.
+# This script installs the necessary dependencies and then Snort3 on Ubuntu.
 
-# Actualizar el sistema
-echo "Actualizando el sistema..."
-apt update -y #sudo
-apt upgrade -y #sudo
-#cd ~
-# Instalación de las dependencias necesarias
-echo "Instalando dependencias..."
+echo "Updating the system..."
+apt update -y
+apt upgrade -y
+
+echo "Installing dependencies..."
 #sudo
 apt install -y \
     build-essential \
@@ -42,8 +40,8 @@ apt install -y \
     libhwloc-dev \
     libdaq-dev 
 
-# Instlar DAQ manualmente
-echo "Instalando DAQ manualmente"
+
+echo "Installing DAQ manually"
 echo "**********************************************************************"
 cd ~
 git clone https://github.com/snort3/libdaq.git
@@ -51,59 +49,55 @@ cd libdaq
 ./bootstrap
 ./configure
 make -j$(nproc)
-make install #sudo
-ldconfig #sudo
+make install
+ldconfig
 
-# Verificar si hwloc está instalado correctamente
-echo "Verificando instalación de hwloc..."
+echo "Verifying hwloc installation..."
 if ! pkg-config --exists hwloc; then
-    echo "Error: hwloc no encontrado. Instalación fallida."
+    echo "Error: hwloc not found. Installation failed."
     exit 1
 fi
 
-# Instalar libpcre2 manualmente si no está disponible
-echo "Verificando instalación de libpcre2..."
+echo "Checking libpcre2 installation..."
 if ! pkg-config --exists libpcre2; then
-    echo "libpcre2 no encontrado, instalando desde el repositorio oficial..."
+    echo "libpcre2 not found, installing from the official repository..."
     git clone https://github.com/PCRE2Project/pcre2.git
     cd pcre2
     mkdir build && cd build
     cmake ..
     make -j$(nproc)
-    make install #sudo
-    ldconfig  # Actualizar la caché de bibliotecas dinámicas #sudo
+    make install
+    ldconfig  # Update the dynamic library cache
     cd ~
 fi
 
-# Instalar el paquete de CMake más reciente si es necesario (CMake 3.18+)
-echo "Verificando e instalando CMake..."
+echo "Verifying and installing CMake..."
 CMAKE_VERSION=$(cmake --version | head -n 1 | awk '{print $3}')
 if [[ "$(printf '%s\n3.18' "$CMAKE_VERSION" | sort -V | head -n1)" != "3.18" ]]; then
-    echo "Instalando la versión más reciente de CMake..."
+    echo "Installing the latest version of CMake..."
     wget https://cmake.org/files/v3.20/cmake-3.20.1-linux-x86_64.sh
-    bash cmake-3.20.1-linux-x86_64.sh --prefix=/usr/local --skip-license #sudo
+    bash cmake-3.20.1-linux-x86_64.sh --prefix=/usr/local --skip-license
     rm cmake-3.20.1-linux-x86_64.sh
 fi
 
-# Clonar e instalar Snort3
-echo "Clonando el repositorio de Snort3..."
+echo "Cloning the Snort3 repository..."
 cd ~
 git clone https://github.com/snort3/snort3.git
 cd snort3
 mkdir build
 cd build
-echo "Configurando Snort3..."
-cmake ../ || { echo "Error en la configuración de CMake."; exit 1; }
-echo "Compilando e instalando Snort3..."
-make -j$(nproc) || { echo "Error en la compilación de Snort3."; exit 1; }
-make install #sudo
+echo "Configuring Snort3..."
+cmake ../ || { echo "Error in CMake configuration."; exit 1; }
+echo "Compiling and installing Snort3..."
+make -j$(nproc) || { echo "Error compiling Snort3."; exit 1; }
+make install
 
 
-# Comprobar que Snort3 detecta DAQ correctamente
-echo "Verificación final de Snort3..."
+# Verifying that Snort3 correctly detects DAQ
+echo "Final verification of Snort3..."
 if snort -V | grep -q "Using DAQ version"; then
-    echo "¡Snort3 ha sido instalado exitosamente con DAQ!"
+    echo "Snort3 has been successfully installed with DAQ."
 else
-    echo "Error: Snort3 sigue sin detectar DAQ. Revisa la instalación manualmente."
+    echo "Error: Snort3 still fails to detect DAQ. Please check the installation manually."
     exit 1
 fi

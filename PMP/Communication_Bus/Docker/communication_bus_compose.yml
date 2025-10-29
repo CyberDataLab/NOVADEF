@@ -6,7 +6,7 @@ services:
     container_name: kafka_novadef
     profiles: ["communication_module.kafka"]
     healthcheck:
-      test: ["CMD", "nc", "-z", "kafka_novadef", "29092"] #bash -lc 'kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1'
+      test: ["CMD", "nc", "-z", "kafka_novadef", "29092"]
       interval: 5s
       retries: 15
       start_period: 10s
