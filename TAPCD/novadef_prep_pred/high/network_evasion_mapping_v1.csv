@@ -1,0 +1,8 @@
+evasion_tag,mapping_hint
+FastFlux,"(udp_tcp_traffic_ratio > 2) and (entropy_dst_ips > 0.8) and (dst_ip_change_frequency > 0.5)"
+DGA,"(entropy_dst_ips > 0.9) and (unique_dst_ips > 20) and (unique_dst_ips_group == 'External')"
+DomainFronting,"(most_frequent_dst_port == 443) and (ratio_fwd_to_bwd_packets < 0.3) and (byte_rate_per_sec > 100000)"
+DoH,"(most_frequent_dst_port == 443) and (protocol_distribution.str.contains('DNS', case=False, na=False))"
+JA3_Anomaly,"(protocol_distribution.str.contains('TLS', case=False, na=False)) and (syn_ack_ratio > 0.95) and (entropy_dst_ips > 0.7)"
+PaddingObfuscation,"(avg_packet_size < 80) and (variance_packet_size < 150) and (packet_rate_per_sec > 500)"
+RSTFlood,"(rst_syn_ratio > 2) and (rst_count > 1000)"

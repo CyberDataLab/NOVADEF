@@ -1,0 +1,112 @@
+name: novadef
+
+services:
+  # =============================
+  # 🟢 NEO4J
+  # =============================
+  neo4j:
+    image: neo4j:5.25
+    environment:
+      NEO4J_AUTH: neo4j/neo4jpass
+      NEO4J_server_bolt_advertised__address: neo4j:7687
+      NEO4J_dbms_default__listen__address: 0.0.0.0
+    volumes:
+      - neo4j_data:/data
+    ports:
+      - "7687:7687"   # Bolt
+      - "7474:7474"   # HTTP
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "echo > /dev/tcp/127.0.0.1/7687"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    networks: [kafka_net]
+
+  # =============================
+  # 🔵 STREAM LOW SERVICE
+  # =============================
+  novadef_stream_low:
+    build:
+      context: ./novadef_stream_low
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP: kafka_novadef:29092
+    command: ["python3", "stream_low.py",
+              "--bootstrap-servers", "kafka_novadef:29092",
+              "--in-topic", "snort_alerts",
+              "--out-topic", "flows_conditional_agg",
+              "--group-id", "stream-json-alerts",
+              "--linger-ms", "0",
+              "--mongo-uri", "mongodb://admin:admin123@mongodb:27017/?authSource=admin",
+              "--mongo-db", "flow_db",
+              "--mongo-coll", "flows"]
+    restart: unless-stopped
+    networks: [kafka_net]
+
+  # =============================
+  # 🔴 PREP PRED SERVICE
+  # =============================
+  novadef_prep_pred:
+    build:
+      context: ./novadef_prep_pred
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP: kafka_novadef:29092
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: neo4jpass
+    command: ["python3", "prep_pred.py",
+              "--bootstrap", "kafka_novadef:29092",
+              "--topic-in", "flows_conditional_agg",
+              "--topic-out", "profiles_out",
+              "--from-beginning",
+              "--models-dir", "models",
+              "--mapping", "high/network_observable_attack_mapping_v2.csv",
+              "--toolmap", "high/network_tool_mapping_v1.csv",
+              "--evasion", "high/network_evasion_mapping_v1.csv",
+              "--groups", "high/groups.csv",
+              "--campaigns", "high/campaigns.csv",
+              "--enterprise-attack", "high/enterprise-attack.json",
+              "--geoip", "GeoLite2-Country.mmdb"]
+    depends_on:
+      neo4j: { condition: service_healthy }
+    restart: unless-stopped
+    networks: [kafka_net]
+
+  # =============================
+  # 🟣 NEO4J INGESTER SERVICE
+  # =============================
+  novadef_neo4j_ingester:
+    build:
+      context: ./novadef_neo4j_ingester
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP: kafka_novadef:29092
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: neo4jpass
+    command: ["python3", "neo4j_ingester.py",
+              "--bootstrap", "kafka_novadef:29092",
+              "--topic", "profiles_out",
+              "--neo4j-uri", "bolt://neo4j:7687",
+              "--neo4j-user", "neo4j",
+              "--neo4j-pass", "neo4jpass"]
+    depends_on:
+      neo4j: { condition: service_healthy }
+    restart: unless-stopped
+    networks: [kafka_net]
+
+# =============================
+# 📦 VOLUMES PERSISTENTES
+# =============================
+volumes:
+  neo4j_data:
+
+# =============================
+# 🌐 RED EXTERNA (Kafka + Mongo)
+# =============================
+networks:
+  kafka_net:
+    external: true
+    name: launcher_default
