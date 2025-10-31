@@ -1,43 +1,12 @@
+alert tcp any any -> any 80 (
+    msg:"SQL Injection";
+    flow:to_server,established;
+    pcre:"/((\bunion(\s+all)?\s+select\b)|(\b(select|insert|update|delete|drop|create)\b.*\bfrom\b)|(\b(or|and)\b\s+[\'\"]?\d+[\'\"]?\s*=\s*[\'\"]?\d+[\'\"]?)|(--|%2d%2d|\/\*|%2f\*|%23))/i";
+    sid:1000101;
+    rev:3;
+    classtype:web-application-attack;
+)
+
 # Uncomment for initial testing
 # alert tcp any any <> any 443 (msg:" Alert: Traffic detected on port 443"; sid:1000001; rev:1;)
 
-# Portvars - adjust to services using other ports
-portvar HTTP_PORTS [80,8080,8000]
-portvar HTTPS_PORTS [443,8443]
-
-# 1001xxx -> local scope for SQLi
-# Rule 1: UNION SELECT (content first, then pcre)
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - UNION SELECT in HTTP request"; flow:to_server,established; http_uri; content:"union"; nocase; http_client_body; content:"select"; nocase; within:80; pcre:"/union\s+select/i"; sid:1001001; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 2: Boolean-based injection OR 1=1
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - boolean-based injection (OR 1=1)"; flow:to_server,established; http_uri; content:"or"; nocase; http_client_body; pcre:"/(\bor\b)\s*['\"]?\d+['\"]?\s*=\s*['\"]?\d+['\"]?/i"; sid:1001002; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 3: Time-based functions (sleep, pg_sleep, waitfor delay, benchmark)
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - time-based injection (sleep/pg_sleep/waitfor)"; flow:to_server,established; http_client_body; content:"sleep"; nocase; pcre:"/(sleep|pg_sleep|benchmark|waitfor\s+delay)\s*\(/i"; sid:1001003; rev:1; classtype:attempted-dos; metadata:service http;))
-
-# Rule 4: Information_schema access
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - information_schema access attempt"; flow:to_server,established; http_client_body; content:"information_schema"; nocase; sid:1001004; rev:1; classtype:attempted-recon; metadata:service http;)
-
-# Rule 5: Stacked queries (semicolon + SQL keyword)
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - stacked queries (semicolon)"; flow:to_server,established; http_client_body; content:";"; pcre:"/;\s*(select|update|insert|delete|drop|create)\b/i"; sid:1001005; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 6: Quote followed by SQL comment (e.g. ' --)
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - quote then comment (possible injection)"; flow:to_server,established; http_client_body; pcre:"/(['\"]).{0,120}(--|#|\/\*)/i"; sid:1001006; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 7: Hex-encoded payloads with SQL keywords
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - hex-encoded SQL payload"; flow:to_server,established; http_client_body; pcre:"/0x[0-9A-Fa-f]{2,}.*\b(select|union|insert)\b/i"; sid:1001007; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 8: CONCAT / GROUP_CONCAT functions
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - concat/group_concat usage"; flow:to_server,established; http_client_body; pcre:"/\b(group_concat|concat)\s*\(/i"; sid:1001008; rev:1; classtype:attempted-recon; metadata:service http;))
-
-# Rule 9: credential-enumeration keywords
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - possible credential enumeration (users/passwd)"; flow:to_server,established; http_client_body; pcre:"/\b(users|passwd|password|mysql\.user)\b/i"; sid:1001009; rev:1; classtype:attempted-recon; metadata:service http;)
-
-# Rule 10: SELECT ... FROM close (content+within) 
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - SELECT and FROM close together"; flow:to_server,established; http_client_body; content:"select"; nocase; content:"from"; nocase; within:200; sid:1001010; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 11: URL-encoded operators in URI (ej: %27 or %20or%20)
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - URL-encoded logical operator detected in URI"; flow:to_server,established; http_uri; pcre:"/(%27|')\s*(%6F%72|%6f%72|or)\b/i"; sid:1001011; rev:1; classtype:attempted-admin; metadata:service http;)
-
-# Rule 12: Extensive combinatorics (last resort)
-alert tcp any any -> any $HTTP_PORTS (msg:"SQLi - suspicious SQL keywords combination"; flow:to_server,established; http_client_body; pcre:"/(select|union|insert|update|delete|drop|create).{0,200}(from|where|into|values)/is"; sid:1001012; rev:1; classtype:attempted-admin; metadata:service http;)
