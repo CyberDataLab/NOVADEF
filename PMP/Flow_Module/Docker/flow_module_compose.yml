@@ -5,6 +5,9 @@ services:
 
   flow_module:
     image: flow_module_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Flow_Module/Docker/Dockerfiles/flow_module.dockerfile
     container_name: flow_module_novadef
     profiles: ["flow_module.flow_module"]
     restart: unless-stopped

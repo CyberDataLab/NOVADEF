@@ -19,11 +19,11 @@ RUN mkdir -p /home/Flow_Module \
     /home/Flow_Module/Preinstall/Updated_Python \
     /home/Flow_Module/Preinstall/CICFlowMeter
 
-COPY ./Flow_Module/Scripts/JSON2PCAP/. /home/Flow_Module/Scripts/Parsing/JSON2PCAP
-COPY ./Flow_Module/Scripts/install_python3.12.sh /home/Flow_Module/Preinstall/Updated_Python
-COPY ./Flow_Module/Scripts/Automatic_cicflowmeter/. /home/Flow_Module/Preinstall/CICFlowMeter
-COPY ./Flow_Module/Docker/Entrypoints/entrypoint_flow_module.py /home/Flow_Module
-COPY ./Flow_Module/Scripts/kafka_io.py /home/Flow_Module/Scripts
+COPY Flow_Module/Scripts/JSON2PCAP/. /home/Flow_Module/Scripts/Parsing/JSON2PCAP
+COPY Flow_Module/Scripts/install_python3.12.sh /home/Flow_Module/Preinstall/Updated_Python
+COPY Flow_Module/Scripts/Automatic_cicflowmeter/. /home/Flow_Module/Preinstall/CICFlowMeter
+COPY Flow_Module/Docker/Entrypoints/entrypoint_flow_module.py /home/Flow_Module
+COPY Flow_Module/Scripts/kafka_io.py /home/Flow_Module/Scripts
 
 #Installing python3.12 using the script
 RUN chmod +x /home/Flow_Module/Preinstall/Updated_Python/install_python3.12.sh \

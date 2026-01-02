@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'device_autodiscovery'
+    metrics_path: /metrics
+    http_sd_configs:
+      - url: http://discovery-agent:8000/sd  #Endpoint to discover the IPs that exoses their metrics using an endpoint with device_info container
+        refresh_interval: 30s
+

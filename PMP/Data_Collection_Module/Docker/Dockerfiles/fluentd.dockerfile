@@ -23,10 +23,9 @@ RUN apt-get update && \
 # - fluent-plugin-prometheus 1.8.6: to expose an endpoint with metrics in Prometheus format. Other versions seem to give errors.
 # - fluent-plugin-filter_typecast: modern version of how types are casted. It will be used to pass metrics from string to float.
 RUN gem install fluent-plugin-systemd fluent-plugin-docker_metadata_filter --no-document
-RUN gem install fluent-plugin-prometheus -v '2.2.0' --no-document
+# Prometheus use -v '2.2.0'
+RUN gem install fluent-plugin-prometheus --no-document
 RUN gem install fluent-plugin-filter_typecast --no-document
-
-
 
 RUN mkdir -p /fluentd/log
 RUN mkdir -p /fluentd/log/out && chown -R root:root /fluentd/log
@@ -34,12 +33,11 @@ RUN mkdir -p /fluentd/etc
 RUN mkdir -p /fluentd/scripts
 
 # Entrypoint and auxiliary scripts
-COPY ./Data_Collection_Module/Configuration_Files/fluent.conf /fluentd/etc/
-COPY ./Data_Collection_Module/Scripts/health_metrics.py /fluentd/scripts/
-COPY ./Data_Collection_Module/Docker/Entrypoints/entrypoint_fluentd.py /usr/local/bin/entrypoint_fluentd.py
+COPY Data_Collection_Module/Configuration_Files/fluent.conf /fluentd/etc/
+COPY Data_Collection_Module/Docker/Entrypoints/entrypoint_fluentd.py /usr/local/bin/entrypoint_fluentd.py
 
 # Permissions
 RUN chown root:root /fluentd/etc/fluent.conf 
-RUN chmod +x /fluentd/scripts/health_metrics.py /usr/local/bin/entrypoint_fluentd.py
+RUN chmod +x /usr/local/bin/entrypoint_fluentd.py
 
 ENTRYPOINT ["/usr/bin/python3", "/usr/local/bin/entrypoint_fluentd.py"]

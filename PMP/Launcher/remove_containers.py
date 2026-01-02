@@ -1,28 +1,39 @@
-from pathlib import Path
 import subprocess
+import sys
+from pathlib import Path
 
-def executing_command(command):
-    try:
-        result = subprocess.run(command, shell=True, check=True, text=True, capture_output=True)
-        print(f"Result of {command}: \n {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing the command {command}: {e}")
-        print(f"Error output: {e.stderr}")
+def remove_containers():
+    """
+    Stops and removes containers, networks, and volumes for the active profiles defined in the .env file.
+    """
+    launcher_dir = Path(__file__).parent.resolve()
+    env_file = launcher_dir / ".env"
+    compose_file = launcher_dir / "docker-compose.yml"
 
-if __name__ == "__main__":
-    #docker stop $(docker ps -a -q), docker rm $(docker ps -a -q) insted of docker kill
-    PFD = Path(__file__).resolve().parent.parent # Project Folder Directory
-    command_list = [
-        "docker kill \
-            kafka_novadef filebeat_novadef \
-            fluentd_novadef telegraf_novadef tshark_novadef falco_novadef  \
-            alert_module_novadef \
-            flow_module_novadef \
-            mongodb_novadef ",
-        "docker container prune -f",
-        "docker volume prune -f",
-        f"rm -r {PFD}/Results/"
+    if not env_file.exists():
+        print(f"⚠️  .env file not found in: {launcher_dir}")
+        print("   Cannot determine PFD variables or active profiles. Aborting safety.")
+        sys.exit(1)
+
+    print(f"🧹 Starting complete cleanup (Containers + Networks + Volumes)...")
+    print(f"   (Using configuration from: {env_file})")
+
+    cmd = [
+        "docker", "compose",
+        "-f", str(compose_file),
+        "--env-file", str(env_file),
+        "down",
+        "--volumes",
+        "--remove-orphans"
     ]
 
-    for command in command_list:
-        executing_command(command)
+    try:
+        subprocess.run(cmd, check=True)
+        print("\n✅ Cleanup completed successfully.")
+        
+    except subprocess.CalledProcessError:
+        print("\n❌ Error: Cleanup failed. Please check your docker permissions.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    remove_containers()

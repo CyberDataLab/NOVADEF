@@ -9,4 +9,3 @@ alert tcp any any -> any 80 (
 
 # Uncomment for initial testing
 # alert tcp any any <> any 443 (msg:" Alert: Traffic detected on port 443"; sid:1000001; rev:1;)
-

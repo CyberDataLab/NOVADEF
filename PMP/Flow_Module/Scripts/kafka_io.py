@@ -19,7 +19,7 @@ from confluent_kafka import (
 )
 
 # -----------------------------
-# Defaults (configurables por env)
+# Defaults (configurables for env)
 # -----------------------------
 
 def get_bootstrap(override: Optional[str] = None) -> str:

@@ -7,5 +7,6 @@ include:
   - path: ${PFD}/Data_Collection_Module/Docker/data_collection_module_compose.yml
   - path: ${PFD}/Flow_Module/Docker/flow_module_compose.yml
   - path: ${PFD}/Databases_module/Docker/db_module_compose.yml
+  - path: ${PFD}/Aggregation_Normalisation_Module/Docker/aggregation_normalisation_compose.yml
 
 # Add more paths if necessary.

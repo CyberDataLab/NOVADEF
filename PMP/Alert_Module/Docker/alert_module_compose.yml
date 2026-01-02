@@ -4,9 +4,11 @@
 services:
   alert_module:
     image: alert_module_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Alert_Module/Docker/Dockerfiles/alert_module.dockerfile
     container_name: alert_module_novadef
     profiles: ["alert_module.alert_module"]
-    restart: unless-stopped
     depends_on:
       kafka_novadef:
         condition: service_healthy
@@ -16,5 +18,11 @@ services:
     # If host.docker.internal is used in Linux:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ${PFD}/Results/Alerts:/home/Alert_Module/Alerts
+    restart: unless-stopped

@@ -5,36 +5,26 @@ import subprocess
 import sys
 import threading
 import time
+import fcntl
+import struct
+
 from kafka_io import KafkaLineConsumer, KafkaAlertProducer, get_bootstrap
-from queue import Queue, Empty, Full
 from pymongo import MongoClient, errors
 
 # === FILE CONFIG ===
-PFD = Path(__file__).resolve().parent #/home/Alert_Module in container
-
-OUTPUT_DIR = str(PFD / "Parsing" / "PCAP_Files")
-J2P_PATH = str(PFD / "Parsing" / "JSON2PCAP" /"json2pcap.py")
+PFD = Path(__file__).resolve().parent  # /home/Alert_Module in container
 
 SNORT_CONFIG_DIR = PFD / "Snort_configuration"
 SNORT_LUA = str(SNORT_CONFIG_DIR / "lua" / "snort.lua")
 SNORT_RULES = str(SNORT_CONFIG_DIR / "Rules" / "alert_rules.rules")
 ALERT_DIR = str(PFD / "Alerts")
 ALERT_FILE = "alert_json"
+ALERT_PATH = os.path.join(ALERT_DIR, f"{ALERT_FILE}.txt")
 
-# === KAFKA CONFIG ===
+# ====== KAFKA CONFIG ======
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "alert-module-v1")
 KAFKA_TOPIC_IN = os.getenv("KAFKA_TOPIC_IN", "tshark_traces")
 KAFKA_TOPIC_OUT = os.getenv("KAFKA_TOPIC_OUT", "snort_alerts")
-
-# === ROTATION ===
-PCAP_ROTATE_SIZE_MB = 2 * 1024 * 1024   # 200 MB
-ALERT_ROTATE_SIZE_MB = 200 * 1024       #* 1024 # 200KB
-
-
-# === WRITER CONTROL ===
-PACKET_QUEUE_MAX = 100000 # Queue limit
-WRITER_FLUSH_EVERY = 100  # flush every packet number
-WATCHDOG_STALL_SECS = 120 # inactivity watchdog
 
 # === SNORT CONFIG ===
 SNORT_BASE_CMD = [
@@ -45,9 +35,14 @@ SNORT_BASE_CMD = [
     "--lua",
     f"{ALERT_FILE} = {{file = true, fields = 'msg timestamp pkt_num proto pkt_gen pkt_len dir src_ap dst_ap rule action'}}",
     "-l", ALERT_DIR,
-    "-k", "none"
- ]
+    "-k", "none",
+]
 
+# ====== CONSTANTS TUN/TAP ======
+TAP_IFACE = os.getenv("ALERT_TAP_IFACE", "tap0")
+TUNSETIFF = 0x400454ca
+IFF_TAP = 0x0002
+IFF_NO_PI = 0x1000
 
 def ensure_mode_644(path: str):
     """
@@ -62,326 +57,305 @@ def ensure_mode_644(path: str):
     except Exception as e:
         print(f"⚠️  Could not ensure 0644 on {path}: {e}")
 
-def truncate_alert_file(alert_path:str):
+
+def truncate_alert_file(alert_path: str):
     """
     Truncate the alert file to avoid duplicates.
-    """
+    """    
     try:
+        os.makedirs(os.path.dirname(alert_path), exist_ok=True)
         with open(alert_path, "w"):
             pass
         print(f"🧹 Truncated {alert_path}")
     except Exception as e:
         print(f"⚠️ Could not truncate {alert_path}: {e}")
 
-def save_to_database(alert_path, alerts_collection):
+
+def insert_alert_line(alerts_collection, line: str):
     """
-    Read alerts and upload them to MongoDB
-    """ 
-    if not os.path.exists(alert_path):
-        print(f"⚠️ Alert file not found: {alert_path}")
+    Parses a single JSON-formatted alert line and inserts it into MongoDB.
+    Handles JSON decoding issues, duplicate entries, and database timeouts.
+    """
+    try:
+        alert_doc = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"⚠️ Error decoding JSON alert line: {line}")
         return
 
-    with open(alert_path, "r") as data:
-        lines = data.readlines()
+    try:
+        alerts_collection.insert_one(alert_doc)
+    except errors.DuplicateKeyError:
+        pass
+    except errors.ServerSelectionTimeoutError:
+        print("❌ MongoDB connection timeout while inserting alert. Will continue...")
+    except Exception as e:
+        print(f"❌ Error inserting alert: {e}")
 
-    if not lines:
-        print(f"⚠️ File {alert_path} empty")
-        return
 
-    inserted, duplicates, _errors = 0, 0, 0
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            alert_doc = json.loads(line)
-            alerts_collection.insert_one(alert_doc)
-            inserted += 1
-        except json.JSONDecodeError:
-            print(f"⚠️ Error decoding JSON line: {line}")
-            _errors += 1
-        except errors.DuplicateKeyError:
-            duplicates += 1
-        except errors.ServerSelectionTimeoutError:
-            print("❌ MongoDB connection timeout. Retrying later...")
-            _errors += 1
-        except Exception as e:
-            print(f"❌ Error inserting alert: {e}")
-            _errors += 1
-
-    print(f"✅ Inserted {inserted} new alerts, skipped {duplicates} duplicates and errors {_errors}.")
-
-def run_snort_on_pcap(pcap_path, producer, alerts_collection):
+def open_tap_interface(ifname: str) -> int:
     """
-    Run Snort3 in a separate thread on a rotated PCAP.
-    Publish in Kafka topic the new alerts.
-    Save the alerts in the historical database.
-    Truncate the file to clean the alert file.
+    Creates or opens a TAP interface using /dev/net/tun and returns its file descriptor.
+    Configures the interface in TAP mode without packet information (IFF_NO_PI)
+    and brings it up using system network tools.
+    Requires /dev/net/tun access and NET_ADMIN capabilities.
     """
-    alert_path = os.path.join(ALERT_DIR,f"{ALERT_FILE}.txt")
+    try:
+        tun_fd = os.open("/dev/net/tun", os.O_RDWR)
+    except OSError as e:
+        print(f"❌ Cannot open /dev/net/tun: {e}")
+        sys.exit(1)
 
-    cmd = SNORT_BASE_CMD + ["-r", pcap_path]
-    print(f"⚡ Running Snort3 on {pcap_path}")
+    ifr = struct.pack("16sH", ifname.encode(), IFF_TAP | IFF_NO_PI)
+    try:
+        fcntl.ioctl(tun_fd, TUNSETIFF, ifr)
+    except OSError as e:
+        print(f"❌ TUNSETIFF failed for {ifname}: {e}")
+        os.close(tun_fd)
+        sys.exit(1)
 
+    # Upping the TAP interface
+    try:
+        subprocess.run(["ip", "link", "set", ifname, "up"], check=True)
+        print(f"✅ TAP interface {ifname} is up (fd={tun_fd})")
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Could not bring {ifname} up: {e}")
+
+    return tun_fd
+
+
+def start_snort_live(ifname: str):
+    """
+    Launches Snort3 in live-capture mode using the specified interface.
+    Executes Snort with the predefined configuration and rule set,
+    redirecting output streams to background logging threads.
+    Returns the running subprocess handle for lifecycle management.
+    """
+    cmd = SNORT_BASE_CMD + ["-i", ifname]
+    print(f"🚀 Starting Snort3 live on interface {ifname}")
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
+        bufsize=1,
     )
 
-    '''Only for debugging
-    def log_output(stream, prefix):
+    def _log_stream(stream, prefix):
         for line in stream:
             print(f"[{prefix}] {line.strip()}")
-    #threading.Thread(target=log_output, args=(proc.stdout, f"snort-out-{os.path.basename(pcap_path)}"), daemon=True).start()
-    #threading.Thread(target=log_output, args=(proc.stderr, f"snort-err-{os.path.basename(pcap_path)}"), daemon=True).start()
-    '''
-    proc.wait()
-    print(f"✅ Snort3 ended with {pcap_path}")
 
-    #Read alert_parth and send it directly to Kafka with the producer.
-    if os.path.exists(alert_path):
-        ensure_mode_644(alert_path)
-        with open(alert_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = [ln for ln in f if ln.strip()]
-        if not lines:
-            print(f"ℹ️ No alerts to publish in {alert_path}")
-            return
-        #Publishing Kafka topic
-        try:
-            producer.produce_lines(lines)
-        except Exception as e:
-            print(f"❌ Error publishing to Kafka: {e}")
-            return
-    
-        # Saving in historical database
-        if alerts_collection is not None:
-            try:
-                save_to_database(alert_path=alert_path, alerts_collection=alerts_collection) 
-            except Exception as e:
-                print(f"❌ Error saving alerts in database: {e}")
-                return
-        
-        truncate_alert_file(alert_path=alert_path)
+    threading.Thread(target=_log_stream, args=(proc.stdout, "snort-out"), daemon=True).start()
+    threading.Thread(target=_log_stream, args=(proc.stderr, "snort-err"), daemon=True).start()
 
-    else:
-        print(f"⚠️ Snort3 did not detect any alerts in {alert_path}")
-        
-class Json2PcapWorker:
+    return proc
+
+
+
+def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_collection):
     """
-    JSON2PCAP process to parse JSON -> PCAP
+    Continuously monitors the Snort alert file for newly appended lines.
+    Each new alert is forwarded to Kafka and optionally stored in MongoDB.
+    Implements buffered Kafka publishing to reduce overhead.
     """
-    def __init__(self, trace_path, j2p_path):
-        self.trace_path = trace_path
-        self.j2p_path = j2p_path
-        self.proc = None
-        self.first_packet = True
-        self._start_proc()
+    os.makedirs(os.path.dirname(alert_path), exist_ok=True)
+    if not os.path.exists(alert_path):
+        open(alert_path, "a").close()
+    ensure_mode_644(alert_path)
 
-    def _start_proc(self):
-        """
-        Launching JSON2PCAP with data intake via stdin and output to file.
-        """
-        cmd = [sys.executable, self.j2p_path, "-i", "-o", self.trace_path]
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-        self.proc.stdin.write("[")
-        self.proc.stdin.flush()
-        threading.Thread(target=self._log_stderr, daemon=True).start()
+    print(f"📡 Starting alerts tail on {alert_path}")
+    with open(alert_path, "r", encoding="utf-8", errors="replace") as f:
+        f.seek(0, os.SEEK_END) # Go to the end of the file (only new lines)
 
-    def _log_stderr(self):
-        """
-        Provides useful JSON2PCAP error outputs when debugging.
-        """
-        for line in self.proc.stderr:
-            print(f"[JSON2PCAP] {line.strip()}")
+        buffer = []
+        last_flush = time.time()
+        FLUSH_INTERVAL = 1.0  # seconds
 
-    def write_packet(self, packet_dict):
-        """
-        Writes an object to the JSON array.
-        """
-        try:
-            if not self.first_packet:
-                self.proc.stdin.write(",")
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.5) # Waiting to receive new alerts
             else:
-                self.first_packet = False
-            json.dump(packet_dict, self.proc.stdin, ensure_ascii=False)
-        except Exception as e:
-            print(f"❌ Error writing to JSON2PCAP: {e}")
+                line = line.strip()
+                if not line:
+                    continue
 
-    def close(self):
-        """
-        Close the process and the JSON array.
-        """
-        try:
-            self.proc.stdin.write("]")
-            self.proc.stdin.flush()
-            self.proc.stdin.close()
-        except Exception as e:
-            print(f"❌ Error closing stdin: {e}")
-        self.proc.wait()
-
-
-class PacketWriter:
-    """
-    Manage file rotation and launch Snort at each rotation (with queue and backoff).
-    """
-    def __init__(self, output_dir, j2p_path, rotate_size_mb, producer, alerts_collection):
-        self.output_dir = output_dir
-        self.j2p_path = j2p_path
-        self.rotate_size = rotate_size_mb
-        self.file_index = 0
-        self.j2p_worker = None
-        self.producer = producer
-        self.alerts_collection = alerts_collection
-        os.makedirs(output_dir, exist_ok=True)
-
-        self.q = Queue(maxsize=PACKET_QUEUE_MAX)
-        self._last_write_ts = time.time()
-        self._written_since_flush = 0
-        self._running = True
-        threading.Thread(target=self._writer_loop, daemon=True).start()
-
-        self._new_file()
-
-    def enqueue_packet(self, packet_dict, ack_fn=None):
-        """
-        Queue with short retries so as not to block the consumer thread.
-        """
-        while self._running:
-            try:
-                self.q.put((packet_dict, ack_fn), timeout=0.1)
-                return
-            except Full:
-                # short backoff; the writer will drain the queue
-                pass
-
-    def _writer_loop(self):
-        """
-        Thread that writes packets to json2pcap and rotates if necessary.
-        """
-        while self._running:
-            try:
-                packet_dict, ack_fn = self.q.get(timeout=1)
-            except Empty:
-                if time.time() - self._last_write_ts > WATCHDOG_STALL_SECS:
-                    print("⏱️  Watchdog: no recent writing to PCAP", flush=True)
-                continue
-
-            try:
-                self.j2p_worker.write_packet(packet_dict)
-                self._written_since_flush += 1
-                if self._written_since_flush >= WRITER_FLUSH_EVERY:
+                #  Sending to Kafka (in batches for efficiency)
+                buffer.append(line)
+                if time.time() - last_flush >= FLUSH_INTERVAL:
                     try:
-                        self.j2p_worker.proc.stdin.flush()
-                    except Exception:
-                        pass
-                    self._written_since_flush = 0
-
-                trace_file = self.j2p_worker.trace_path
-                if os.path.exists(trace_file) and os.path.getsize(trace_file) >= self.rotate_size:
-                    self._new_file()
-
-                self._last_write_ts = time.time()
-
-                if ack_fn:
-                    try:
-                        ack_fn()
+                        producer.produce_lines(buffer)
                     except Exception as e:
-                        print(f"⚠️  Error in ack_fn: {e}", flush=True)
-            except Exception as e:
-                print(f"❌ Error in writer_loop: {e}", flush=True)
+                        print(f"❌ Error publishing alerts to Kafka: {e}")
+                    buffer.clear()
+                    last_flush = time.time()
 
-    def _new_file(self):
-        """
-        Creates the JSON2PCAP stream, as well as a new PCAP file. 
-        If one is already open, it closes it and launches Snort on it using new threads.
-        """
-        if self.j2p_worker:
-            old_trace = self.j2p_worker.trace_path
-            threading.Thread(target=self.j2p_worker.close, daemon=True).start()
-            threading.Thread(target=self._run_snort_and_delete, args=(old_trace,), daemon=True).start()
+                # Sending alerts to MongoDB
+                if alerts_collection is not None:
+                    insert_alert_line(alerts_collection, line)
 
-        trace_path = os.path.join(self.output_dir, f"trace_{self.file_index:02d}.pcapng")
-        print(f"📂 New file opened: {trace_path}")
-        self.j2p_worker = Json2PcapWorker(trace_path, self.j2p_path)
 
-        if self.file_index < 9:
-            self.file_index += 1
-        else:
-            self.file_index = 0
+def rebuild_frame_from_layers(layers):
+    """
+    Reconstructs an Ethernet frame from dissected protocol layer fields
+    when a raw frame is not available. Supports Ethernet, IP, TCP/UDP,
+    and data payload assembly. Returns None if mandatory fields are missing.
+    """
+    try:
+        # Ethernet header
+        dst = layers.get("eth_dst_raw")
+        src = layers.get("eth_src_raw")
+        eth_type = layers.get("eth_type_raw")
 
-    def write_packet(self, packet_dict):
-        """
-        Write the network packet in JSON and rotate the PCAP if it exceeds the size limit.
-        """
-        self.j2p_worker.write_packet(packet_dict)
-        trace_file = self.j2p_worker.trace_path
-        if os.path.exists(trace_file) and os.path.getsize(trace_file) >= self.rotate_size:
-            self._new_file()
+        if not (dst and src and eth_type):
+            print("⚠️ Cannot rebuild frame: missing ethernet fields")
+            return None
 
-    def close(self):
-        """
-        Closes the PCAP file and analyses it before it is rotated.
-        Used only when the general process is about to be completed and the PCAP size 
-        does not reach the limit for rotation.
-        """
-        if self.j2p_worker:
-            old_trace = self.j2p_worker.trace_path
-            self.j2p_worker.close()
-            threading.Thread(target=self._run_snort_and_delete, args=(old_trace,), daemon=True).start()
-            self._running = False
+        if isinstance(dst, list): dst = dst[0]
+        if isinstance(src, list): src = src[0]
+        if isinstance(eth_type, list): eth_type = eth_type[0]
 
-    def _run_snort_and_delete(self, old_trace):
-        """
-        Start Snort to analyse the network traces.
-        Delete the PCAP file when finished with it.
-        """
-        run_snort_on_pcap(old_trace, self.producer, self.alerts_collection)
+        eth_header = bytes.fromhex(dst + src + eth_type)
+
+        # IP raw
+        ip_raw = layers.get("ip_raw")
+        if isinstance(ip_raw, list):
+            ip_raw = ip_raw[0]
+        ip_bytes = bytes.fromhex(ip_raw) if ip_raw else b""
+
+        # TCP raw
+        tcp_raw = layers.get("tcp_raw")
+        if isinstance(tcp_raw, list):
+            tcp_raw = tcp_raw[0]
+        tcp_bytes = bytes.fromhex(tcp_raw) if tcp_raw else b""
+
+        # UDP raw
+        udp_raw = layers.get("udp_raw")
+        if isinstance(udp_raw, list):
+            udp_raw = udp_raw[0]
+        udp_bytes = bytes.fromhex(udp_raw) if udp_raw else b""
+
+        # Payload
+        payload = b""
+        pay = layers.get("data_data")
+        if pay:
+            if isinstance(pay, list):
+                pay = pay[0]
+            try:
+                payload = bytes.fromhex(pay)
+            except Exception:
+                payload = b""
+
+        # Final frame 
+        frame = eth_header + ip_bytes + tcp_bytes + udp_bytes + payload
+
+        if len(frame) == 0:
+            print("⚠️ Rebuilt frame is empty")
+            return None
+
+        return frame
+
+    except Exception as e:
+        print(f"❌ Error rebuilding frame: {e}")
+        return None
+
+
+
+def extract_frame_bytes(packet_dict) -> bytes:
+    """
+    Extracts raw frame bytes from a packet dictionary.
+    Prefers the 'frame_raw' field when present; otherwise attempts
+    to reconstruct the frame from individual protocol layer fields.
+    Returns None when extraction or reconstruction fails.
+    """
+    try:
+        layers = packet_dict["_source"]["layers"]
+    except Exception:
+        print("⚠️ Missing _source.layers in packet")
+        return None
+
+    frame_raw = layers.get("frame_raw")
+    if frame_raw:
         try:
-            os.remove(old_trace)
-            print(f"✅ File {old_trace} successfully deleted")
+            if isinstance(frame_raw, list):
+                frame_raw = frame_raw[0]
+            return bytes.fromhex(frame_raw)
         except Exception as e:
-            print(f"❌ Error deleting {old_trace}: {e}")
+            print(f"⚠️ Error converting frame_raw to bytes: {e}")
+
+    # Reconstruction
+    print("ℹ️ Rebuilding frame: no frame_raw present")
+    frame = rebuild_frame_from_layers(layers)
+    if frame:
+        return frame
+
+    print("❌ Could not rebuild frame, packet skipped")
+    return None
+
+
+def inject_packet_to_tap(packet_dict, tap_fd: int):
+    """
+    Writes an Ethernet frame into a TAP interface using its file descriptor.
+    Uses direct write operations to avoid limitations of raw sockets or Scapy.
+    Skips packets that do not yield valid frame bytes.
+    """
+    frame_bytes = extract_frame_bytes(packet_dict)
+    if not frame_bytes:
+        return
+
+    try:
+        os.write(tap_fd, frame_bytes)
+    except OSError as e:
+        print(f"❌ Error writing frame to TAP fd={tap_fd}: {e}")
+
 
 
 def main():
+    """
+    Initializes MongoDB, Kafka, TAP interface, and Snort live mode.
+    Spawns background workers for alert tailing and packet injection.
+    Consumes NDJSON packet streams from Kafka and forwards them to TAP.
+    Ensures graceful cleanup of resources on exit.
+    """
 
     mongo_uri = os.getenv("MONGO_URI", "mongodb://admin:admin123@mongodb:27017/")
-    client = MongoClient(mongo_uri)
-    db = client["snort_db"]
-    alerts_collection = db["alerts"]
+    try:
+        client = MongoClient(mongo_uri)
+        db = client["snort_db"]
+        alerts_collection = db["alerts"]
 
-    existing_indexes = alerts_collection.index_information()
-    if "timestamp_1" not in existing_indexes:
-        try:
-            alerts_collection.create_index([("timestamp", 1), ("msg", 1), ("src_ap", 1)], unique=True)
-            print("✅ Unique index created on field 'timestamp'")
-        except errors.OperationFailure as e:
-            print(f"⚠️ Could not create unique index on 'timestamp': {e}")
-    else:
-        print("ℹ️ Unique index on 'timestamp' already exists.")
+        existing_indexes = alerts_collection.index_information()
+        if "timestamp_1" not in existing_indexes:
+            try:
+                alerts_collection.create_index(
+                    [("timestamp", 1), ("msg", 1), ("src_ap", 1)],
+                    unique=True
+                )
+                print("✅ Unique index created on fields 'timestamp, msg, src_ap'")
+            except errors.OperationFailure as e:
+                print(f"⚠️ Could not create unique index: {e}")
+        else:
+            print("ℹ️ Unique index already exists on ('timestamp','msg','src_ap').")
+    except Exception as e:
+        print(f"❌ Error connecting to MongoDB: {e}")
+        alerts_collection = None
+
 
     kafka_producer = KafkaAlertProducer(
         topic=KAFKA_TOPIC_OUT,
         bootstrap=get_bootstrap()
     )
 
-    writer = PacketWriter(
-        output_dir=OUTPUT_DIR,
-        j2p_path=J2P_PATH,
-        rotate_size_mb=PCAP_ROTATE_SIZE_MB,
-        producer=kafka_producer,
-        alerts_collection = alerts_collection
-    )
+    tap_fd = open_tap_interface(TAP_IFACE)
+
+    truncate_alert_file(ALERT_PATH)
+
+    snort_proc = start_snort_live(TAP_IFACE)
+
+    threading.Thread(
+        target=alerts_tail_loop,
+        args=(ALERT_PATH, kafka_producer, alerts_collection),
+        daemon=True
+    ).start()
 
     consumer = KafkaLineConsumer(
         topic=KAFKA_TOPIC_IN,
@@ -390,10 +364,12 @@ def main():
         bootstrap=get_bootstrap()
     )
 
+    print("📥 Starting Kafka consume loop (network traces) -> TAP interface.")
     for msg, line in consumer.iter_records():
         if not line:
             consumer.commit_msg(msg)
             continue
+
         line = line.strip()
         try:
             packet_dict = json.loads(line)
@@ -402,15 +378,21 @@ def main():
             consumer.commit_msg(msg)
             continue
 
- 
-        writer.enqueue_packet(
-            packet_dict,
-            ack_fn=lambda m=msg: consumer.commit_msg(m)
-        )
+        # Injecting directly into the TAP interface
+        inject_packet_to_tap(packet_dict, tap_fd)
 
-    writer.close()
+        consumer.commit_msg(msg)
+
+    try:
+        snort_proc.terminate()
+    except Exception:
+        pass
+
+    try:
+        os.close(tap_fd)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
     main()
-

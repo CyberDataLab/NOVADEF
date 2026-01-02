@@ -1,0 +1,127 @@
+services:
+
+  init-prometheus:
+    image: busybox:latest
+    container_name: init_prometheus
+    profiles: ["aggregation_module.prometheus"]
+    # Change the owner of the /prometheus folder to user 65534 (nobody)
+    command: sh -c "chown -R 65534:65534 /prometheus"
+    volumes:
+      - ${PFD}/Results/prometheus_data:/prometheus
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus:v3.8.0
+    container_name: prometheus_server_novadef
+    profiles: ["aggregation_module.prometheus"]
+    depends_on:
+      init-prometheus:
+        condition: service_completed_successfully
+      discovery-agent: 
+        condition: service_started
+    environment:
+      - TZ=UTC
+    extra_hosts: # Write a line in /etc/hosts of the Prometheus container to link the discovery agent with the host's IP
+      - "discovery-agent:host-gateway"
+    volumes:
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/rules:/etc/prometheus/rules:ro
+      - ${PFD}/Results/prometheus_data:/prometheus # Current owner of prometheus_data is user 65534 (nobody)
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  discovery-agent:
+    image: discovery_agent_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Aggregation_Normalisation_Module/Docker/Dockerfiles/discovery_agent.dockerfile
+    container_name: discovery_agent_novadef
+    profiles: ["aggregation_module.prometheus"] #Same profile because Prometheus needs this microservice
+    environment:
+      - SCAN_PORT="9999"
+      - SCAN_TIMEOUT="0.2"
+      - TZ=UTC
+    network_mode: "${NETWORK_MODE}"
+    volumes:
+      - ${PFD}/Aggregation_Normalisation_Module/Scripts:/opt/discovery
+    restart: unless-stopped
+
+  init-opensearch:
+    image: busybox:latest
+    container_name: init_opensearch
+    profiles: ["aggregation_module.opensearch"]
+    network_mode: "${NETWORK_MODE}"
+    command: sh -c "chown -R 1000:1000 /usr/share/opensearch/data"
+    volumes:
+      - ${PFD}/Results/opensearch_data:/usr/share/opensearch/data
+    restart: "no"
+
+  opensearch:
+    image: opensearchproject/opensearch:3.4.0
+    container_name: opensearch_node_novadef
+    profiles: ["aggregation_module.opensearch"]
+    depends_on:
+      init-opensearch:
+        condition: service_completed_successfully
+    environment:
+      - cluster.name=novadef-cluster
+      - node.name=opensearch
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD}
+    network_mode: "${NETWORK_MODE}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ${PFD}/Results/opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    restart: unless-stopped
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:3.4.0
+    container_name: opensearch_dashboards_novadef
+    profiles: ["aggregation_module.opensearch"]
+    ports:
+      - "5601:5601"
+    environment:
+      - 'OPENSEARCH_HOSTS=["https://${OPENSEARCH_HOST}:9200"]'
+      - OPENSEARCH_USERNAME=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+    network_mode: "${NETWORK_MODE}"
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  logstash:
+    image: opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0
+    container_name: logstash_novadef
+    profiles: ["aggregation_module.opensearch"]
+    volumes:
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Logstash/pipeline.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    environment:
+      - "LS_JAVA_OPTS=-Xmx256m -Xms256m"
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST}
+    network_mode: "${NETWORK_MODE}"
+    extra_hosts:
+      - "kafka_novadef-node1.lan:host-gateway"
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:

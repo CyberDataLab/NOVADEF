@@ -3,8 +3,11 @@
 import subprocess
 import platform
 import sys
+import secrets
+import string
 from pathlib import Path
 import argparse
+import socket
 
 from collections import OrderedDict
 from typing import Dict, List, Tuple, Optional
@@ -29,9 +32,10 @@ class cmd_parser:
     MODULE_REGISTRY: Dict[str, List[str]] = {
         "alert_module":         ["alert_module"],
         "communication_module": ["kafka", "filebeat"],
-        "collection_module":    ["fluentd", "telegraf", "tshark", "falco"],
+        "collection_module":    ["fluentd", "telegraf", "tshark", "falco", "info"],
         "flow_module":          ["flow_module"],
         "db_module":            ["mongodb"],
+        "aggregation_module":   ["prometheus", "opensearch"], 
     }
 
     def __init__(self) -> None:
@@ -115,7 +119,6 @@ class cmd_parser:
         if len(args.modules) != len(args.tools):
             self._parser.error("The number of -m and -t occurrences must match (paired by position).")
 
-        # Validate module names against registry
         unknown = [m for m in args.modules if m not in self.MODULE_REGISTRY]
         if unknown:
             choices = ", ".join(self.MODULE_REGISTRY.keys())
@@ -128,7 +131,7 @@ class cmd_parser:
         """
         selected: "OrderedDict[str, List[str]]" = OrderedDict()
         for m, tools in self.MODULE_REGISTRY.items():
-            selected[m] = list(tools)  # copy
+            selected[m] = list(tools)
         return selected
 
     def _split_tools(self, s: str) -> List[str]:
@@ -143,7 +146,6 @@ class cmd_parser:
         s = s.strip()
         if s.lower() == "all":
             return ["all"]
-        # Accept both commas and whitespace as separators
         parts = [t.strip() for t in s.replace(",", " ").split()]
         return [t for t in parts if t]
 
@@ -157,10 +159,8 @@ class cmd_parser:
         - Preserve the input order and remove duplicates.
         """
         if len(tool_tokens) == 1 and tool_tokens[0].lower() == "all":
-            # Expand to every tool registered for that module
             return list(self.MODULE_REGISTRY[module])
 
-        # Validate each requested tool exists for that module
         valid = set(self.MODULE_REGISTRY[module])
         unknown = [t for t in tool_tokens if t not in valid]
         if unknown:
@@ -169,7 +169,6 @@ class cmd_parser:
                 f"Unknown tool(s) for {module}: {', '.join(unknown)}. "
                 f"Valid tools: {choices}."
             )
-        # Preserve input order (and remove duplicates)
         seen = set()
         ordered: List[str] = []
         for t in tool_tokens:
@@ -191,12 +190,9 @@ class cmd_parser:
             selected[m] = expanded
         return selected
 
-
-
 def detect_os():
     """
     Detect the host operating system and return a network mode string.
-
     Returns:
     - 'host' for Linux
     - 'bridge' for Windows or macOS (darwin)
@@ -211,13 +207,48 @@ def detect_os():
     else:
         return "error"
 
+def generate_secure_password(length=20):
+    alphabet = string.ascii_letters + string.digits + "!@#%^&*"
+    while True:
+        password = ''.join(secrets.choice(alphabet) for i in range(length))
+        if (any(c.islower() for c in password)
+                and any(c.isupper() for c in password)
+                and any(c.isdigit() for c in password)
+                and any(c in "!@#%^&*" for c in password)):
+            return password
 
+def get_existing_password(env_path: Path) -> Optional[str]:
+    if not env_path.exists():
+        return None
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("OPENSEARCH_PASSWORD="):
+                    return line.strip().split("=", 1)[1]
+    except Exception:
+        return None
+    return None
+
+def get_host_ip():
+    """
+    Get the current LAN IP address of the machine.
+    This avoids using "127.0.0.1"  ensuring that 
+    services talk to a real network interface.
+    """
+    try:
+        # No data is actually sent.
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        # Fallback only if absolutely no network is available
+        return "127.0.0.1"
 
 def main():
-
     try:
-        
-        LFD = Path(__file__).resolve().parent # Launcher Folder Directory
+        LFD = Path(__file__).resolve().parent 
         mid_py = LFD / "machine_id" / "machine_id.py"
         mid = subprocess.check_output(
             [sys.executable, str(mid_py)],
@@ -228,32 +259,65 @@ def main():
         return
 
     network_mode = detect_os()
-
-
+    
+    # LOGIC: Define Architecture via Environment Variable
+    # In Host mode (Linux) -> Real LAN IP, NOT localhost.
+    # In Bridge mode ->  internal docker OpenSearch service name.
+    if network_mode == "host":
+        opensearch_host = get_host_ip()
+        print(f"[+] Host Network detected. Using LAN IP for OpenSearch: {opensearch_host}")
+    else:
+        opensearch_host = "opensearch-node"
+        print(f"[+] Bridge Network detected. Using internal DNS: {opensearch_host}")
 
     parser = cmd_parser()
     args, selected = parser.parse()
 
     compose_profiles_list = parser.build_compose_profiles(selected)
+    telegraf = "0"
+    fluentd = "0"
+    falco = "0"
+    
+    if "collection_module.telegraf" in compose_profiles_list:
+        telegraf = "1"
+    if "collection_module.fluentd" in compose_profiles_list:
+        fluentd = "1"
+    if "collection_module.falco" in compose_profiles_list:
+        falco = "1"
+
+    # Only activate the info_device microservice if Prometheus is requested
+    if "aggregation_module" in compose_profiles_list:
+        compose_profiles_list.append("collection_module.info")
+
     compose_profiles = ",".join(compose_profiles_list)
-    # Example wiring for your system:
-    # start_containers(compose_profiles, debug=args.debug)
     print("Selected:", selected)
     print("COMPOSE_PROFILES:", compose_profiles_list)
     if args.debug:
         print("Debug flags:", args.debug)
 
-    PFD = Path(__file__).resolve().parent.parent # Project Folder Directory
+    PFD = Path(__file__).resolve().parent.parent 
+    env_file_path = LFD / ".env"
 
-    with open(LFD / ".env", "w", encoding="utf-8") as f:
+    opensearch_pass = get_existing_password(env_file_path)
+    if not opensearch_pass:
+        print("[*] Generating new secure password for OpenSearch...")
+        opensearch_pass = generate_secure_password()
+    else:
+        print("[*] Using existing OpenSearch password from .env")
+
+    with open(env_file_path, "w", encoding="utf-8") as f:
         f.write(f"MACHINE_ID={mid}\n")
         f.write(f"NETWORK_MODE={network_mode}\n")
         f.write(f"PFD={PFD}\n") 
-        f.write(f"COMPOSE_PROFILES={compose_profiles}") # COMPOSE_PROFILES=kafka,filebeat,flow_module,...
+        f.write(f"COMPOSE_PROFILES={compose_profiles}\n")
+        f.write(f"ENABLE_TELEGRAF={telegraf}\n")
+        f.write(f"ENABLE_FLUENTD={fluentd}\n")
+        f.write(f"ENABLE_FALCO={falco}\n")
+        f.write(f"OPENSEARCH_PASSWORD={opensearch_pass}\n")
+        f.write(f"OPENSEARCH_HOST={opensearch_host}\n")
 
     try:
-
-        subprocess.run(["docker", "compose","-f", f"{str(LFD)}/docker-compose.yml" ,"--env-file",f"{str(LFD)}/.env",  "up", "-d"], check=True)
+        subprocess.run(["docker", "compose","-f", f"{str(LFD)}/docker-compose.yml" ,"--env-file",f"{str(LFD)}/.env",  "up", "--build","-d"], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error executing docker-compose: {e}")
         return
