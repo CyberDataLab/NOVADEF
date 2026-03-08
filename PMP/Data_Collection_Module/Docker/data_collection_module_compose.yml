@@ -18,7 +18,6 @@ services:
       - MACHINE_ID=${MACHINE_ID}
     volumes:
       - /var/log:/var/log:ro
-      - /var/log/journal:/var/log/journal:ro
       - ${PFD}/Results/fluentd_logs:/fluentd/log/out
     ports:
       - "24231:24231" #Prometheus scrapping
@@ -59,7 +58,8 @@ services:
       - kafka_novadef
     environment:
       - TZ=UTC
-    network_mode: "${NETWORK_MODE}" # Allows container to see host interfaces
+    # Share network namespace with the victim: tshark sees all attacker→victim traffic
+    network_mode: "container:scenario_victim"
     cap_add:
       # https://man7.org/linux/man-pages/man7/capabilities.7.html
       - NET_ADMIN # Modify network interfaces and adjust iptables rules
@@ -94,7 +94,6 @@ services:
       - ALL
     volumes:
       - /proc:/host/proc:ro
-      - /boot:/host/boot:ro
       - /lib/modules:/host/lib/modules:ro
       - /usr:/host/usr:ro
       - ${PFD}/Results/falco/logs:/var/log/falco/

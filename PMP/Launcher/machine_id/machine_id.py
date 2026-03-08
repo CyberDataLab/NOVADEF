@@ -17,6 +17,16 @@ def get_device_id():
         output = subprocess.check_output([mid_binary], stderr=subprocess.STDOUT)
         device_id = output.decode("utf-8").strip()
         return device_id
+    except OSError as e:
+        if e.errno == 8: # Exec format error (wrong architecture/OS)
+            import hashlib
+            import socket
+            import uuid
+            # Fallback for Mac M1/M2 or other architectures
+            fallback_id = hashlib.sha256(f"{socket.gethostname()}-{uuid.getnode()}".encode()).hexdigest()
+            return fallback_id
+        else:
+            raise e
     except FileNotFoundError:
         print(f"Binary not found '{mid_binary}'.")
         sys.exit(1)

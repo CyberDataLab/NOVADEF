@@ -1,0 +1,543 @@
+{
+  "uid": "novadef-host-metrics",
+  "title": "NOVADEF — Host & Network Metrics",
+  "description": "Métricas de host en tiempo real: CPU, RAM, disco e internet. Fuente: Telegraf vía Prometheus.",
+  "tags": ["novadef", "metrics", "host"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "timezone": "utc",
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "graphTooltip": 1,
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "weekStart": "",
+  "links": [
+    { "title": "Overview",            "url": "/d/novadef-overview",     "type": "link" },
+    { "title": "Security Operations", "url": "/d/novadef-security-ops", "type": "link" }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true, "hide": true,
+        "iconColor": "rgba(0,211,255,1)", "name": "Annotations & Alerts", "type": "dashboard"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+        "definition": "label_values(cpu_usage_user, host)",
+        "description": "Host a visualizar",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Host",
+        "multi": false,
+        "name": "host",
+        "options": [],
+        "query": { "query": "label_values(cpu_usage_user, host)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+
+  "panels": [
+
+    {
+      "collapsed": false,
+      "id": 100,
+      "title": "CPU",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+
+    {
+      "id": 1,
+      "title": "CPU Usage — actual",
+      "description": "Porcentaje de CPU en uso (user + system) en el momento actual",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red",    "value": 85 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0, "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 - avg by (host) (cpu_usage_idle{cpu=\"cpu-total\", host=~\"$host\"})",
+          "legendFormat": "{{host}}",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "title": "CPU Usage — histórico",
+      "description": "Evolución del uso de CPU: user, system, iowait por host",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 20, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "percent",
+          "min": 0, "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "cpu_usage_user{cpu=\"cpu-total\", host=~\"$host\"}",
+          "legendFormat": "User — {{host}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "cpu_usage_system{cpu=\"cpu-total\", host=~\"$host\"}",
+          "legendFormat": "System — {{host}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        },
+        {
+          "refId": "C",
+          "expr": "cpu_usage_iowait{cpu=\"cpu-total\", host=~\"$host\"}",
+          "legendFormat": "IOWait — {{host}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 101,
+      "title": "Memoria",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+    },
+
+    {
+      "id": 3,
+      "title": "RAM Usada — actual",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red",    "value": 90 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0, "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mem_used_percent{host=~\"$host\"}",
+          "legendFormat": "{{host}}",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "id": 4,
+      "title": "RAM — histórico",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 20, "x": 4, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "percent",
+          "min": 0, "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mem_used_percent{host=~\"$host\"}",
+          "legendFormat": "Usado % — {{host}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 102,
+      "title": "Disco",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+    },
+
+    {
+      "id": 5,
+      "title": "Disco — actual (/)",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red",    "value": 90 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0, "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "disk_used_percent{path=\"/\", host=~\"$host\"}",
+          "legendFormat": "{{host}} — {{device}}",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "id": 6,
+      "title": "Disco — uso por partición",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 20, "x": 4, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "percent",
+          "min": 0, "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "disk_used_percent{host=~\"$host\"}",
+          "legendFormat": "{{host}} — {{path}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 103,
+      "title": "Velocidad de Internet",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }
+    },
+
+    {
+      "id": 7,
+      "title": "Velocidad Internet — descarga",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "green",  "value": 50 }
+            ]
+          },
+          "unit": "Mbits",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "internet_speed_download{host=~\"$host\"} / 1e6",
+          "legendFormat": "↓ {{host}}",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "id": 8,
+      "title": "Velocidad Internet — subida",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "green",  "value": 20 }
+            ]
+          },
+          "unit": "Mbits",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "internet_speed_upload{host=~\"$host\"} / 1e6",
+          "legendFormat": "↑ {{host}}",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "id": 9,
+      "title": "Internet Speed — histórico (Mbps)",
+      "description": "Velocidad de descarga y subida en el tiempo",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "novadef-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "Mbits",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "internet_speed_download{host=~\"$host\"} / 1e6",
+          "legendFormat": "↓ Descarga — {{host}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "internet_speed_upload{host=~\"$host\"} / 1e6",
+          "legendFormat": "↑ Subida — {{host}}",
+          "datasource": { "type": "prometheus", "uid": "novadef-prometheus" }
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 104,
+      "title": "OpenSearch — Métricas Telegraf Indexadas",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }
+    },
+
+    {
+      "id": 10,
+      "title": "Últimas Métricas por Tipo (OpenSearch)",
+      "description": "Distribución de tipos de métricas indexadas en OpenSearch por kafka_topic",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 31 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "displayLabels": ["percent", "name"],
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true },
+        "pieType": "donut",
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "kafka_topic.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "20" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 11,
+      "title": "Volumen de Métricas Telegraf Indexadas",
+      "description": "Rate de indexación de métricas telegraf en OpenSearch",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 31 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "normal" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["sum", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "alias": "{{terms.kafka_topic.keyword}}",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" },
+            {
+              "field": "kafka_topic.keyword",
+              "id": "3",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: telegraf_metrics",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    }
+
+  ]
+}

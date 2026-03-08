@@ -1,0 +1,553 @@
+{
+  "uid": "novadef-security-ops",
+  "title": "NOVADEF — Security Operations",
+  "description": "Centro de operaciones de seguridad: eventos Falco, IoCs MISP, acciones SOARCA y perfiles de atacantes (Neo4j).",
+  "tags": ["novadef", "security", "soc"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "utc",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "graphTooltip": 1,
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "weekStart": "",
+  "links": [
+    { "title": "Overview",            "url": "/d/novadef-overview",     "type": "link" },
+    { "title": "Host & Network Metrics", "url": "/d/novadef-host-metrics", "type": "link" }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true, "hide": true,
+        "iconColor": "rgba(0,211,255,1)", "name": "Annotations & Alerts", "type": "dashboard"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+        "definition": "",
+        "description": "Nivel de severidad Falco",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Severidad",
+        "multi": true,
+        "name": "severity",
+        "options": [],
+        "query": {
+          "query": "event.dataset:falco_events",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+
+  "panels": [
+
+    {
+      "collapsed": false,
+      "id": 200,
+      "title": "Falco — Eventos de Seguridad Kernel",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+
+    {
+      "id": 1,
+      "title": "Falco — Stream de Eventos en Tiempo Real",
+      "description": "Eventos de seguridad detectados por Falco (syscall/kernel level). Filtrar por severidad, proceso o usuario.",
+      "type": "logs",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 1 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [],
+          "metrics": [{ "id": "1", "settings": { "limit": "500" }, "type": "logs" }],
+          "query": "kafka_topic:falco_events",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "title": "Falco — Eventos por Regla",
+      "description": "Top de reglas Falco más activadas en el rango de tiempo",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red",    "value": 50 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 40,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "rule.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "15" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: falco_events",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 3,
+      "title": "Falco — Evolución Temporal",
+      "description": "Número de eventos Falco por intervalos de tiempo",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["sum", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "Eventos Falco",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: falco_events",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 201,
+      "title": "MISP — Inteligencia de Amenazas",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 }
+    },
+
+    {
+      "id": 4,
+      "title": "MISP — Eventos de Amenaza",
+      "description": "Eventos registrados en MISP con nivel de amenaza, número de atributos IoC y fecha",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 14, "x": 0, "y": 20 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "novadef-infinity" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Nivel" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": { "text": "🔴 Alto",       "color": "dark-red"    },
+                      "2": { "text": "🟠 Medio",      "color": "orange"      },
+                      "3": { "text": "🟡 Bajo",       "color": "yellow"      },
+                      "4": { "text": "⚪ Indefinido", "color": "grey"        }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Atributos" },
+            "properties": [
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "color", "value": { "mode": "continuous-BlPu" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "fields": "" },
+        "sortBy": [{ "desc": true, "displayName": "Fecha" }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "https://pmp-misp-server:443/events/restSearch",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"returnFormat\":\"json\",\"limit\":50,\"page\":1,\"order\":\"Event.id desc\"}",
+            "headers": [
+              { "key": "Authorization", "value": "NOVADEFMISPINTEGRATIONKEYpmp1234567890ab" },
+              { "key": "Accept",        "value": "application/json" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ]
+          },
+          "root_selector": "response",
+          "columns": [
+            { "selector": "Event.id",              "text": "ID",        "type": "string" },
+            { "selector": "Event.date",             "text": "Fecha",     "type": "string" },
+            { "selector": "Event.info",             "text": "Evento",    "type": "string" },
+            { "selector": "Event.threat_level_id",  "text": "Nivel",     "type": "string" },
+            { "selector": "Event.attribute_count",  "text": "Atributos", "type": "number" },
+            { "selector": "Event.Tag.0.name",       "text": "Tag",       "type": "string" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": 5,
+      "title": "MISP — IoCs Recientes (Atributos)",
+      "description": "Últimos indicadores de compromiso registrados en MISP",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 10, "x": 14, "y": 20 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "novadef-infinity" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Tipo" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ip-dst":   { "text": "🌐 IP Destino",  "color": "red"    },
+                      "ip-src":   { "text": "🌐 IP Origen",   "color": "orange" },
+                      "domain":   { "text": "🌍 Dominio",     "color": "blue"   },
+                      "url":      { "text": "🔗 URL",         "color": "purple" },
+                      "md5":      { "text": "🔢 MD5 Hash",    "color": "grey"   },
+                      "sha256":   { "text": "🔢 SHA256",      "color": "grey"   },
+                      "filename": { "text": "📄 Fichero",     "color": "yellow" }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "fields": "" },
+        "sortBy": [{ "desc": true, "displayName": "Timestamp" }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "https://pmp-misp-server:443/attributes/restSearch",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"returnFormat\":\"json\",\"limit\":50,\"page\":1,\"order\":\"Attribute.timestamp desc\"}",
+            "headers": [
+              { "key": "Authorization", "value": "NOVADEFMISPINTEGRATIONKEYpmp1234567890ab" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Accept",        "value": "application/json" }
+            ]
+          },
+          "root_selector": "response.Attribute",
+          "columns": [
+            { "selector": "id",             "text": "ID",        "type": "string" },
+            { "selector": "type",           "text": "Tipo",      "type": "string" },
+            { "selector": "value",          "text": "Valor",     "type": "string" },
+            { "selector": "category",       "text": "Categoría", "type": "string" },
+            { "selector": "timestamp",      "text": "Timestamp", "type": "string" },
+            { "selector": "event_id",       "text": "Evento",    "type": "string" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 202,
+      "title": "SOARCA — Respuesta Automática",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }
+    },
+
+    {
+      "id": 6,
+      "title": "SOARCA — Historial de Ejecuciones de Playbooks",
+      "description": "Lista de playbooks ejecutados con estado. block_ip cierra conexiones de IPs atacantes via iptables.",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 14, "x": 0, "y": 31 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "novadef-infinity" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Estado" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "successfully_executed": { "text": "✅ Éxito",     "color": "green"  },
+                      "failed":                { "text": "❌ Error",     "color": "red"    },
+                      "running":               { "text": "⏳ Ejecutando","color": "blue"   },
+                      "queued":                { "text": "📋 En Cola",   "color": "yellow" }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "fields": "" },
+        "sortBy": [{ "desc": true, "displayName": "Inicio" }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://pmp-soarca-core:8080/reporter/",
+          "url_options": {
+            "method": "GET",
+            "headers": [{ "key": "Accept", "value": "application/json" }]
+          },
+          "root_selector": "",
+          "columns": [
+            { "selector": "execution_id", "text": "Ejecución ID", "type": "string" },
+            { "selector": "playbook_id",  "text": "Playbook",     "type": "string" },
+            { "selector": "status",       "text": "Estado",       "type": "string" },
+            { "selector": "started_at",   "text": "Inicio",       "type": "string" },
+            { "selector": "finished_at",  "text": "Fin",          "type": "string" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": 7,
+      "title": "SOARCA — Playbooks Disponibles",
+      "description": "Playbooks CACAO cargados en SOARCA listos para ejecución",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 10, "x": 14, "y": 31 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "novadef-infinity" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://pmp-soarca-core:8080/playbook/",
+          "url_options": {
+            "method": "GET",
+            "headers": [{ "key": "Accept", "value": "application/json" }]
+          },
+          "root_selector": "",
+          "columns": [
+            { "selector": "id",          "text": "ID",          "type": "string" },
+            { "selector": "name",        "text": "Nombre",      "type": "string" },
+            { "selector": "description", "text": "Descripción", "type": "string" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 203,
+      "title": "TAPCD — Perfiles de Atacantes (Neo4j)",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 }
+    },
+
+    {
+      "id": 8,
+      "title": "Neo4j — Perfiles de Actores de Amenaza",
+      "description": "Nodos Actor almacenados en Neo4j por TAPCD con TTP asociadas. Requiere Neo4j HTTP API en novadef-neo4j-1:7474.",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 41 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "novadef-infinity" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "IP" },
+            "properties": [
+              { "id": "custom.width", "value": 130 },
+              { "id": "links", "value": [{ "title": "Buscar en AbuseIPDB", "url": "https://www.abuseipdb.com/check/${__value.raw}", "targetBlank": true }] }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://novadef-neo4j-1:7474/db/neo4j/tx/commit",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"statements\":[{\"statement\":\"MATCH (a:Actor)-[:ORIGINATES_FROM]->(s:SourceIP) RETURN DISTINCT s.ip AS ip, a.country AS pais, a.profile AS perfil, a.riskLevel AS riesgo, a.firstSeen AS primera_vez, a.lastActivity AS ultima_vez ORDER BY ultima_vez DESC LIMIT 50\",\"resultDataContents\":[\"row\"]}]}",
+            "headers": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Accept",        "value": "application/json;charset=UTF-8" },
+              { "key": "Authorization", "value": "Basic bmVvNGo6bmVvNGpwYXNz" }
+            ]
+          },
+          "root_selector": "results[0].data",
+          "columns": [
+            { "selector": "row[0]", "text": "IP",           "type": "string" },
+            { "selector": "row[1]", "text": "País",         "type": "string" },
+            { "selector": "row[2]", "text": "Perfil",       "type": "string" },
+            { "selector": "row[3]", "text": "Riesgo",       "type": "number" },
+            { "selector": "row[4]", "text": "Primera vez",  "type": "string" },
+            { "selector": "row[5]", "text": "Última vez",   "type": "string" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "id": 204,
+      "title": "Syslog — Actividad del Sistema",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 }
+    },
+
+    {
+      "id": 9,
+      "title": "Syslog — Eventos del Sistema",
+      "description": "Logs del sistema (syslog/journald) indexados en OpenSearch",
+      "type": "logs",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 52 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [],
+          "metrics": [{ "id": "1", "settings": { "limit": "500" }, "type": "logs" }],
+          "query": "kafka_topic: syslog_logs OR kafka_topic: systemd_logs",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    }
+
+  ]
+}

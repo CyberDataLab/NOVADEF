@@ -1,0 +1,843 @@
+{
+  "uid": "novadef-network-security",
+  "title": "NOVADEF — Network Security",
+  "description": "Detección de intrusos (Snort3 IDS), captura de paquetes (tshark) y análisis de flujos de red (CICFlowMeter)",
+  "tags": ["novadef", "network", "snort", "tshark", "cicflowmeter"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "utc",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "graphTooltip": 1,
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "weekStart": "",
+  "links": [
+    { "title": "Overview",            "url": "/d/novadef-overview",     "type": "link", "icon": "dashboard" },
+    { "title": "Security Operations", "url": "/d/novadef-security-ops", "type": "link", "icon": "shield" },
+    { "title": "Host Metrics",        "url": "/d/novadef-host-metrics", "type": "link", "icon": "monitor-heart-rate" }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true, "hide": true,
+        "iconColor": "rgba(0,211,255,1)", "name": "Annotations & Alerts", "type": "dashboard"
+      }
+    ]
+  },
+  "templating": { "list": [] },
+
+  "panels": [
+
+    {
+      "collapsed": false,
+      "id": 100,
+      "title": "🛡️ Snort IDS — Detección de Intrusos",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+
+    {
+      "id": 101,
+      "title": "Alertas Snort (ventana)",
+      "description": "Total de alertas IDS generadas por Snort3 en el rango de tiempo seleccionado",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red",    "value": 10 }
+            ]
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "alias": "Alertas Snort",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 102,
+      "title": "IPs Atacantes Únicas",
+      "description": "Número de IPs origen distintas que han generado alertas Snort",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "orange", "value": 2 },
+              { "color": "red",    "value": 5 }
+            ]
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "alias": "IPs Atacantes",
+          "bucketAggs": [],
+          "metrics": [
+            {
+              "id": "1",
+              "type": "cardinality",
+              "field": "src_ip.keyword",
+              "settings": {}
+            }
+          ],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 103,
+      "title": "Snort — Stream de Alertas en Tiempo Real",
+      "description": "Alertas IDS detectadas por Snort3. Una alerta por escaneo gracias al threshold de 300 s por IP origen.",
+      "type": "logs",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 5 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [],
+          "metrics": [{ "id": "1", "settings": { "limit": "500" }, "type": "logs" }],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 104,
+      "title": "Snort — Evolución Temporal de Alertas",
+      "description": "Número de alertas Snort por intervalo de tiempo",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["sum", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "Alertas Snort",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 105,
+      "title": "Snort — Top IPs Atacantes",
+      "description": "IPs origen con más alertas IDS generadas en el rango seleccionado",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "yellow", "value": null },
+              { "color": "red",    "value": 3 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 40,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "src_ip.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 106,
+      "title": "Snort — Top Reglas Disparadas",
+      "description": "Reglas Snort más activadas (por msg). Cada regla identifica un tipo de ataque.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red",    "value": 20 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 50,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "msg.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 107,
+      "title": "Snort — Top IPs Destino Atacadas",
+      "description": "IPs destino más frecuentes en alertas Snort (víctimas del ataque)",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 40,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "dst_ip.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: snort_alerts",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+
+    {
+      "collapsed": false,
+      "id": 200,
+      "title": "🔭 tshark — Análisis de Tráfico de Red",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }
+    },
+
+    {
+      "id": 201,
+      "title": "Paquetes Capturados (ventana)",
+      "description": "Total de paquetes de red capturados por tshark e indexados en OpenSearch",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 31 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue",  "value": null },
+              { "color": "green", "value": 100 },
+              { "color": "yellow","value": 10000 }
+            ]
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "alias": "Paquetes",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: tshark_traces",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 202,
+      "title": "tshark — Volumen de Tráfico (paquetes/intervalo)",
+      "description": "Tasa de captura de paquetes de red a lo largo del tiempo",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 14, "x": 4, "y": 31 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["sum", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "Paquetes capturados",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: tshark_traces",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 203,
+      "title": "tshark — Distribución de Protocolos",
+      "description": "Distribución de protocolos de red (TCP, UDP, ICMP) en los paquetes capturados",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 31 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayLabels": ["name", "percent"],
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "values": ["value", "percent"] },
+        "pieType": "pie",
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "net_proto.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: tshark_traces AND net_proto:*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 204,
+      "title": "tshark — Stream de Paquetes en Tiempo Real",
+      "description": "Paquetes de red capturados con IP origen/destino, protocolo y tamaño",
+      "type": "logs",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 39 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [],
+          "metrics": [{ "id": "1", "settings": { "limit": "500" }, "type": "logs" }],
+          "query": "kafka_topic: tshark_traces AND net_src_ip:*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 205,
+      "title": "tshark — Top IPs Origen",
+      "description": "IPs origen con más paquetes capturados por tshark",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "super-light-blue" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 40,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "net_src_ip.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: tshark_traces AND net_src_ip:*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 206,
+      "title": "tshark — Top Puertos Destino",
+      "description": "Puertos destino más frecuentes en los paquetes capturados (indica servicios atacados)",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "purple" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 40,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "net_dst_port",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "15" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: tshark_traces AND net_dst_port:*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+
+    {
+      "collapsed": false,
+      "id": 300,
+      "title": "📊 CICFlowMeter — Análisis de Flujos de Red",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 }
+    },
+
+    {
+      "id": 301,
+      "title": "Flujos Detectados (ventana)",
+      "description": "Total de flujos de red analizados por CICFlowMeter e indexados en OpenSearch",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 57 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red",    "value": 1000 }
+            ]
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "alias": "Flujos CIC",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: cic_flow",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 302,
+      "title": "CICFlowMeter — Evolución de Flujos",
+      "description": "Tasa de flujos de red detectados a lo largo del tiempo por CICFlowMeter",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 14, "x": 4, "y": 57 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 50,
+            "lineWidth": 1,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["sum", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "Flujos de red",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: cic_flow",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 303,
+      "title": "CICFlowMeter — Distribución de Protocolos",
+      "description": "Protocolos de red en los flujos detectados por CICFlowMeter (6=TCP, 17=UDP)",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 57 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayLabels": ["name", "percent"],
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "values": ["value", "percent"] },
+        "pieType": "pie",
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "protocol.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "5" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: cic_flow",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 304,
+      "title": "CICFlowMeter — Últimos Flujos de Red",
+      "description": "Flujos de red recientes con src_ip, dst_ip, protocolo, duración y bytes por segundo",
+      "type": "logs",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 65 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [],
+          "metrics": [{ "id": "1", "settings": { "limit": "200" }, "type": "logs" }],
+          "query": "kafka_topic: cic_flow",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 305,
+      "title": "CICFlowMeter — Throughput por Flujo (bytes/s)",
+      "description": "Velocidad de transferencia de datos por flujo de red detectado por CICFlowMeter",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 74 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "semi-dark-green" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "Bytes/s",
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }
+          ],
+          "metrics": [
+            {
+              "field": "flow_byts_s",
+              "id": "1",
+              "settings": {},
+              "type": "avg"
+            }
+          ],
+          "query": "kafka_topic: cic_flow AND flow_byts_s:*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+
+    {
+      "id": 306,
+      "title": "CICFlowMeter — Top Pares Atacante→Víctima",
+      "description": "Pares (src_ip → dst_ip) con más flujos detectados. Identifica rutas de ataque.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 74 },
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "novadef-opensearch" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "dark-orange" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "orientation": "horizontal",
+        "xTickLabelMaxLength": 50,
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "field": "src_ip.keyword",
+              "id": "2",
+              "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "10" },
+              "type": "terms"
+            }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "kafka_topic: cic_flow",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ]
+    }
+
+  ]
+}

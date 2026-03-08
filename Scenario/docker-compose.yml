@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  victima:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: scenario_victim
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - USER_NAME=novadef
+      - USER_PASSWORD=novadef_password
+      - PASSWORD_ACCESS=true
+      - SUDO_ACCESS=true
+    cap_add:
+      - NET_ADMIN  # Fundamental para que SOARCA pueda ejecutar iptables dentro
+    ports:
+      - "2222:2222" # SSH externo (si quisieras conectarte a mano)
+    volumes:
+      - ./victim-init:/custom-cont-init.d:ro  # instala iptables al arrancar
+    networks:
+      - kafka_net
+
+  atacante:
+    image: kalilinux/kali-rolling
+    container_name: scenario_attacker
+    restart: unless-stopped
+    command: /bin/sh -c "apt-get update && apt-get install -y nmap hping3 curl iputils-ping && tail -f /dev/null"
+    networks:
+      - kafka_net
+
+networks:
+  kafka_net:
+    external: true
+    name: launcher_default

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Instalar iptables en la víctima (Alpine base no lo incluye)
+apk add --no-cache iptables ip6tables 2>/dev/null && echo "[victim-init] iptables instalado" || echo "[victim-init] WARN: fallo instalando iptables"
+
+# Configurar sudo sin contraseña para novadef (contenedor de demo)
+# Sobreescribimos la línea existente que requiere password
+sed -i 's/^novadef ALL=(ALL) ALL/novadef ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
+echo "[victim-init] NOPASSWD configurado para novadef"

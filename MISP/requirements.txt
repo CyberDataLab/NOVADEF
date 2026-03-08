@@ -1,0 +1,6 @@
+pymisp==2.4.176
+kafka-python
+lz4
+zstandard
+requests
+pymongo

@@ -1,0 +1,44 @@
+---
+# NOVADEF Grafana — visualización centralizada
+# Arrancar: docker compose up -d
+# Acceso: http://localhost:3000  (admin / novadef_grafana)
+# Unirse a launcher_default para resolver los hostnames internos de todos los módulos
+
+services:
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: novadef-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=novadef_grafana
+      # Plugins requeridos:
+      #   grafana-opensearch-datasource → métricas telegraf + eventos falco en OpenSearch
+      #   yesoreyeram-infinity-datasource → llamadas REST a MISP, SOARCA y Neo4j
+      - GF_INSTALL_PLUGINS=grafana-opensearch-datasource,yesoreyeram-infinity-datasource
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      # Desactivar verificación TLS interna para MISP (cert autofirmado)
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - launcher_default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  launcher_default:
+    external: true
+    name: launcher_default
+
+volumes:
+  grafana_data:

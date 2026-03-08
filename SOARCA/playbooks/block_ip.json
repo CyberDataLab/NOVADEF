@@ -1,0 +1,90 @@
+{
+    "type": "playbook",
+    "spec_version": "cacao-2.0",
+    "id": "playbook--826694c9-b2c7-44c4-beae-b1eebdbd450f",
+    "name": "Block Malicious IP via iptables",
+    "description": "Block an attacker IP detected by PMP on the victim firewall via SSH.",
+    "playbook_types": ["mitigation"],
+    "created_by": "identity--1c5995c2-27b8-4371-a69d-6556cd689183",
+    "created": "2024-05-20T00:00:00.000Z",
+    "modified": "2024-05-20T00:00:00.000Z",
+    "valid_from": "2024-05-20T00:00:00.000Z",
+    "valid_until": "2030-05-20T00:00:00.000Z",
+    "revoked": false,
+    "priority": 1,
+    "severity": 80,
+    "impact": 50,
+    "labels": [
+        "mitigation",
+        "firewall",
+        "pmp"
+    ],
+    "playbook_variables": {
+        "__target_ip__": {
+            "type": "ipv4-addr",
+            "name": "__target_ip__",
+            "description": "The malicious IP address to block.",
+            "value": "0.0.0.0",
+            "constant": false,
+            "external": true
+        }
+    },
+    "workflow_start": "start--5fda562d-1df9-4a94-b286-03db80c83af3",
+    "workflow": {
+        "start--5fda562d-1df9-4a94-b286-03db80c83af3": {
+            "type": "start",
+            "name": "Start Playbook",
+            "on_completion": "action--286b9b45-5414-4597-8420-69292364dd5b"
+        },
+        "action--286b9b45-5414-4597-8420-69292364dd5b": {
+            "type": "action",
+            "name": "Block attacker IP via iptables",
+            "description": "Uses SSH to run iptables on the victim and drop all traffic from the attacker IP.",
+            "commands": [
+                {
+                    "type": "ssh",
+                    "command": "sudo -n iptables -A INPUT -s __target_ip__:value -j DROP 2>&1; echo DONE_INPUT"
+                },
+                {
+                    "type": "ssh",
+                    "command": "sudo -n iptables -A OUTPUT -d __target_ip__:value -j DROP 2>&1; echo DONE_OUTPUT"
+                }
+            ],
+            "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",
+            "targets": [
+                "linux--daea220d-6e61-4210-8794-fe3a99fac6b9"
+            ],
+            "on_completion": "end--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"
+        },
+        "end--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78": {
+            "type": "end",
+            "name": "End Playbook"
+        }
+    },
+    "agent_definitions": {
+        "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74": {
+            "type": "soarca",
+            "name": "soarca-ssh"
+        }
+    },
+    "target_definitions": {
+        "linux--daea220d-6e61-4210-8794-fe3a99fac6b9": {
+            "type": "linux",
+            "name": "scenario_victim",
+            "description": "Victim machine where iptables will be applied.",
+            "address": {
+                "ipv4": ["172.18.0.10"]
+            },
+            "port": "2222",
+            "authentication_info": "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"
+        }
+    },
+    "authentication_info_definitions": {
+        "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78": {
+            "type": "user-auth",
+            "name": "victim-ssh-credentials",
+            "username": "novadef",
+            "password": "novadef_password"
+        }
+    }
+}

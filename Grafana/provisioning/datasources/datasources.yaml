@@ -1,0 +1,66 @@
+apiVersion: 1
+
+# ─────────────────────────────────────────────────────────────
+#  NOVADEF — Datasources de Grafana (aprovisionamiento automático)
+#  Todos los UID deben coincidir con los referenciados en los dashboards JSON
+# ─────────────────────────────────────────────────────────────
+
+datasources:
+
+  # ── 1. Prometheus ──────────────────────────────────────────
+  # Prometheus scrapea telegraf_novadef:9273 (job: telegraf)
+  # Contiene: cpu_usage_*, mem_used_percent, disk_used_percent,
+  #           internet_speed_download, internet_speed_upload
+  - name: Prometheus NOVADEF
+    type: prometheus
+    uid: novadef-prometheus
+    url: http://prometheus_server_novadef:9090
+    access: proxy
+    isDefault: false
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: POST
+      queryTimeout: "60s"
+
+  # ── 2. OpenSearch ──────────────────────────────────────────
+  # Índices disponibles:
+  #   logs-telegraf_metrics-YYYY.MM.dd  → métricas de host
+  #   logs-falco_events-YYYY.MM.dd      → eventos de seguridad kernel
+  #   logs-syslog_logs-YYYY.MM.dd       → syslog del sistema
+  - name: OpenSearch NOVADEF
+    type: grafana-opensearch-datasource
+    uid: novadef-opensearch
+    url: https://opensearch-node:9200
+    access: proxy
+    isDefault: true
+    basicAuth: true
+    basicAuthUser: admin
+    secureJsonData:
+      basicAuthPassword: "Mp0^MKFJdRq*qipBHLKc"
+    jsonData:
+      database: "logs-*"
+      timeField: "@timestamp"
+      version: "2.18.0"
+      flavor: "opensearch"
+      logMessageField: "message"
+      logLevelField: "log.level"
+      tlsSkipVerify: true
+      maxConcurrentShardRequests: 5
+
+  # ── 3. Infinity (REST genérico) ────────────────────────────
+  # Usado para:
+  #   MISP API     → https://pmp-misp-server:443/events/index
+  #   SOARCA API   → http://pmp-soarca-core:8080/reporter/
+  #   Neo4j HTTP   → http://novadef-neo4j-1:7474/db/neo4j/tx/commit
+  # NOTA: los headers de autorización se configuran por panel
+  - name: Infinity NOVADEF
+    type: yesoreyeram-infinity-datasource
+    uid: novadef-infinity
+    access: proxy
+    jsonData:
+      tlsSkipVerify: true
+      allowedHosts:
+        - "https://pmp-misp-server"
+        - "https://pmp-misp-server:443"
+        - "http://pmp-soarca-core:8080"
+        - "http://novadef-neo4j-1:7474"

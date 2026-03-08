@@ -1,0 +1,21 @@
+# ── Results ───────────────────────────────────────────────────────────────────
+PMP/Results/Alerts/*
+PMP/Results/Flows/*
+PMP/Results/Traces_Flow_Module/*
+PMP/Results/falco/*
+PMP/Results/fluentd_logs/*
+PMP/Results/mongo_data/*
+PMP/Results/opensearch_data/*
+PMP/Results/prometheus_data/*
+PMP/Results/tshark/*
+
+# Mantener la estructura de directorios
+!PMP/Results/Alerts/.gitkeep
+!PMP/Results/Flows/.gitkeep
+!PMP/Results/Traces_Flow_Module/.gitkeep
+!PMP/Results/falco/.gitkeep
+!PMP/Results/fluentd_logs/.gitkeep
+!PMP/Results/mongo_data/.gitkeep
+!PMP/Results/opensearch_data/.gitkeep
+!PMP/Results/prometheus_data/.gitkeep
+!PMP/Results/tshark/.gitkeep

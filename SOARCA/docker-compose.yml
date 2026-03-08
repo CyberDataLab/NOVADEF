@@ -1,0 +1,64 @@
+version: "3.9"
+
+services:
+  # Base de datos Documental para Playbooks de SOARCA
+  soarca-db:
+    image: mongo:5.0
+    container_name: pmp-soarca-db
+    restart: on-failure
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=soarca
+      - MONGO_INITDB_ROOT_PASSWORD=soarca
+    volumes:
+      - soarca_db_data:/data/db
+
+  # Motor principal de SOARCA (Security Orchestration, Automation and Response)
+  soarca-core:
+    image: cossas/soarca:latest
+    container_name: pmp-soarca-core
+    platform: linux/amd64
+    restart: on-failure
+    ports:
+      - "8000:8080"
+    environment:
+      - DB_URL=mongodb://soarca:soarca@soarca-db:27017/
+      - LOG_LEVEL=debug
+      - AMQP_BROKER=kafka:9092 # Si usamos MQTT/Kafka, SOARCA tiene plugins, o usa HTTP
+    depends_on:
+      - soarca-db
+
+  # Ejecutor de acciones (SSH, HTTP, etc)
+  soarca-executor:
+    image: alpine:latest
+    container_name: pmp-soarca-executor-ssh
+    command: tail -f /dev/null
+    restart: on-failure
+    environment:
+      - SOARCA_URL=http://soarca-core:8080
+    depends_on:
+      - soarca-core
+
+  # Trigger: El pegamento entre MISP y SOARCA
+  misp-soarca-trigger:
+    build: .
+    container_name: pmp-misp-soarca-trigger
+    restart: on-failure
+    environment:
+      - MISP_URL=http://misp-server:80   # La ip de la máquina si está en otra red
+      - MISP_KEY=NOVADEFMISPINTEGRATIONKEYpmp1234567890ab
+      - SOARCA_API=http://soarca-core:8080
+      - PLAYBOOK_PATH=/app/playbooks/block_ip.json
+    volumes:
+      - trigger_state:/app/state
+      - ./playbooks:/app/playbooks:ro
+    depends_on:
+      - soarca-core
+
+volumes:
+  soarca_db_data:
+  trigger_state:
+
+networks:
+  default:
+    external: true
+    name: launcher_default

@@ -104,12 +104,19 @@ class CICWorker:
 
             print(f"📊 {len(data)} flows added to {self.global_csv}")
 
-        '''
-            # Uncomment if you want to publish on Kafka.
-            if data:
-                self.c2k_producer.produce_lines(data)
-
-        '''
+        # Publicar flujos en Kafka como JSON (Logstash → OpenSearch → Grafana)
+        if data and header:
+            import io
+            reader = csv.DictReader(io.StringIO("".join([header] + data)))
+            json_lines = []
+            for row in reader:
+                doc = {k.strip(): v.strip() for k, v in row.items() if k}
+                doc["@timestamp"] = doc.get("timestamp", "")
+                doc["kafka_topic"] = "cic_flow"
+                json_lines.append(json.dumps(doc, ensure_ascii=False))
+            if json_lines:
+                self.c2k_producer.produce_lines(json_lines)
+                print(f"📤 {len(json_lines)} flujos publicados en Kafka (cic_flow)")
 
         # Read flows and upload them to MongoDB
         if not os.path.exists(self.tmp_csv):

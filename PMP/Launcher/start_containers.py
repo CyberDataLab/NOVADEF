@@ -316,8 +316,10 @@ def main():
         f.write(f"OPENSEARCH_PASSWORD={opensearch_pass}\n")
         f.write(f"OPENSEARCH_HOST={opensearch_host}\n")
 
+    import os as _os
+    _env = {**_os.environ, "DOCKER_BUILDKIT": "0"}
     try:
-        subprocess.run(["docker", "compose","-f", f"{str(LFD)}/docker-compose.yml" ,"--env-file",f"{str(LFD)}/.env",  "up", "--build","-d"], check=True)
+        subprocess.run(["docker", "compose","-f", f"{str(LFD)}/docker-compose.yml" ,"--env-file",f"{str(LFD)}/.env",  "up", "-d"], check=True, env=_env)
     except subprocess.CalledProcessError as e:
         print(f"Error executing docker-compose: {e}")
         return

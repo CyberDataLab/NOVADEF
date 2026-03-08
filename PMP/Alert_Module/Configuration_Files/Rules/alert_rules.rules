@@ -1,11 +1,42 @@
-alert tcp any any -> any 80 (
-    msg:"SQL Injection";
-    flow:to_server,established;
-    pcre:"/((\bunion(\s+all)?\s+select\b)|(\b(select|insert|update|delete|drop|create)\b.*\bfrom\b)|(\b(or|and)\b\s+[\'\"]?\d+[\'\"]?\s*=\s*[\'\"]?\d+[\'\"]?)|(--|%2d%2d|\/\*|%2f\*|%23))/i";
-    sid:1000101;
-    rev:3;
-    classtype:web-application-attack;
+# ── ICMP: Ping sweep / flood ─────────────────────────────────────────────────
+alert icmp any any -> any any (
+    msg:"NOVADEF ICMP Ping Detected";
+    itype:8;
+    sid:9001001;
+    rev:1;
 )
 
-# Uncomment for initial testing
-# alert tcp any any <> any 443 (msg:" Alert: Traffic detected on port 443"; sid:1000001; rev:1;)
+# ── TCP: Escaneo de puertos SYN masivo ────────────────────────────────────────
+alert tcp any any -> any any (
+    msg:"NOVADEF TCP Port Scan SYN";
+    flags:S;
+    detection_filter:track by_src, count 5, seconds 2;
+    sid:9001002;
+    rev:1;
+)
+
+# ── HTTP: SQL Injection (sin flow:established) ────────────────────────────────
+alert tcp any any -> any 80 (
+    msg:"NOVADEF SQL Injection Attempt";
+    content:"union", nocase;
+    content:"select", nocase;
+    sid:9001003;
+    rev:1;
+)
+
+# ── HTTP: Herramienta de ataque por User-Agent ────────────────────────────────
+alert tcp any any -> any 80 (
+    msg:"NOVADEF Attack Tool HTTP Request";
+    content:"User-Agent|3a 20|", nocase;
+    pcre:"/User-Agent\s*:\s*(sqlmap|nikto|nmap|masscan)/i";
+    sid:9001004;
+    rev:1;
+)
+
+# ── TCP: Puerto reverse shell Metasploit ──────────────────────────────────────
+alert tcp any any -> any 4444 (
+    msg:"NOVADEF Possible Reverse Shell Port 4444";
+    flags:S;
+    sid:9001005;
+    rev:1;
+)

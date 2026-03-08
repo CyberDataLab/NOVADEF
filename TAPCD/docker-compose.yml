@@ -38,7 +38,7 @@ services:
               "--out-topic", "flows_conditional_agg",
               "--group-id", "stream-json-alerts",
               "--linger-ms", "0",
-              "--mongo-uri", "mongodb://admin:admin123@mongodb:27017/?authSource=admin",
+              "--mongo-uri", "mongodb://admin:admin123@mongodb_novadef:27017/?authSource=admin",
               "--mongo-db", "flow_db",
               "--mongo-coll", "flows"]
     restart: unless-stopped

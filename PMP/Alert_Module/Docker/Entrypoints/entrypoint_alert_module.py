@@ -26,6 +26,10 @@ KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "alert-module-v1")
 KAFKA_TOPIC_IN = os.getenv("KAFKA_TOPIC_IN", "tshark_traces")
 KAFKA_TOPIC_OUT = os.getenv("KAFKA_TOPIC_OUT", "snort_alerts")
 
+# Ventana de deduplicación: si llega la misma alerta (src_ip, dst_ip, msg)
+# dentro de este tiempo (segundos), se descarta. Evita miles de alertas por nmap.
+ALERT_DEDUP_WINDOW = int(os.getenv("ALERT_DEDUP_WINDOW", "300"))
+
 # === SNORT CONFIG ===
 SNORT_BASE_CMD = [
     "snort",
@@ -151,11 +155,14 @@ def start_snort_live(ifname: str):
 
 
 
-def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_collection):
+def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_collection, stop_event=None):
     """
     Continuously monitors the Snort alert file for newly appended lines.
-    Each new alert is forwarded to Kafka and optionally stored in MongoDB.
-    Implements buffered Kafka publishing to reduce overhead.
+    Deduplicates alerts: si la misma combinación (src_ip, dst_ip, msg) ya fue
+    enviada dentro de ALERT_DEDUP_WINDOW segundos, se descarta para no generar
+    miles de alertas por un solo nmap u otro ataque repetitivo.
+    Solo se publica a Kafka (y MongoDB) la primera ocurrencia de cada alerta
+    dentro de la ventana.
     """
     os.makedirs(os.path.dirname(alert_path), exist_ok=True)
     if not os.path.exists(alert_path):
@@ -163,35 +170,69 @@ def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_colle
     ensure_mode_644(alert_path)
 
     print(f"📡 Starting alerts tail on {alert_path}")
+    print(f"🔧 Deduplicación activa: ventana {ALERT_DEDUP_WINDOW}s por (src_ip, dst_ip, msg)")
+
+    # {(src_ip, dst_ip, msg): timestamp_ultimo_envio}
+    dedup_cache: dict = {}
+
     with open(alert_path, "r", encoding="utf-8", errors="replace") as f:
-        f.seek(0, os.SEEK_END) # Go to the end of the file (only new lines)
+        f.seek(0, os.SEEK_END)  # Solo nuevas líneas
 
         buffer = []
         last_flush = time.time()
-        FLUSH_INTERVAL = 1.0  # seconds
+        FLUSH_INTERVAL = 1.0  # seconds (kept for idle-flush reference only)
 
         while True:
             line = f.readline()
             if not line:
-                time.sleep(0.5) # Waiting to receive new alerts
-            else:
-                line = line.strip()
-                if not line:
-                    continue
+                # Idle flush: no hay buffer que gestionar, solo comprobar stop
+                if stop_event is not None and stop_event.is_set():
+                    return
+                time.sleep(0.5)
+                continue
 
-                #  Sending to Kafka (in batches for efficiency)
-                buffer.append(line)
-                if time.time() - last_flush >= FLUSH_INTERVAL:
-                    try:
-                        producer.produce_lines(buffer)
-                    except Exception as e:
-                        print(f"❌ Error publishing alerts to Kafka: {e}")
-                    buffer.clear()
-                    last_flush = time.time()
+            line = line.strip()
+            if not line:
+                continue
 
-                # Sending alerts to MongoDB
-                if alerts_collection is not None:
-                    insert_alert_line(alerts_collection, line)
+            # Extraer clave de deduplicación
+            is_duplicate = False
+            try:
+                alert_doc = json.loads(line)
+                src_ap = alert_doc.get('src_ap', '')
+                dst_ap = alert_doc.get('dst_ap', '')
+                src_ip = src_ap.split(':')[0] if src_ap else ''
+                dst_ip = dst_ap.split(':')[0] if dst_ap else ''
+                msg    = alert_doc.get('msg', '')
+                dedup_key = (src_ip, dst_ip, msg)
+                now = time.time()
+
+                # Limpiar entradas expiradas cada 1000 alertas aprox.
+                if len(dedup_cache) > 1000:
+                    expired = [k for k, t in dedup_cache.items() if now - t > ALERT_DEDUP_WINDOW]
+                    for k in expired:
+                        del dedup_cache[k]
+
+                if dedup_key in dedup_cache and now - dedup_cache[dedup_key] < ALERT_DEDUP_WINDOW:
+                    is_duplicate = True
+                else:
+                    dedup_cache[dedup_key] = now
+                    print(f"🚨 Nueva alerta: {msg} | {src_ip} -> {dst_ip}")
+            except Exception:
+                pass  # Si falla el parseo, dejar pasar la línea
+
+            if is_duplicate:
+                continue  # Descartar: misma alerta en la ventana de tiempo
+
+            # Enviar a Kafka inmediatamente (sin buffer delay)
+            try:
+                producer.produce_lines([line])
+            except Exception as e:
+                print(f"❌ Error publishing alert to Kafka: {e}")
+
+            # Guardar en MongoDB
+            if alerts_collection is not None:
+                insert_alert_line(alerts_collection, line)
 
 
 def rebuild_frame_from_layers(layers):
@@ -351,11 +392,13 @@ def main():
 
     snort_proc = start_snort_live(TAP_IFACE)
 
-    threading.Thread(
+    stop_event = threading.Event()
+    alert_thread = threading.Thread(
         target=alerts_tail_loop,
-        args=(ALERT_PATH, kafka_producer, alerts_collection),
-        daemon=True
-    ).start()
+        args=(ALERT_PATH, kafka_producer, alerts_collection, stop_event),
+        daemon=False
+    )
+    alert_thread.start()
 
     consumer = KafkaLineConsumer(
         topic=KAFKA_TOPIC_IN,
@@ -382,6 +425,10 @@ def main():
         inject_packet_to_tap(packet_dict, tap_fd)
 
         consumer.commit_msg(msg)
+
+    # Señalar al hilo de alertas que pare y esperar que fluche el buffer pendiente
+    stop_event.set()
+    alert_thread.join(timeout=5)
 
     try:
         snort_proc.terminate()

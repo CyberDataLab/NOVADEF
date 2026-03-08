@@ -25,4 +25,5 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - ${PFD}/Results/Alerts:/home/Alert_Module/Alerts
+      - ${PFD}/Alert_Module/Configuration_Files/Rules:/home/Alert_Module/Snort_configuration/Rules
     restart: unless-stopped

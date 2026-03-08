@@ -1,10 +1,32 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
 
 scrape_configs:
+
+  # Descubrimiento dinámico de agentes via discovery-agent (host gateway)
   - job_name: 'device_autodiscovery'
     metrics_path: /metrics
     http_sd_configs:
       - url: http://discovery-agent:8000/sd  #Endpoint to discover the IPs that exoses their metrics using an endpoint with device_info container
         refresh_interval: 30s
+
+  # Telegraf — métricas de host en tiempo real (CPU, RAM, disco, internet)
+  # Expone prometheus_client en puerto 9273
+  - job_name: 'telegraf'
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['telegraf_novadef:9273']
+        labels:
+          module: 'telegraf'
+
+  # Fluentd — métricas de recolección de logs
+  - job_name: 'fluentd'
+    metrics_path: /metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['fluentd_novadef:24231']
+        labels:
+          module: 'fluentd'
 

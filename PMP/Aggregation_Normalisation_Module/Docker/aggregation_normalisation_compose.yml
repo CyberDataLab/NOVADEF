@@ -64,7 +64,7 @@ services:
 
   opensearch:
     image: opensearchproject/opensearch:3.4.0
-    container_name: opensearch_node_novadef
+    container_name: opensearch-node
     profiles: ["aggregation_module.opensearch"]
     depends_on:
       init-opensearch:
