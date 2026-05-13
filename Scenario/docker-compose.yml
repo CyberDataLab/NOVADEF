@@ -19,6 +19,8 @@ services:
       - "2222:2222" # SSH externo (si quisieras conectarte a mano)
     volumes:
       - ./victim-init:/custom-cont-init.d:ro  # instala iptables al arrancar
+      - ./victim-tools:/opt/novadef:ro
+      - ./shared-logs:/var/novadef/logs
     networks:
       - kafka_net
 
@@ -26,7 +28,12 @@ services:
     image: kalilinux/kali-rolling
     container_name: scenario_attacker
     restart: unless-stopped
-    command: /bin/sh -c "apt-get update && apt-get install -y nmap hping3 curl iputils-ping && tail -f /dev/null"
+    command: /bin/sh -c "apt-get update && apt-get install -y nmap hping3 curl iputils-ping iproute2 openssh-client sshpass && tail -f /dev/null"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./attacker-tools:/opt/novadef:ro
+      - ./shared-logs:/var/novadef/logs
     networks:
       - kafka_net
 

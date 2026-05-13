@@ -145,6 +145,35 @@ def setup_logger() -> logging.Logger:
     logger.addHandler(h)
     return logger
 
+def wait_for_service(label: str, factory, validator=None, timeout_sec: Optional[float] = None,
+                     retry_sec: Optional[float] = None):
+    """Reintenta conexiones de arranque para evitar bucles de reinicio al levantar dependencias."""
+    timeout = timeout_sec or float(os.getenv("STARTUP_MAX_WAIT_SEC", "180"))
+    delay = retry_sec or float(os.getenv("STARTUP_RETRY_SEC", "5"))
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    last_exc = None
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        resource = None
+        try:
+            resource = factory()
+            if validator is not None:
+                validator(resource)
+            return resource
+        except Exception as exc:
+            last_exc = exc
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+            print(f"⏳ Esperando {label} (intento {attempt})", flush=True)
+            time.sleep(delay)
+
+    raise RuntimeError(f"No fue posible conectar con {label}: {last_exc}")
+
 # ───────────── Utils ─────────────
 
 def sdiv(num, den):
@@ -486,28 +515,48 @@ class StreamProcessor:
         self.cfg = cfg
         self.log = setup_logger()
 
-        self.consumer = KafkaConsumer(
-            cfg.in_topic,
-            bootstrap_servers=cfg.bootstrap_servers,
-            group_id=cfg.group_id,
-            enable_auto_commit=True,
-            auto_offset_reset="latest",
-            value_deserializer=lambda m: m.decode("utf-8", errors="ignore"),
-            key_deserializer=lambda m: m.decode("utf-8", errors="ignore") if m else None,
-            consumer_timeout_ms=1000,
-        )
+        def make_consumer():
+            return KafkaConsumer(
+                cfg.in_topic,
+                bootstrap_servers=cfg.bootstrap_servers,
+                group_id=cfg.group_id,
+                enable_auto_commit=True,
+                auto_offset_reset="latest",
+                value_deserializer=lambda m: m.decode("utf-8", errors="ignore"),
+                key_deserializer=lambda m: m.decode("utf-8", errors="ignore") if m else None,
+                consumer_timeout_ms=1000,
+            )
 
-        self.producer = KafkaProducer(
-            bootstrap_servers=cfg.bootstrap_servers,
-            value_serializer=lambda v: v.encode("utf-8"),
-            linger_ms=max(cfg.linger_ms, 0),
-            compression_type=None,
-        )
+        def validate_consumer(consumer):
+            if not consumer.bootstrap_connected():
+                raise RuntimeError("Kafka consumer sin brokers disponibles")
+
+        self.consumer = wait_for_service("Kafka consumer", make_consumer, validate_consumer)
+
+        def make_producer():
+            return KafkaProducer(
+                bootstrap_servers=cfg.bootstrap_servers,
+                value_serializer=lambda v: v.encode("utf-8"),
+                linger_ms=max(cfg.linger_ms, 0),
+                compression_type=None,
+            )
+
+        def validate_producer(producer):
+            if not producer.bootstrap_connected():
+                raise RuntimeError("Kafka producer sin brokers disponibles")
+
+        self.producer = wait_for_service("Kafka producer", make_producer, validate_producer)
 
         # Mongo
         if not (self.cfg.mongo_uri and self.cfg.mongo_db and self.cfg.mongo_coll):
             raise SystemExit("❌ Falta configuración de Mongo (--mongo-uri, --mongo-db, --mongo-coll)")
-        self.mongo = MongoClient(self.cfg.mongo_uri)
+        def make_mongo():
+            return MongoClient(self.cfg.mongo_uri, serverSelectionTimeoutMS=5000)
+
+        def validate_mongo(client):
+            client.admin.command("ping")
+
+        self.mongo = wait_for_service("MongoDB", make_mongo, validate_mongo)
         self.coll = self.mongo[self.cfg.mongo_db][self.cfg.mongo_coll]
 
         self._pending: Dict[Tuple, Dict[str, object]] = {}

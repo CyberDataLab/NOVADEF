@@ -19,3 +19,18 @@ PMP/Results/tshark/*
 !PMP/Results/opensearch_data/.gitkeep
 !PMP/Results/prometheus_data/.gitkeep
 !PMP/Results/tshark/.gitkeep
+
+# ── Python cache / temporales ────────────────────────────────────────────────
+__pycache__/
+*.pyc
+
+# ── Sistema / editor ─────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Runtime logs / pids ──────────────────────────────────────────────────────
+*.log
+*.pid
+
+# ── Runtime JSONL (generados en ejecución) ───────────────────────────────────
+PMP/Results/Network_IDS/*.jsonl
+Scenario/shared-logs/*.jsonl

@@ -16,7 +16,8 @@ Logging minimal con iconos por mensaje:
 Sin logs verbosos de arranque/cierre ni durante el schema apply.
 """
 
-import argparse, csv, io, logging, re, signal, sys
+import argparse, csv, io, logging, re, signal, sys, time
+import os
 from typing import Dict, List, Optional
 
 from kafka import KafkaConsumer
@@ -29,6 +30,34 @@ _handler.setFormatter(logging.Formatter("%(message)s"))  # sin metadatos técnic
 LOG.handlers.clear()
 LOG.addHandler(_handler)
 LOG.setLevel(logging.INFO)
+
+def wait_for_service(label: str, factory, validator=None, timeout_sec: Optional[float] = None,
+                     retry_sec: Optional[float] = None):
+    timeout = timeout_sec or float(os.getenv("STARTUP_MAX_WAIT_SEC", "180"))
+    delay = retry_sec or float(os.getenv("STARTUP_RETRY_SEC", "5"))
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    last_exc = None
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        resource = None
+        try:
+            resource = factory()
+            if validator is not None:
+                validator(resource)
+            return resource
+        except Exception as exc:
+            last_exc = exc
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+            print(f"⏳ Esperando {label} (intento {attempt})", flush=True)
+            time.sleep(delay)
+
+    raise RuntimeError(f"No fue posible conectar con {label}: {last_exc}")
 
 # Señal de parada
 STOP = False
@@ -177,7 +206,13 @@ def consume_and_write(bootstrap: str, topic: str, uri: str, user: str, pwd: str,
     """Consume perfiles de Kafka y upsert en Neo4j con logs concisos+payload."""
     # Conexión Neo4j
     try:
-        driver = GraphDatabase.driver(uri, auth=(user, pwd))
+        def make_driver():
+            return GraphDatabase.driver(uri, auth=(user, pwd))
+
+        def validate_driver(driver):
+            driver.verify_connectivity()
+
+        driver = wait_for_service("Neo4j", make_driver, validate_driver)
     except Exception:
         print("❌ No se pudo conectar a Neo4j", flush=True)
         raise
@@ -191,15 +226,22 @@ def consume_and_write(bootstrap: str, topic: str, uri: str, user: str, pwd: str,
 
     # Consumer Kafka
     try:
-        consumer = KafkaConsumer(
-            topic,
-            bootstrap_servers=bootstrap,
-            group_id=group_id,
-            auto_offset_reset="latest",
-            enable_auto_commit=True,
-            value_deserializer=lambda v: v,  # bytes crudos
-            key_deserializer=lambda v: v,
-        )
+        def make_consumer():
+            return KafkaConsumer(
+                topic,
+                bootstrap_servers=bootstrap,
+                group_id=group_id,
+                auto_offset_reset="latest",
+                enable_auto_commit=True,
+                value_deserializer=lambda v: v,  # bytes crudos
+                key_deserializer=lambda v: v,
+            )
+
+        def validate_consumer(consumer):
+            if not consumer.bootstrap_connected():
+                raise RuntimeError("Kafka consumer sin brokers disponibles")
+
+        consumer = wait_for_service("Kafka consumer", make_consumer, validate_consumer)
     except Exception:
         print("❌ No se pudo crear el consumer de Kafka", flush=True)
         driver.close()

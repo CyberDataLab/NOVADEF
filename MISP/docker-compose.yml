@@ -73,7 +73,7 @@ services:
       - MISP_VERIFY_CERT=False
       # Conexión al Kafka de la PMP
       - KAFKA_BROKER=kafka_novadef:29092 
-      - KAFKA_TOPICS=syslog_logs,systemd_logs,falco_events,telegraf_metrics,tshark_traces,snort_alerts,cic_flow
+      - KAFKA_TOPICS=syslog_logs,systemd_logs,falco_events,telegraf_metrics,tshark_traces,snort_alerts,cic_flow,network_intrusion_alerts
       # Conexión directa a MongoDB para correlación
       - MONGO_URI=mongodb://admin:admin123@mongodb_novadef:27017/
       # Conexión a Neo4j para extracción de perfil TAPCD

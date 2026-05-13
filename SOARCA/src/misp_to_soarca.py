@@ -5,6 +5,7 @@ import time
 import requests
 import logging
 import schedule
+import socket
 from pymisp import PyMISP
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - SOARCA-TRIGGER - %(levelname)s - %(message)s')
@@ -15,8 +16,39 @@ MISP_KEY = os.getenv('MISP_KEY', 'CHANGEME')
 MISP_VERIFY_CERT = False
 SOARCA_API = os.getenv('SOARCA_API', 'http://127.0.0.1:8000')
 PLAYBOOK_PATH = os.getenv('PLAYBOOK_PATH', '/app/playbooks/block_ip.json')
+ISOLATION_PLAYBOOK_PATH = os.getenv('ISOLATION_PLAYBOOK_PATH', '/app/playbooks/isolate_lab_host.json')
+LAB_VICTIM_HOST = os.getenv('SOARCA_LAB_VICTIM_HOST', 'scenario_victim')
 
 PROCESSED_EVENTS_FILE = '/app/state/processed_events.txt'
+LAST_ISOLATION_BY_VICTIM = {}
+ISOLATION_DEDUP_SECONDS = int(os.getenv('SOARCA_ISOLATION_DEDUP_SECONDS', '300'))
+
+D3FEND_MAPPING = {
+    "network_password_spraying": {
+        "attack": ["T1110", "T1110.003", "T1133"],
+        "d3fend": [
+            "D3-NetworkTrafficFiltering",
+            "D3-InboundTrafficFiltering",
+            "D3-SessionTermination",
+            "D3-AccountLocking",
+            "D3-ConnectedHoneynet",
+        ],
+        "playbook": "block_ip",
+    },
+    "host_ransomware": {
+        "attack": ["T1486", "T1490", "T1489", "T1005"],
+        "d3fend": [
+            "D3-FileIntegrityMonitoring",
+            "D3-FileAccessPatternAnalysis",
+            "D3-ProcessAnalysis",
+            "D3-ExecutionIsolation",
+            "D3-NetworkIsolation",
+            "D3-ProcessTermination",
+            "D3-RestoreFile",
+        ],
+        "playbook": "isolate_lab_host",
+    },
+}
 
 
 def ensure_state_dir():
@@ -63,9 +95,9 @@ def trigger_soarca_playbook(attacker_ip, victim_ip, threat_info):
     # Trabajamos sobre una copia para no mutar la plantilla en memoria
     playbook = copy.deepcopy(playbook)
 
-    # 1. Inyectar victim_ip en todos los target_definitions de tipo linux
+    # 1. Inyectar victim_ip en todos los target_definitions SSH/Linux
     for target in playbook.get('target_definitions', {}).values():
-        if target.get('type') == 'linux':
+        if target.get('type') in {'linux', 'ssh'}:
             target['address'] = {'ipv4': [victim_ip]}
             logger.info(f"   🎯 Target SSH dinámico → {victim_ip}")
 
@@ -84,6 +116,96 @@ def trigger_soarca_playbook(attacker_ip, victim_ip, threat_info):
     except Exception as e:
         logger.error(f"❌ Error contactando SOARCA: {e}")
 
+
+def resolve_lab_victim_ip() -> str | None:
+    try:
+        return socket.gethostbyname(LAB_VICTIM_HOST)
+    except Exception as e:
+        logger.error(f"❌ No se pudo resolver host de víctima de laboratorio '{LAB_VICTIM_HOST}': {e}")
+        return None
+
+
+def trigger_soarca_isolation(victim_ip, threat_info):
+    now = time.time()
+    last = LAST_ISOLATION_BY_VICTIM.get(victim_ip, 0)
+    if now - last < ISOLATION_DEDUP_SECONDS:
+        logger.info(f"⏭️ Aislamiento ya aplicado recientemente para {victim_ip}, se omite relanzar.")
+        return
+
+    logger.info(f"🚀 Lanzando playbook de aislamiento en {victim_ip}")
+
+    try:
+        with open(ISOLATION_PLAYBOOK_PATH, 'r') as f:
+            playbook = json.load(f)
+    except Exception as e:
+        logger.error(f"❌ No se pudo leer el playbook de aislamiento desde {ISOLATION_PLAYBOOK_PATH}: {e}")
+        return
+
+    playbook = copy.deepcopy(playbook)
+
+    for target in playbook.get('target_definitions', {}).values():
+        if target.get('type') in {'linux', 'ssh'}:
+            target['address'] = {'ipv4': [victim_ip]}
+            logger.info(f"   🎯 Target SSH dinámico (aislamiento) → {victim_ip}")
+
+    if '__isolation_comment__' in playbook.get('playbook_variables', {}):
+        playbook['playbook_variables']['__isolation_comment__']['value'] = 'novadef-ransomware-lab'
+
+    url = f"{SOARCA_API}/trigger/playbook"
+    try:
+        response = requests.post(url, json=playbook, timeout=10)
+        if response.status_code == 200:
+            logger.info(f"✅ Playbook de aislamiento ejecutado en {victim_ip}")
+            LAST_ISOLATION_BY_VICTIM[victim_ip] = now
+        else:
+            logger.warning(f"⚠️ SOARCA respondió {response.status_code} (aislamiento): {response.text[:300]}")
+    except Exception as e:
+        logger.error(f"❌ Error contactando SOARCA para aislamiento: {e}")
+
+
+def fetch_candidate_events(headers, date_from):
+    queries = [
+        ("tag pmp-auto-aggregation", f"{MISP_URL}/events/index/searchTag:pmp-auto-aggregation/searchDatefrom:{date_from}"),
+        ("fallback recent events", f"{MISP_URL}/events/index/searchDatefrom:{date_from}"),
+    ]
+
+    merged_events = {}
+
+    for label, url in queries:
+        r = requests.get(url, headers=headers, verify=False, timeout=15)
+        if r.status_code != 200:
+            logger.error(f"MISP events/index ({label}) respondió {r.status_code}: {r.text[:200]}")
+            continue
+
+        events_index = r.json()
+        if events_index:
+            logger.info(f"Consulta MISP válida usando {label}: {len(events_index)} eventos candidatos.")
+            for event in events_index:
+                event_id = str(event.get('id', ''))
+                if event_id:
+                    merged_events[event_id] = event
+
+    return list(merged_events.values())
+
+
+def extract_attributes_from_restsearch(payload):
+    if isinstance(payload, list):
+        return payload
+
+    response = payload.get('response') if isinstance(payload, dict) else None
+    if isinstance(response, list):
+        return response
+    if isinstance(response, dict):
+        for key in ('Attribute', 'attributes'):
+            if isinstance(response.get(key), list):
+                return response[key]
+
+    for key in ('Attribute', 'attributes'):
+        if isinstance(payload, dict) and isinstance(payload.get(key), list):
+            return payload[key]
+
+    return []
+
 def check_misp_for_new_threats():
     logger.info("Buscando nuevos incidentes confirmados en MISP...")
 
@@ -98,18 +220,9 @@ def check_misp_for_new_threats():
     }
 
     try:
-        # Usar events/index que sí acepta GET y NO carga correlaciones
-        r = requests.get(
-            f"{MISP_URL}/events/index/searchTag:pmp-auto-aggregation/searchDatefrom:{date_from}",
-            headers=headers, verify=False, timeout=15
-        )
-        if r.status_code != 200:
-            logger.error(f"MISP events/index respondió {r.status_code}: {r.text[:200]}")
-            return
-
-        events_index = r.json()
+        events_index = fetch_candidate_events(headers, date_from)
         if not events_index:
-            logger.info("No hay eventos nuevos con tag pmp-auto-aggregation.")
+            logger.info("No hay eventos nuevos candidatos en MISP.")
             return
 
         processed = load_processed_events()
@@ -129,7 +242,38 @@ def check_misp_for_new_threats():
             if event_id in processed:
                 continue
 
+            is_network_event = (
+                event_info.startswith("Distributed Password Spraying")
+                or event_info.startswith("NETWORK IDS:")
+                or event_info.startswith("SNORT:")
+            )
+            is_ransomware_falco = (
+                event_info.startswith("FALCO:")
+                and "novadef" in event_info.lower()
+                and "ransomware" in event_info.lower()
+            )
+
+            if not (is_network_event or is_ransomware_falco):
+                logger.debug(f"Evento {event_id} fuera del alcance del trigger actual: {event_info}")
+                continue
+
             logger.info(f"Analizando evento ID {event_id}: {event_info} para mitigación...")
+
+            if is_ransomware_falco:
+                mapping = D3FEND_MAPPING["host_ransomware"]
+                logger.info(
+                    "🧭 Selección defensiva MITRE D3FEND: %s | ATT&CK=%s | playbook=%s",
+                    ",".join(mapping["d3fend"]),
+                    ",".join(mapping["attack"]),
+                    mapping["playbook"],
+                )
+                victim_ip = resolve_lab_victim_ip()
+                if not victim_ip:
+                    save_processed_event(event_id)
+                    continue
+                trigger_soarca_isolation(victim_ip, event_info)
+                save_processed_event(event_id)
+                continue
 
             # Estrategia 1: attributes/restSearch por eventid — evita cargar correlaciones
             attacker_ips = []
@@ -141,12 +285,17 @@ def check_misp_for_new_threats():
                     headers=headers, verify=False, timeout=15
                 )
                 if r_attrs.status_code == 200:
-                    attrs_data = r_attrs.json().get('response', {}).get('Attribute', [])
+                    attrs_data = extract_attributes_from_restsearch(r_attrs.json())
+                    logger.info(f"   attributes/restSearch devolvió {len(attrs_data)} atributos.")
                     for attr in attrs_data:
                         comment = str(attr.get('comment', ''))
-                        if attr.get('type') == 'ip-src' and '[ATTACKER IP]' in comment:
+                        if attr.get('type') == 'ip-src' and (
+                            '[ATTACKER IP]' in comment or '[NETWORK IDS]' in comment
+                        ):
                             attacker_ips.append(attr['value'])
-                        elif attr.get('type') == 'ip-dst' and '[VICTIM IP]' in comment:
+                        elif attr.get('type') == 'ip-dst' and (
+                            '[VICTIM IP]' in comment or '[NETWORK IDS]' in comment
+                        ):
                             victim_ips.append(attr['value'])
                     if attacker_ips:
                         logger.info(f"   IPs obtenidas via attributes/restSearch: atacante={attacker_ips}, víctima={victim_ips}")
@@ -157,6 +306,18 @@ def check_misp_for_new_threats():
 
             # Estrategia 2 (fallback): parsear IPs directamente del título del evento
             # Formato: "SNORT: ... [172.x.x.x → 172.x.x.x]"
+            if not attacker_ips or not victim_ips:
+                bracket_match = _re.search(
+                    r'\[(\d{1,3}(?:\.\d{1,3}){3})\s*->\s*(\d{1,3}(?:\.\d{1,3}){3})',
+                    event_info,
+                )
+                if bracket_match:
+                    if not attacker_ips:
+                        attacker_ips = [bracket_match.group(1)]
+                    if not victim_ips:
+                        victim_ips = [bracket_match.group(2)]
+                    logger.info(f"   IPs extraídas del bloque [attacker -> victim]: atacante={attacker_ips[0]}, víctima={victim_ips[0]}")
+
             if not attacker_ips or not victim_ips:
                 ip_pattern = r'(\d{1,3}(?:\.\d{1,3}){3})'
                 ips_in_title = _re.findall(ip_pattern, event_info)
@@ -181,6 +342,13 @@ def check_misp_for_new_threats():
                 continue
 
             victim_ip = victim_ips[0]
+            mapping = D3FEND_MAPPING["network_password_spraying"]
+            logger.info(
+                "🧭 Selección defensiva MITRE D3FEND: %s | ATT&CK=%s | playbook=%s",
+                ",".join(mapping["d3fend"]),
+                ",".join(mapping["attack"]),
+                mapping["playbook"],
+            )
             for ip in set(attacker_ips):
                 trigger_soarca_playbook(ip, victim_ip, event_info)
             save_processed_event(event_id)

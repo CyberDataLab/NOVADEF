@@ -4,6 +4,7 @@ import sys
 import logging
 import re
 import time
+import hashlib
 import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
@@ -33,8 +34,126 @@ OPENSEARCH_PASS = os.getenv('OPENSEARCH_PASSWORD', '')
 # Misma combinación dentro de DEDUP_WINDOW_SECS se descarta (es el mismo ataque)
 DEDUP_WINDOW_SECS = 120
 _alert_dedup: dict = {}  # clave → epoch del último evento MISP creado
+DEDUP_STATE_FILE = os.getenv('DEDUP_STATE_FILE', '/app/state/misp_dedup_state.json')
+DEDUP_PERSIST_TTL_SECS = int(os.getenv('DEDUP_PERSIST_TTL_SECS', '14400'))  # 4h
+NETWORK_ATTACK_COOLDOWN_SECS = int(os.getenv('NETWORK_ATTACK_COOLDOWN_SECS', '1800'))  # 30 min
 
 
+
+
+def ensure_state_dir():
+    os.makedirs(os.path.dirname(DEDUP_STATE_FILE), exist_ok=True)
+
+
+def load_dedup_state() -> dict:
+    ensure_state_dir()
+    if not os.path.exists(DEDUP_STATE_FILE):
+        return {}
+    try:
+        with open(DEDUP_STATE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.debug(f"[DEDUP] No se pudo cargar estado persistente: {e}")
+    return {}
+
+
+def save_dedup_state(state: dict):
+    ensure_state_dir()
+    now = int(time.time())
+    pruned = {
+        k: v for k, v in state.items()
+        if isinstance(v, (int, float)) and (now - int(v)) <= DEDUP_PERSIST_TTL_SECS
+    }
+    with open(DEDUP_STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(pruned, f)
+
+
+_persisted_dedup = load_dedup_state()
+
+
+def already_processed_persisted(dedup_key: str) -> bool:
+    ts = _persisted_dedup.get(dedup_key)
+    if not ts:
+        return False
+    return (time.time() - float(ts)) <= DEDUP_PERSIST_TTL_SECS
+
+
+def mark_processed_persisted(dedup_key: str):
+    _persisted_dedup[dedup_key] = int(time.time())
+    save_dedup_state(_persisted_dedup)
+
+
+def _stable_hash(parts: list[str]) -> str:
+    joined = "|".join(parts)
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def upsert_tapcd_actor_profile(victim_ip: str, src_ips: list[str], mitre_attack: list[str], usernames: list[str]) -> bool:
+    """
+    Crea/actualiza un perfil mínimo de actor en Neo4j para garantizar
+    que TAPCD tenga un actor targeteando a la víctima del incidente.
+    """
+    if not victim_ip:
+        return False
+
+    attacker_ref = src_ips[0] if src_ips else "unknown-src"
+    actor_id = f"novadef-network-{attacker_ref.replace('.', '-')}-{victim_ip.replace('.', '-')}"
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    query = {
+        "statements": [
+            {
+                "statement": (
+                    "MERGE (a:Actor {id: $actor_id}) "
+                    "SET a.profile = 'credential-access-distributed-spraying', "
+                    "a.riskLevel = '8', "
+                    "a.country = coalesce(a.country, 'unknown'), "
+                    "a.motivation = 'credential_access', "
+                    "a.affiliation = 'unknown', "
+                    "a.skills = 'automation,password_spraying', "
+                    "a.knowledge = 'remote_services_authentication', "
+                    "a.attitude = 'opportunistic', "
+                    "a.automationLevel = 'high', "
+                    "a.comments = $comments, "
+                    "a.lastActivity = $now, "
+                    "a.firstSeen = coalesce(a.firstSeen, $now) "
+                    "MERGE (t:Target {ip: $victim_ip}) "
+                    "MERGE (a)-[:TARGETS]->(t) "
+                    "WITH a "
+                    "UNWIND $src_ips AS sip "
+                    "MERGE (s:SourceIP {ip: sip}) "
+                    "MERGE (a)-[:ORIGINATES_FROM]->(s) "
+                    "WITH a "
+                    "UNWIND $ttps AS ttp "
+                    "MERGE (x:Technique {id: ttp}) "
+                    "MERGE (a)-[:USES]->(x)"
+                ),
+                "parameters": {
+                    "actor_id": actor_id,
+                    "victim_ip": victim_ip,
+                    "src_ips": src_ips[:10],
+                    "ttps": mitre_attack[:10],
+                    "comments": f"usernames={','.join(usernames[:10])}",
+                    "now": now_iso,
+                },
+            }
+        ]
+    }
+    try:
+        response = requests.post(
+            NEO4J_HTTP_URL,
+            json=query,
+            auth=HTTPBasicAuth(NEO4J_USER, NEO4J_PASS),
+            timeout=5,
+        )
+        if response.status_code == 200:
+            logger.info(f"[TAPCD] Perfil actor asegurado en Neo4j para víctima {victim_ip}")
+            return True
+    except Exception as e:
+        logger.warning(f"[TAPCD] No se pudo upsertar perfil actor: {e}")
+    return False
 
 
 def get_opensearch_host_context() -> str | None:
@@ -228,8 +347,9 @@ def process_alert_to_misp(misp, topic, alert_data):
     if not misp:
         return
 
-    # Topics de métricas puras y Falco (desactivado por config): los ignora el integrador MISP
-    if topic in ['telegraf_metrics', 'syslog_logs', 'systemd_logs', 'tshark_traces', 'cic_flow', 'falco_events']:
+    # Topics puramente métricos o de trazas crudas: no generan eventos MISP directos.
+    # Falco sí debe recorrer el pipeline de enriquecimiento y publicación.
+    if topic in ['telegraf_metrics', 'syslog_logs', 'systemd_logs', 'tshark_traces', 'cic_flow']:
         return
 
     src_ip = dst_ip = src_port = dst_port = None
@@ -347,6 +467,78 @@ def process_alert_to_misp(misp, topic, alert_data):
             'comment': '[FALCO] Contexto del proceso/contenedor'
         })
 
+    elif topic == 'network_intrusion_alerts':
+        dst_ip = alert_data.get('dst_ip')
+        dst_port = alert_data.get('dst_port')
+        src_ips = alert_data.get('src_ips', []) or []
+        usernames = alert_data.get('usernames', []) or []
+        failed_attempts = alert_data.get('failed_attempts', 0)
+        requests_per_minute = alert_data.get('requests_per_minute', 0)
+        anomaly_score = alert_data.get('anomaly_score', 0)
+        mitre_attack = alert_data.get('mitre_attack', []) or []
+
+        first_seen_raw = str(alert_data.get('first_seen') or alert_data.get('timestamp') or '')
+        first_seen_bucket = first_seen_raw[:16] if first_seen_raw else datetime.utcnow().strftime('%Y-%m-%dT%H:%M')
+        src_fingerprint = _stable_hash(sorted(set(str(x) for x in src_ips)))
+        # Clave estable por campaña de spraying sobre mismo servicio destino.
+        dedup_key = f"network_ids|{dst_ip}|{dst_port}"
+        persisted_ts = _persisted_dedup.get(dedup_key)
+        if persisted_ts and (time.time() - float(persisted_ts)) <= NETWORK_ATTACK_COOLDOWN_SECS:
+            logger.info(f"[DEDUP-PERSIST] Campaña de spraying ya procesada recientemente: {dedup_key}")
+            return
+
+        now = time.time()
+        if dedup_key in _alert_dedup and (now - _alert_dedup[dedup_key]) < NETWORK_ATTACK_COOLDOWN_SECS:
+            return
+        _alert_dedup[dedup_key] = now
+        logger.info(f"[DEDUP] Nueva alerta Network IDS única: {dedup_key}")
+
+        first_seen = alert_data.get('first_seen') or alert_data.get('timestamp') or 'unknown-window'
+        primary_src = src_ips[0] if src_ips else 'unknown-src'
+        attack_fp = _stable_hash([str(dst_ip), str(dst_port), src_fingerprint, first_seen_bucket])
+        event_title = (
+            f"{alert_data.get('title') or f'NETWORK IDS: Password Spraying [{primary_src} -> {dst_ip}:{dst_port}]'}"
+            f" [{primary_src} -> {dst_ip}]"
+            f" | first_seen={first_seen}"
+            f" | attack_fp={attack_fp}"
+        )
+
+        for src_ip_item in src_ips[:10]:
+            attributes_to_add.append({
+                'type': 'ip-src',
+                'value': src_ip_item,
+                'comment': '[NETWORK IDS] IP origen sospechosa',
+            })
+        if dst_ip:
+            attributes_to_add.append({
+                'type': 'ip-dst',
+                'value': dst_ip,
+                'comment': f'[NETWORK IDS] Servicio destino {dst_port}',
+            })
+        if dst_port:
+            attributes_to_add.append({
+                'type': 'port',
+                'value': str(dst_port),
+                'comment': '[NETWORK IDS] Puerto de acceso remoto observado',
+            })
+
+        ids_detail = (
+            f"[NETWORK IDS ALERT]\n"
+            f"  Ataque         : distributed password spraying\n"
+            f"  Destino        : {dst_ip}:{dst_port}\n"
+            f"  IPs origen     : {', '.join(src_ips[:15])}\n"
+            f"  Usuarios       : {', '.join(usernames[:20])}\n"
+            f"  Fallos auth    : {failed_attempts}\n"
+            f"  Req/min        : {requests_per_minute:.2f}\n"
+            f"  Score anomalia : {anomaly_score:.6f}\n"
+            f"  MITRE ATT&CK   : {', '.join(mitre_attack)}"
+        )
+        attributes_to_add.append({
+            'type': 'text',
+            'value': ids_detail,
+            'comment': '[NETWORK IDS] Resumen de la detección',
+        })
+
     # Sin atributos => salir
     if not attributes_to_add:
         return
@@ -364,18 +556,20 @@ def process_alert_to_misp(misp, topic, alert_data):
         logger.debug(f"[DEDUP-MISP] No se pudo comprobar duplicado en MISP: {e}")
 
     # ── Crear un evento MISP nuevo para esta alerta ───────────────────────────
-    event = MISPEvent()
-    event.info = event_title
-    event.distribution = 0      # Your Organization Only
-    event.threat_level_id = 2   # Medium
-    event.analysis = 0          # Initial
-    event.disable_correlation = True   # Evita bug SQL con columna 1_event_id en tabla correlations
-    event.add_tag("pmp-auto-aggregation")
-
     try:
-        new_event = misp.add_event(event, pythonify=True)
+        new_event = misp.add_event(
+            {
+                'info': event_title,
+                'distribution': 0,
+                'threat_level_id': 2,
+                'analysis': 0,
+            },
+            pythonify=True,
+        )
         event_id = new_event.id
         logger.info(f"Nuevo evento MISP #{event_id}: {event_title}")
+        if topic == 'network_intrusion_alerts':
+            mark_processed_persisted(dedup_key)
     except Exception as e:
         logger.error(f"Error creando evento MISP '{event_title}': {e}")
         return
@@ -390,12 +584,33 @@ def process_alert_to_misp(misp, topic, alert_data):
         except Exception as e:
             logger.error(f"Error añadiendo atributo: {e}")
 
+    try:
+        misp.add_attribute(
+            event_id,
+            {
+                'type': 'text',
+                'value': 'pipeline-tag:pmp-auto-aggregation',
+                'comment': '[PIPELINE] Marcador interno de agregación automática',
+            },
+            pythonify=True,
+        )
+    except Exception as e:
+        logger.warning(f"No se pudo marcar el evento #{event_id} con pipeline-tag: {e}")
+
     # ── Contexto enriquecido (solo en alertas Snort) ──────────────────────────
-    if topic != 'snort_alerts':
+    if topic not in ('snort_alerts', 'network_intrusion_alerts'):
         return
 
     # 1. Flujos CIC (MongoDB) para IP atacante y víctima
-    for ip in filter(None, [src_ip, dst_ip]):
+    context_ips = []
+    if topic == 'network_intrusion_alerts':
+        context_ips.extend(src_ips[:3])
+        if dst_ip:
+            context_ips.append(dst_ip)
+    else:
+        context_ips.extend(filter(None, [src_ip, dst_ip]))
+
+    for ip in context_ips:
         flow_ctx = get_network_flows_context(ip)
         if flow_ctx:
             try:
@@ -418,6 +633,9 @@ def process_alert_to_misp(misp, topic, alert_data):
     # 3. Perfil TAPCD del actor (Neo4j)
     if dst_ip:
         actor = get_tapcd_actor_profile(dst_ip)
+        if not actor and topic == 'network_intrusion_alerts':
+            upsert_tapcd_actor_profile(dst_ip, src_ips, mitre_attack, usernames)
+            actor = get_tapcd_actor_profile(dst_ip)
         if actor:
             profile_text = (
                 f"[TAPCD - Perfil del Actor Amenaza]\n"

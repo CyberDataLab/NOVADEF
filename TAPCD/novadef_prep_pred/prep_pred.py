@@ -18,7 +18,7 @@ SQL Injection (sin patrones de texto):
       * RiskLevel = modelo ± bump suave (cap [1..10])
 """
 from __future__ import annotations
-import argparse, csv, io, json, logging, math, os, re, sys, signal, datetime as _dt
+import argparse, csv, io, json, logging, math, os, re, sys, signal, time, datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
 from hashlib import md5
@@ -65,6 +65,34 @@ LOG.addHandler(_handler)
 def _setup_log_level():
     level = os.getenv("LOG_LEVEL", "INFO").upper()
     LOG.setLevel(getattr(logging, level, logging.INFO))
+
+def wait_for_service(label: str, factory, validator=None, timeout_sec: Optional[float] = None,
+                     retry_sec: Optional[float] = None):
+    timeout = timeout_sec or float(os.getenv("STARTUP_MAX_WAIT_SEC", "180"))
+    delay = retry_sec or float(os.getenv("STARTUP_RETRY_SEC", "5"))
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    last_exc = None
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        resource = None
+        try:
+            resource = factory()
+            if validator is not None:
+                validator(resource)
+            return resource
+        except Exception as exc:
+            last_exc = exc
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+            print(f"⏳ Esperando {label} (intento {attempt})", flush=True)
+            time.sleep(delay)
+
+    raise RuntimeError(f"No fue posible conectar con {label}: {last_exc}")
 
 # ───────────────────── Input header ─────────────────────
 EXPECTED_HEADER = [
@@ -832,23 +860,37 @@ def parse_args():
     return ap.parse_args()
 
 def make_consumer(bootstrap, topic, group_id, from_beginning):
-    return KafkaConsumer(
-        topic,
-        bootstrap_servers=bootstrap,
-        group_id=group_id,
-        auto_offset_reset="earliest" if from_beginning else "latest",
-        enable_auto_commit=True,
-        value_deserializer=lambda v: v,
-        key_deserializer=lambda v: v,
-    )
+    def factory():
+        return KafkaConsumer(
+            topic,
+            bootstrap_servers=bootstrap,
+            group_id=group_id,
+            auto_offset_reset="earliest" if from_beginning else "latest",
+            enable_auto_commit=True,
+            value_deserializer=lambda v: v,
+            key_deserializer=lambda v: v,
+        )
+
+    def validator(consumer):
+        if not consumer.bootstrap_connected():
+            raise RuntimeError("Kafka consumer sin brokers disponibles")
+
+    return wait_for_service("Kafka consumer", factory, validator)
 
 def make_producer(bootstrap, linger_ms=0):
-    return KafkaProducer(
-        bootstrap_servers=bootstrap,
-        value_serializer=lambda v: v.encode("utf-8"),
-        linger_ms=linger_ms,
-        compression_type=None,
-    )
+    def factory():
+        return KafkaProducer(
+            bootstrap_servers=bootstrap,
+            value_serializer=lambda v: v.encode("utf-8"),
+            linger_ms=linger_ms,
+            compression_type=None,
+        )
+
+    def validator(producer):
+        if not producer.bootstrap_connected():
+            raise RuntimeError("Kafka producer sin brokers disponibles")
+
+    return wait_for_service("Kafka producer", factory, validator)
 
 def main():
     _setup_log_level()

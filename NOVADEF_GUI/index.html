@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NOVADEF Service Hub</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(18, 27, 52, 0.78);
+      --line: rgba(255, 255, 255, 0.13);
+      --txt: #e9edf8;
+      --muted: #9aacd7;
+      --accent: #2dd4bf;
+      --accent2: #60a5fa;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--txt);
+      font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 500px at -10% -10%, #1d4ed8 0%, transparent 55%),
+        radial-gradient(1000px 500px at 110% -10%, #0f766e 0%, transparent 50%),
+        linear-gradient(180deg, #070b16 0%, #0b1020 100%);
+      padding: 32px 24px 48px;
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+    .hero {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(28, 41, 79, 0.82), rgba(12, 19, 39, 0.9));
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: 0 12px 42px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(6px);
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(1.6rem, 2.8vw, 2.4rem);
+      letter-spacing: 0.2px;
+    }
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+    .badge {
+      display: inline-flex;
+      margin-top: 14px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(45, 212, 191, 0.45);
+      background: rgba(45, 212, 191, 0.08);
+      color: #bffcf4;
+      font-weight: 600;
+      font-size: 0.87rem;
+    }
+    .grid {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      text-decoration: none;
+      color: inherit;
+      background: var(--panel);
+      backdrop-filter: blur(4px);
+      transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.22);
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(96, 165, 250, 0.7);
+      box-shadow: 0 14px 28px rgba(0, 0, 0, 0.32);
+    }
+    .kicker {
+      display: inline-block;
+      font-size: 0.72rem;
+      letter-spacing: 0.35px;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .card h3 {
+      margin: 0;
+      font-size: 1.05rem;
+      line-height: 1.3;
+    }
+    .url {
+      margin-top: 8px;
+      color: #d2dcf7;
+      font-size: 0.9rem;
+      word-break: break-all;
+    }
+    .meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+    .footer {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      padding-left: 2px;
+    }
+    .warn { color: var(--warn); }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>NOVADEF Service Hub</h1>
+      <p>Accesos directos a los servicios expuestos para operación y demo del flujo completo.</p>
+      <span class="badge">Laboratorio activo</span>
+      <div class="grid">
+        <a class="card" href="http://localhost:3000" target="_blank" rel="noreferrer">
+          <span class="kicker">Observabilidad</span>
+          <h3>Grafana</h3>
+          <div class="url">http://localhost:3000</div>
+          <div class="meta">Dashboards y métricas</div>
+        </a>
+        <a class="card" href="http://localhost:9090" target="_blank" rel="noreferrer">
+          <span class="kicker">Métricas</span>
+          <h3>Prometheus</h3>
+          <div class="url">http://localhost:9090</div>
+          <div class="meta">Series temporales y targets</div>
+        </a>
+        <a class="card" href="http://localhost:7474" target="_blank" rel="noreferrer">
+          <span class="kicker">Perfilado</span>
+          <h3>Neo4j (TAPCD)</h3>
+          <div class="url">http://localhost:7474</div>
+          <div class="meta">Usuario: neo4j · Pass: password</div>
+        </a>
+        <a class="card" href="https://localhost:8443" target="_blank" rel="noreferrer">
+          <span class="kicker">Threat Intel</span>
+          <h3>MISP</h3>
+          <div class="url">https://localhost:8443</div>
+          <div class="meta">Usuario: admin@admin.test · Pass: admin</div>
+        </a>
+      </div>
+      <div class="footer">
+        Si algún enlace no responde, espera a que termine el arranque completo.<br />
+        <span class="warn">Nota:</span> Algunos navegadores mostrarán aviso de certificado en MISP (entorno lab).
+      </div>
+    </section>
+  </main>
+</body>
+</html>

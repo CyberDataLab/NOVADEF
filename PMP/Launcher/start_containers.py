@@ -30,7 +30,7 @@ class cmd_parser:
 
     # Dictionary that associates a module with its service.
     MODULE_REGISTRY: Dict[str, List[str]] = {
-        "alert_module":         ["alert_module"],
+        "alert_module":         ["alert_module", "network_intrusion_detector"],
         "communication_module": ["kafka", "filebeat"],
         "collection_module":    ["fluentd", "telegraf", "tshark", "falco", "info"],
         "flow_module":          ["flow_module"],

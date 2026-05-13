@@ -1,0 +1,91 @@
+{
+    "type": "playbook",
+    "spec_version": "cacao-2.0",
+    "id": "playbook--5e6a9f93-2b6e-48f5-9e0d-566e7f52adfd",
+    "name": "Isolate Lab Host via iptables",
+    "description": "Isolate a lab endpoint from the network by applying restrictive iptables policies over SSH.",
+    "playbook_types": ["mitigation"],
+    "created_by": "identity--1c5995c2-27b8-4371-a69d-6556cd689183",
+    "created": "2026-05-11T00:00:00.000Z",
+    "modified": "2026-05-11T00:00:00.000Z",
+    "valid_from": "2026-05-11T00:00:00.000Z",
+    "valid_until": "2030-05-11T00:00:00.000Z",
+    "revoked": false,
+    "priority": 1,
+    "severity": 85,
+    "impact": 65,
+    "labels": [
+        "mitigation",
+        "network-isolation",
+        "ransomware",
+        "lab"
+    ],
+    "playbook_variables": {
+        "__isolation_comment__": {
+            "type": "string",
+            "name": "__isolation_comment__",
+            "description": "Context comment attached to the isolation rule execution.",
+            "value": "lab-isolation",
+            "constant": false,
+            "external": true
+        }
+    },
+    "workflow_start": "start--a5f1e36a-246f-4fef-a4bc-e4f9fe4bcb03",
+    "workflow": {
+        "start--a5f1e36a-246f-4fef-a4bc-e4f9fe4bcb03": {
+            "type": "start",
+            "name": "Start Isolation Playbook",
+            "on_completion": "action--54c992be-3e37-499e-9e7b-2b5cab9425d8"
+        },
+        "action--54c992be-3e37-499e-9e7b-2b5cab9425d8": {
+            "type": "action",
+            "name": "Apply restrictive iptables policy",
+            "description": "Uses SSH to isolate the lab endpoint from inbound and outbound network traffic.",
+            "commands": [
+                {
+                    "type": "ssh",
+                    "command": "sudo -n iptables -P INPUT DROP 2>&1; echo ISOLATION_INPUT___isolation_comment__:value"
+                },
+                {
+                    "type": "ssh",
+                    "command": "sudo -n iptables -P OUTPUT DROP 2>&1; echo ISOLATION_OUTPUT___isolation_comment__:value"
+                }
+            ],
+            "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",
+            "targets": [
+                "linux--5f6cf3f3-1a3b-4f04-9b83-a69d4436d9f2"
+            ],
+            "on_completion": "end--fef9c54b-6f14-4c10-8c57-4f58974285d8"
+        },
+        "end--fef9c54b-6f14-4c10-8c57-4f58974285d8": {
+            "type": "end",
+            "name": "End Isolation Playbook"
+        }
+    },
+    "agent_definitions": {
+        "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74": {
+            "type": "soarca",
+            "name": "soarca-ssh"
+        }
+    },
+    "target_definitions": {
+        "linux--5f6cf3f3-1a3b-4f04-9b83-a69d4436d9f2": {
+            "type": "linux",
+            "name": "scenario_victim",
+            "description": "Lab endpoint target used for isolation demonstrations.",
+            "address": {
+                "ipv4": ["172.18.0.10"]
+            },
+            "port": "2222",
+            "authentication_info": "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"
+        }
+    },
+    "authentication_info_definitions": {
+        "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78": {
+            "type": "user-auth",
+            "name": "victim-ssh-credentials",
+            "username": "novadef",
+            "password": "novadef_password"
+        }
+    }
+}

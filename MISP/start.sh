@@ -190,7 +190,7 @@ docker exec pmp-misp-db mysql -uroot -pmy_root_password misp \
     && _ok "Columna 'events.protected' verificada." || _warn "No se pudo añadir 'events.protected'."
 
 # Tabla 'cryptographic_keys' (requerida por eventos MISP al leer/crear)
-SCRIPT_SQL_CRYPTO=$(mktemp /tmp/misp_crypto_XXXXXX.sql)
+SCRIPT_SQL_CRYPTO=$(mktemp "${TMPDIR:-/tmp}/misp_crypto.XXXXXX")
 cat > "$SCRIPT_SQL_CRYPTO" << 'ENDSQL'
 CREATE TABLE IF NOT EXISTS cryptographic_keys (
   id int(10) unsigned NOT NULL AUTO_INCREMENT,
@@ -398,7 +398,7 @@ if [ -z "$EXISTING" ]; then
     _warn "Usuario admin no encontrado. Insertando directamente en BD..."
 
     # Escribir SQL a fichero temporal (evita problemas de escape con $ en bcrypt)
-    SQL_TMP=$(mktemp /tmp/misp_admin_XXXXXX.sql)
+SQL_TMP=$(mktemp "${TMPDIR:-/tmp}/misp_admin.XXXXXX")
     # shellcheck disable=SC2016
     cat > "$SQL_TMP" << 'ENDSQL'
 INSERT IGNORE INTO organisations

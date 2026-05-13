@@ -10,3 +10,8 @@ include:
   - path: ${PFD}/Aggregation_Normalisation_Module/Docker/aggregation_normalisation_compose.yml
 
 # Add more paths if necessary.
+
+networks:
+  default:
+    external: true
+    name: launcher_default

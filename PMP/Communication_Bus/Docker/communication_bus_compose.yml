@@ -6,7 +6,7 @@ services:
     container_name: kafka_novadef
     profiles: ["communication_module.kafka"]
     healthcheck:
-      test: ["CMD", "nc", "-z", "kafka_novadef", "29092"]
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/29092'"]
       interval: 5s
       retries: 15
       start_period: 10s
@@ -57,6 +57,7 @@ services:
       - ${PFD}/Results/fluentd_logs:/fluentd/log:ro
       - ${PFD}/Results/tshark/traces:/tshark/traces:ro
       - ${PFD}/Results/falco/logs:/falco/logs:ro
+      - ${PFD}/../Scenario/shared-logs:/scenario/logs:ro
     command: 
       - "--strict.perms=false" # Manual change of owner was avoided by using this flag in Filebeat.
       - "-e"

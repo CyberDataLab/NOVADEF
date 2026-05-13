@@ -49,6 +49,20 @@ filebeat.inputs:
       kafka_topic: "falco_events"
     fields_under_root: true
 
+  - type: filestream
+    id: network_auth_events
+    enable: true
+    paths:
+      - "/scenario/logs/password_spraying_attempts.jsonl"
+    tags: ["network_auth_events"]
+    fields:
+      kafka_topic: "network_auth_events"
+    fields_under_root: true
+    parsers:
+      - ndjson:
+          target: ""
+          add_error_key: true
+
 output.kafka:
   hosts: ["kafka_novadef:29092"] # Internal broker to be used by containers -> need to be changed to kafka_novadef-node1.lan:9094 if it is located in another machine
   topic: '%{[kafka_topic]}'
