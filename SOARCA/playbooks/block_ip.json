@@ -43,11 +43,7 @@
             "commands": [
                 {
                     "type": "ssh",
-                    "command": "sudo -n iptables -A INPUT -s __target_ip__:value -j DROP 2>&1; echo DONE_INPUT"
-                },
-                {
-                    "type": "ssh",
-                    "command": "sudo -n iptables -A OUTPUT -d __target_ip__:value -j DROP 2>&1; echo DONE_OUTPUT"
+                    "command": "sudo -n sh -lc 'iptables -C INPUT -s __target_ip__:value -j DROP 2>/dev/null || iptables -A INPUT -s __target_ip__:value -j DROP; iptables -C OUTPUT -d __target_ip__:value -j DROP 2>/dev/null || iptables -A OUTPUT -d __target_ip__:value -j DROP; echo DONE_BLOCK_IP'"
                 }
             ],
             "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",

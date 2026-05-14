@@ -484,6 +484,18 @@ sleep 5
 docker exec pmp-misp-server nginx -s reload 2>/dev/null || true
 _ok "Cache CakePHP limpiada y PHP-FPM reiniciado (service restart)."
 
+# ----------------------------------------------------------------
+# Estabilizar NGINX interno del contenedor MISP
+# En algunos arranques queda un nginx "huérfano" (/usr/sbin/nginx) junto al
+# nginx gestionado por /entrypoint_nginx.sh (daemon off), provocando conflictos
+# de bind 80/443 y errores 500 intermitentes en la API.
+# ----------------------------------------------------------------
+docker exec pmp-misp-server bash -lc "
+    pkill -f '^/usr/sbin/nginx$' 2>/dev/null || true
+    sleep 1
+"
+_ok "NGINX estabilizado (sin masters huérfanos)."
+
 # Esperar a que MISP vuelva a responder antes de arrancar el integrador
 _log "Esperando que MISP responda tras reinicio PHP-FPM..."
 for _i in $(seq 1 30); do

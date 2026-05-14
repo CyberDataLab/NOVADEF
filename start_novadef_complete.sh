@@ -14,6 +14,11 @@ export PFD="$NOVADEF_ROOT/PMP"
 GUI_PORT=18080
 GUI_DIR="$NOVADEF_ROOT/NOVADEF_GUI"
 GUI_CONTAINER_NAME="novadef-gui-hub"
+DOZZLE_PORT=18081
+DOZZLE_CONTAINER_NAME="novadef-log-hub"
+EXPERIMENTS_API_PORT=18082
+EXPERIMENTS_API_IMAGE="novadef-experiments-api:latest"
+EXPERIMENTS_API_CONTAINER="novadef-experiments-api"
 
 start_gui_hub() {
     mkdir -p "$GUI_DIR"
@@ -25,6 +30,29 @@ start_gui_hub() {
         -v "${GUI_DIR}:/usr/share/nginx/html:ro" \
         --restart unless-stopped \
         nginx:alpine >/dev/null
+}
+
+start_log_hub() {
+    docker rm -f "$DOZZLE_CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker run -d \
+        --name "$DOZZLE_CONTAINER_NAME" \
+        --network launcher_default \
+        -p "${DOZZLE_PORT}:8080" \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        --restart unless-stopped \
+        amir20/dozzle:latest >/dev/null
+}
+
+start_experiments_api() {
+    docker build -t "$EXPERIMENTS_API_IMAGE" "$NOVADEF_ROOT/NOVADEF_GUI/api" >/dev/null
+    docker rm -f "$EXPERIMENTS_API_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d \
+        --name "$EXPERIMENTS_API_CONTAINER" \
+        --network launcher_default \
+        -p "${EXPERIMENTS_API_PORT}:18082" \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        --restart unless-stopped \
+        "$EXPERIMENTS_API_IMAGE" >/dev/null
 }
 
 ensure_launcher_network() {
@@ -51,6 +79,23 @@ wait_for_container_pattern() {
     done
 
     echo "  ⚠️  Timeout esperando ${description}"
+    return 1
+}
+
+ensure_kafka_topic() {
+    local topic="$1"
+    local timeout="${2:-120}"
+    local elapsed=0
+    echo "  ⏳ Asegurando topic Kafka '${topic}'..."
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if docker exec kafka_novadef sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic ${topic} --partitions 1 --replication-factor 1" >/dev/null 2>&1; then
+            echo "  ✅ Topic '${topic}' disponible"
+            return 0
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    echo "  ⚠️  No se pudo asegurar el topic '${topic}' en ${timeout}s"
     return 1
 }
 
@@ -111,6 +156,10 @@ echo "🎭 FASE 2: Iniciando Scenario (máquinas víctima y atacante)..."
 ensure_launcher_network
 cd "$NOVADEF_ROOT/Scenario"
 
+echo "  🧹 Limpiando evidencias anteriores del escenario..."
+mkdir -p "$NOVADEF_ROOT/Scenario/shared-logs"
+find "$NOVADEF_ROOT/Scenario/shared-logs" -maxdepth 1 -type f -name "*.jsonl" -delete 2>/dev/null || true
+
 docker-compose up -d
 wait_for_container_pattern "scenario_victim .*Up" 120 "scenario_victim"
 wait_for_container_pattern "scenario_attacker .*Up" 120 "scenario_attacker"
@@ -139,6 +188,9 @@ wait_for_container_pattern "kafka_novadef .*healthy" 1800 "Kafka healthy"
 wait_for_container_pattern "mongodb_novadef .*Up" 1800 "MongoDB"
 wait_for_container_pattern "alert_module_novadef .*Up" 1800 "Alert Module"
 wait_for_container_pattern "flow_module_novadef .*Up" 1800 "Flow Module"
+ensure_kafka_topic "network_auth_events" 180 || true
+ensure_kafka_topic "network_intrusion_alerts" 180 || true
+ensure_kafka_topic "snort_alerts" 180 || true
 echo "✅ PMP iniciado y contenedores activos"
 
 # ============================================================================
@@ -164,8 +216,10 @@ echo "🔍 FASE 5: Iniciando MISP (inteligencia de amenazas)..."
 ensure_launcher_network
 cd "$NOVADEF_ROOT/MISP"
 
+docker rm -f pmp-misp-integrator >/dev/null 2>&1 || true
 bash start.sh
 sleep 30
+docker exec pmp-misp-integrator sh -lc "rm -f /app/state/misp_dedup_state.json" >/dev/null 2>&1 || true
 
 echo "✅ MISP iniciado"
 
@@ -177,6 +231,10 @@ echo ""
 echo "🎯 FASE 6: Iniciando SOARCA (orquestación de respuesta)..."
 ensure_launcher_network
 cd "$NOVADEF_ROOT/SOARCA"
+
+echo "  🧹 Limpiando estado persistente de SOARCA trigger..."
+docker rm -f pmp-misp-soarca-trigger pmp-soarca-core pmp-soarca-executor-ssh pmp-soarca-db >/dev/null 2>&1 || true
+docker volume rm -f soarca_trigger_state >/dev/null 2>&1 || true
 
 docker-compose up -d
 sleep 45
@@ -204,8 +262,10 @@ echo "✅ Grafana iniciado"
 echo ""
 echo "🧭 FASE 8: Iniciando GUI Hub de NOVADEF..."
 start_gui_hub
+start_log_hub
+start_experiments_api
 sleep 1
-echo "✅ GUI Hub iniciado"
+echo "✅ GUI Hub, Log Hub y Experiments API iniciados"
 
 # ============================================================================
 # RESUMEN FINAL
@@ -227,6 +287,8 @@ echo "  • MISP:              https://localhost:8443 (user: admin@admin.test, p
 echo "  • SOARCA:            http://localhost:8000"
 echo "  • Grafana:           http://localhost:3000"
 echo "  • GUI Hub NOVADEF:   http://localhost:${GUI_PORT}/index.html"
+echo "  • Docker Log Hub:    http://localhost:${DOZZLE_PORT}"
+echo "  • Experiments API:   http://localhost:${EXPERIMENTS_API_PORT}/health"
 echo ""
 
 echo "🔧 Contenedores activos:"

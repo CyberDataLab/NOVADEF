@@ -37,6 +37,9 @@ _alert_dedup: dict = {}  # clave → epoch del último evento MISP creado
 DEDUP_STATE_FILE = os.getenv('DEDUP_STATE_FILE', '/app/state/misp_dedup_state.json')
 DEDUP_PERSIST_TTL_SECS = int(os.getenv('DEDUP_PERSIST_TTL_SECS', '14400'))  # 4h
 NETWORK_ATTACK_COOLDOWN_SECS = int(os.getenv('NETWORK_ATTACK_COOLDOWN_SECS', '1800'))  # 30 min
+HOST_RANSOMWARE_COOLDOWN_SECS = int(os.getenv('HOST_RANSOMWARE_COOLDOWN_SECS', '1800'))  # 30 min
+MISP_TEXT_ATTR_MAXLEN = int(os.getenv('MISP_TEXT_ATTR_MAXLEN', '950'))
+SCENARIO_VICTIM_IP = os.getenv('SCENARIO_VICTIM_IP', '172.18.0.2')
 
 
 
@@ -88,6 +91,15 @@ def mark_processed_persisted(dedup_key: str):
 def _stable_hash(parts: list[str]) -> str:
     joined = "|".join(parts)
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_text_attr(value: str) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if len(text) <= MISP_TEXT_ATTR_MAXLEN:
+        return text
+    return text[:MISP_TEXT_ATTR_MAXLEN] + " ...[truncated]"
 
 
 def upsert_tapcd_actor_profile(victim_ip: str, src_ips: list[str], mitre_attack: list[str], usernames: list[str]) -> bool:
@@ -153,6 +165,64 @@ def upsert_tapcd_actor_profile(victim_ip: str, src_ips: list[str], mitre_attack:
             return True
     except Exception as e:
         logger.warning(f"[TAPCD] No se pudo upsertar perfil actor: {e}")
+    return False
+
+
+def upsert_tapcd_host_ransomware_profile(victim_ip: str, detector: str = "falco") -> bool:
+    """
+    Asegura un perfil TAPCD coherente para incidentes ransomware de host
+    sin modificar formatos internos de TAPCD.
+    """
+    if not victim_ip:
+        return False
+    actor_id = f"novadef-host-ransomware-{victim_ip.replace('.', '-')}"
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    query = {
+        "statements": [
+            {
+                "statement": (
+                    "MERGE (a:Actor {id: $actor_id}) "
+                    "SET a.profile = 'ransomware-impact-emulation', "
+                    "a.riskLevel = '9', "
+                    "a.country = coalesce(a.country, 'unknown'), "
+                    "a.motivation = 'impact', "
+                    "a.affiliation = 'unknown', "
+                    "a.skills = 'file-encryption-behavior,service-impact', "
+                    "a.knowledge = 'host-impact-techniques', "
+                    "a.attitude = 'disruptive', "
+                    "a.automationLevel = 'medium', "
+                    "a.comments = $comments, "
+                    "a.lastActivity = $now, "
+                    "a.firstSeen = coalesce(a.firstSeen, $now) "
+                    "MERGE (t:Target {ip: $victim_ip}) "
+                    "MERGE (a)-[:TARGETS]->(t) "
+                    "WITH a "
+                    "UNWIND $ttps AS ttp "
+                    "MERGE (x:Technique {id: ttp}) "
+                    "MERGE (a)-[:USES]->(x)"
+                ),
+                "parameters": {
+                    "actor_id": actor_id,
+                    "victim_ip": victim_ip,
+                    "ttps": ["T1486", "T1490", "T1489", "T1005"],
+                    "comments": f"detector={detector}; threat_type=host_ransomware_emulation",
+                    "now": now_iso,
+                },
+            }
+        ]
+    }
+    try:
+        response = requests.post(
+            NEO4J_HTTP_URL,
+            json=query,
+            auth=HTTPBasicAuth(NEO4J_USER, NEO4J_PASS),
+            timeout=5,
+        )
+        if response.status_code == 200:
+            logger.info(f"[TAPCD] Perfil host-ransomware asegurado para víctima {victim_ip}")
+            return True
+    except Exception as e:
+        logger.warning(f"[TAPCD] No se pudo upsertar perfil host-ransomware: {e}")
     return False
 
 
@@ -366,6 +436,16 @@ def process_alert_to_misp(misp, topic, alert_data):
         dst_port = dst_ap.split(':')[1] if ':' in dst_ap else None
 
         msg       = alert_data.get('msg', 'Snort Alert')
+        rule      = alert_data.get('rule', '')
+
+        # Si la alerta de Snort es la firma puente del detector de anomalías
+        # y ya publicamos la campaña de network IDS para ese destino, evitamos
+        # crear un segundo evento MISP redundante (reduce 500 intermitente).
+        if "NOVADEF-NID" in str(rule):
+            net_key = f"network_ids|{dst_ip}|{dst_port}"
+            if already_processed_persisted(net_key):
+                logger.info(f"[DEDUP-LINK] Snort puente omitida; campaña ya publicada: {net_key}")
+                return
 
         # ── Deduplicación: misma regla + mismo par IP en ventana → ignorar ──
         dedup_key = f"{alert_data.get('rule','')}|{src_ip}|{dst_ip}"
@@ -375,7 +455,6 @@ def process_alert_to_misp(misp, topic, alert_data):
         _alert_dedup[dedup_key] = now
         logger.info(f"[DEDUP] Nueva alerta única: {dedup_key}")
         proto     = alert_data.get('proto', '')
-        rule      = alert_data.get('rule', '')
         ts        = alert_data.get('timestamp', '')
         pkt_len   = alert_data.get('pkt_len', '')
         action    = alert_data.get('action', '')
@@ -430,15 +509,34 @@ def process_alert_to_misp(misp, topic, alert_data):
         output   = inner.get('output', '')
         fields   = inner.get('output_fields', {}) or {}
 
-        # Deduplicación: misma regla+prioridad dentro de la ventana → descartar
-        dedup_key = f"falco|{rule}|{priority}"
+        is_lab_ransomware = (
+            "novadef lab ransomware" in str(rule).lower()
+            or "novadef lab ransomware" in str(output).lower()
+            or "ransomware" in str(rule).lower()
+        )
+        # Para exp2: una sola alerta por campaña de ransomware host.
+        if is_lab_ransomware:
+            dedup_key = f"falco_ransomware|{SCENARIO_VICTIM_IP}"
+            persisted_ts = _persisted_dedup.get(dedup_key)
+            if persisted_ts and (time.time() - float(persisted_ts)) <= HOST_RANSOMWARE_COOLDOWN_SECS:
+                logger.info(f"[DEDUP-PERSIST] Ransomware host ya procesado recientemente: {dedup_key}")
+                return
+        else:
+            dedup_key = f"falco|{rule}|{priority}"
         now = time.time()
-        if dedup_key in _alert_dedup and (now - _alert_dedup[dedup_key]) < DEDUP_WINDOW_SECS:
+        ttl = HOST_RANSOMWARE_COOLDOWN_SECS if is_lab_ransomware else DEDUP_WINDOW_SECS
+        if dedup_key in _alert_dedup and (now - _alert_dedup[dedup_key]) < ttl:
             return
         _alert_dedup[dedup_key] = now
         logger.info(f"[DEDUP] Nueva alerta Falco única: {dedup_key}")
 
-        event_title = f"FALCO: {rule} ({priority})"
+        if is_lab_ransomware:
+            event_title = (
+                f"FALCO: Host Ransomware Emulation Detected [{SCENARIO_VICTIM_IP}] "
+                f"(ATT&CK T1486/T1490/T1489/T1005)"
+            )
+        else:
+            event_title = f"FALCO: {rule} ({priority})"
 
         # Atributo principal
         attributes_to_add.append({
@@ -446,6 +544,17 @@ def process_alert_to_misp(misp, topic, alert_data):
             'value': f"[FALCO] {rule} ({priority})",
             'comment': '[FALCO] Regla y prioridad'
         })
+        if is_lab_ransomware:
+            attributes_to_add.append({
+                'type': 'text',
+                'value': (
+                    "[THREAT TYPE] host_ransomware_emulation\n"
+                    "Detector=falco\n"
+                    "ATTACK=T1486,T1490,T1489,T1005\n"
+                    "D3FEND_HINT=Execution Isolation,Process Termination,Restore File"
+                ),
+                'comment': '[FALCO->TAPCD] Tipo de amenaza para perfilado'
+            })
 
         # Detalle enriquecido
         falco_detail_lines = [
@@ -546,14 +655,8 @@ def process_alert_to_misp(misp, topic, alert_data):
     # ── Dedup persistente: evitar duplicados aunque el integrador se reinicie ──
     # La ventana en memoria (_alert_dedup) se pierde al reiniciar. Esta comprobación
     # en MISP garantiza que nunca creamos dos eventos con el mismo título.
-    try:
-        existing = misp.search(controller='events', eventinfo=event_title,
-                               limit=1, pythonify=True)
-        if existing:
-            logger.info(f"[DEDUP-MISP] Evento ya existe en MISP, saltando: {event_title}")
-            return
-    except Exception as e:
-        logger.debug(f"[DEDUP-MISP] No se pudo comprobar duplicado en MISP: {e}")
+    # Evitamos restSearch/index para dedup, ya que en algunos arranques de MISP
+    # pueden devolver 500 transitorio. Usamos dedup persistente de pipeline.
 
     # ── Crear un evento MISP nuevo para esta alerta ───────────────────────────
     try:
@@ -569,6 +672,8 @@ def process_alert_to_misp(misp, topic, alert_data):
         event_id = new_event.id
         logger.info(f"Nuevo evento MISP #{event_id}: {event_title}")
         if topic == 'network_intrusion_alerts':
+            mark_processed_persisted(dedup_key)
+        elif topic == 'falco_events' and dedup_key.startswith('falco_ransomware|'):
             mark_processed_persisted(dedup_key)
     except Exception as e:
         logger.error(f"Error creando evento MISP '{event_title}': {e}")
@@ -598,7 +703,7 @@ def process_alert_to_misp(misp, topic, alert_data):
         logger.warning(f"No se pudo marcar el evento #{event_id} con pipeline-tag: {e}")
 
     # ── Contexto enriquecido (solo en alertas Snort) ──────────────────────────
-    if topic not in ('snort_alerts', 'network_intrusion_alerts'):
+    if topic not in ('snort_alerts', 'network_intrusion_alerts', 'falco_events'):
         return
 
     # 1. Flujos CIC (MongoDB) para IP atacante y víctima
@@ -614,7 +719,7 @@ def process_alert_to_misp(misp, topic, alert_data):
         flow_ctx = get_network_flows_context(ip)
         if flow_ctx:
             try:
-                misp.add_attribute(event_id, {'type': 'text', 'value': flow_ctx,
+                misp.add_attribute(event_id, {'type': 'text', 'value': _safe_text_attr(flow_ctx),
                                               'comment': f'[CIC FLOWS] Estadisticas para {ip}'}, pythonify=True)
                 logger.info(f"  [+] CIC flows para {ip}")
             except Exception as e:
@@ -624,17 +729,23 @@ def process_alert_to_misp(misp, topic, alert_data):
     host_ctx = get_opensearch_host_context()
     if host_ctx:
         try:
-            misp.add_attribute(event_id, {'type': 'text', 'value': host_ctx,
+            misp.add_attribute(event_id, {'type': 'text', 'value': _safe_text_attr(host_ctx),
                                           'comment': '[HOST CONTEXT] Metricas telegraf + alertas Falco recientes'}, pythonify=True)
             logger.info(f"  [+] Host context inyectado")
         except Exception as e:
             logger.warning(f"Fallo host context: {e}")
 
     # 3. Perfil TAPCD del actor (Neo4j)
+    if topic == 'falco_events' and not dst_ip:
+        dst_ip = SCENARIO_VICTIM_IP
+
     if dst_ip:
         actor = get_tapcd_actor_profile(dst_ip)
         if not actor and topic == 'network_intrusion_alerts':
             upsert_tapcd_actor_profile(dst_ip, src_ips, mitre_attack, usernames)
+            actor = get_tapcd_actor_profile(dst_ip)
+        elif not actor and topic == 'falco_events':
+            upsert_tapcd_host_ransomware_profile(dst_ip, detector="falco")
             actor = get_tapcd_actor_profile(dst_ip)
         if actor:
             profile_text = (
@@ -653,7 +764,7 @@ def process_alert_to_misp(misp, topic, alert_data):
                 f"  Comentarios    : {actor.get('comments', '')}"
             )
             try:
-                misp.add_attribute(event_id, {'type': 'text', 'value': profile_text,
+                misp.add_attribute(event_id, {'type': 'text', 'value': _safe_text_attr(profile_text),
                                               'comment': f'[TAPCD] Perfil actor para victima {dst_ip}'}, pythonify=True)
                 logger.info(f"  [+] Perfil TAPCD inyectado")
             except Exception as e:

@@ -1,155 +1,514 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NOVADEF Service Hub</title>
+  <title>NOVADEF OODA Hub</title>
   <style>
     :root {
-      --bg: #0b1020;
-      --panel: rgba(18, 27, 52, 0.78);
-      --line: rgba(255, 255, 255, 0.13);
-      --txt: #e9edf8;
-      --muted: #9aacd7;
-      --accent: #2dd4bf;
-      --accent2: #60a5fa;
-      --warn: #f59e0b;
+      --bg0: #08111b;
+      --bg1: #0f1f2e;
+      --panel: rgba(14, 27, 41, 0.82);
+      --line: rgba(173, 197, 224, 0.24);
+      --text: #e8f0f7;
+      --muted: #9fb3c8;
+      --obs: #34d399;
+      --ori: #60a5fa;
+      --dec: #f59e0b;
+      --act: #ef4444;
+      --accent: #22d3ee;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100vh;
-      color: var(--txt);
+      color: var(--text);
       font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
       background:
-        radial-gradient(1200px 500px at -10% -10%, #1d4ed8 0%, transparent 55%),
-        radial-gradient(1000px 500px at 110% -10%, #0f766e 0%, transparent 50%),
-        linear-gradient(180deg, #070b16 0%, #0b1020 100%);
-      padding: 32px 24px 48px;
+        radial-gradient(900px 520px at -20% -5%, #12385a 0%, transparent 62%),
+        radial-gradient(980px 520px at 120% -10%, #1b496d 0%, transparent 65%),
+        linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%);
+      min-height: 100vh;
+      padding: 26px 18px 40px;
     }
-    .wrap { max-width: 1100px; margin: 0 auto; }
+    .wrap { max-width: 1200px; margin: 0 auto; }
     .hero {
       border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(28, 41, 79, 0.82), rgba(12, 19, 39, 0.9));
       border-radius: 18px;
-      padding: 24px;
-      box-shadow: 0 12px 42px rgba(0, 0, 0, 0.35);
-      backdrop-filter: blur(6px);
+      padding: 20px;
+      background: linear-gradient(180deg, rgba(16, 32, 50, 0.9), rgba(8, 18, 30, 0.9));
+      box-shadow: 0 18px 35px rgba(0, 0, 0, 0.35);
     }
-    .hero h1 {
+    h1 {
       margin: 0;
-      font-size: clamp(1.6rem, 2.8vw, 2.4rem);
+      font-size: clamp(1.4rem, 2.5vw, 2.1rem);
       letter-spacing: 0.2px;
     }
-    .hero p {
-      margin: 10px 0 0;
+    .subtitle {
+      margin: 8px 0 0;
       color: var(--muted);
-      font-size: 1rem;
+      font-size: 0.97rem;
     }
     .badge {
       display: inline-flex;
-      margin-top: 14px;
-      padding: 8px 12px;
+      align-items: center;
+      margin-top: 12px;
+      border: 1px solid rgba(34, 211, 238, 0.5);
+      color: #c7f7ff;
+      background: rgba(34, 211, 238, 0.1);
       border-radius: 999px;
-      border: 1px solid rgba(45, 212, 191, 0.45);
-      background: rgba(45, 212, 191, 0.08);
-      color: #bffcf4;
+      padding: 7px 11px;
+      font-size: 0.84rem;
       font-weight: 600;
-      font-size: 0.87rem;
     }
-    .grid {
-      margin-top: 18px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
-      gap: 14px;
-    }
-    .card {
+    .board {
+      margin-top: 16px;
       border: 1px solid var(--line);
       border-radius: 16px;
-      padding: 16px;
-      text-decoration: none;
-      color: inherit;
       background: var(--panel);
-      backdrop-filter: blur(4px);
-      transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
-      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.22);
+      padding: 14px;
+      overflow-x: auto;
     }
-    .card:hover {
-      transform: translateY(-3px);
-      border-color: rgba(96, 165, 250, 0.7);
-      box-shadow: 0 14px 28px rgba(0, 0, 0, 0.32);
+    .data-row {
+      min-width: 980px;
+      margin-bottom: 10px;
     }
-    .kicker {
-      display: inline-block;
-      font-size: 0.72rem;
-      letter-spacing: 0.35px;
+    .data-lane h2 { color: var(--accent); }
+    .data-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .ooda {
+      min-width: 980px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .lane {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      background: rgba(8, 17, 28, 0.7);
+    }
+    .lane h2 {
+      margin: 0 0 9px;
+      font-size: 0.95rem;
       text-transform: uppercase;
-      color: var(--accent);
-      font-weight: 700;
+      letter-spacing: 0.6px;
+    }
+    .observe h2 { color: var(--obs); }
+    .orient h2 { color: var(--ori); }
+    .decide h2 { color: var(--dec); }
+    .act h2 { color: var(--act); }
+    .node {
+      width: 100%;
       margin-bottom: 8px;
+      text-align: left;
+      border: 1px solid rgba(160, 184, 209, 0.3);
+      border-radius: 11px;
+      background: rgba(22, 38, 57, 0.88);
+      color: var(--text);
+      padding: 10px 10px 9px;
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
     }
-    .card h3 {
-      margin: 0;
-      font-size: 1.05rem;
-      line-height: 1.3;
+    .node:hover {
+      transform: translateY(-2px);
+      border-color: rgba(110, 220, 255, 0.65);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
     }
-    .url {
-      margin-top: 8px;
-      color: #d2dcf7;
-      font-size: 0.9rem;
-      word-break: break-all;
+    .node .t {
+      display: block;
+      font-size: 0.93rem;
+      font-weight: 700;
+      margin-bottom: 3px;
     }
-    .meta {
-      margin-top: 8px;
+    .node .d {
+      display: block;
+      font-size: 0.81rem;
       color: var(--muted);
+    }
+    .status {
+      display: inline-flex;
+      margin-top: 7px;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      border: 1px solid rgba(160, 184, 209, 0.3);
+      color: #cfe0f0;
+      background: rgba(17, 32, 50, 0.7);
+    }
+    .status.up {
+      border-color: rgba(52, 211, 153, 0.55);
+      color: #bdfbe7;
+      background: rgba(52, 211, 153, 0.12);
+    }
+    .status.down {
+      border-color: rgba(239, 68, 68, 0.55);
+      color: #fecaca;
+      background: rgba(239, 68, 68, 0.11);
+    }
+    .flow {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.83rem;
+      text-align: center;
+    }
+    .legend {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 9px;
+    }
+    .scenario {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      background: rgba(8, 17, 28, 0.7);
+    }
+    .scenario h2 {
+      margin: 0 0 9px;
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #c084fc;
+    }
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      color: #d8e3ef;
+      background: rgba(9, 18, 30, 0.72);
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 8, 14, 0.72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 20;
+    }
+    .modal.show { display: flex; }
+    .sheet {
+      width: min(760px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #0c1725;
+      padding: 14px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+    }
+    .sheet h3 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+    .sheet p {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 0.89rem;
+    }
+    pre {
+      margin: 0 0 10px;
+      padding: 10px;
+      border: 1px solid rgba(166, 189, 212, 0.35);
+      border-radius: 10px;
+      background: #09111d;
+      color: #c5f6ff;
+      overflow-x: auto;
+      font-size: 0.82rem;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      border: 1px solid rgba(160, 184, 209, 0.35);
+      background: rgba(23, 40, 60, 0.9);
+      color: var(--text);
+      border-radius: 9px;
+      padding: 8px 11px;
       font-size: 0.84rem;
+      cursor: pointer;
     }
-    .footer {
-      margin-top: 16px;
-      color: var(--muted);
-      font-size: 0.88rem;
-      padding-left: 2px;
-    }
-    .warn { color: var(--warn); }
+    .btn:hover { border-color: rgba(115, 222, 255, 0.6); }
   </style>
 </head>
 <body>
   <main class="wrap">
     <section class="hero">
-      <h1>NOVADEF Service Hub</h1>
-      <p>Accesos directos a los servicios expuestos para operación y demo del flujo completo.</p>
-      <span class="badge">Laboratorio activo</span>
-      <div class="grid">
-        <a class="card" href="http://localhost:3000" target="_blank" rel="noreferrer">
-          <span class="kicker">Observabilidad</span>
-          <h3>Grafana</h3>
-          <div class="url">http://localhost:3000</div>
-          <div class="meta">Dashboards y métricas</div>
-        </a>
-        <a class="card" href="http://localhost:9090" target="_blank" rel="noreferrer">
-          <span class="kicker">Métricas</span>
-          <h3>Prometheus</h3>
-          <div class="url">http://localhost:9090</div>
-          <div class="meta">Series temporales y targets</div>
-        </a>
-        <a class="card" href="http://localhost:7474" target="_blank" rel="noreferrer">
-          <span class="kicker">Perfilado</span>
-          <h3>Neo4j (TAPCD)</h3>
-          <div class="url">http://localhost:7474</div>
-          <div class="meta">Usuario: neo4j · Pass: password</div>
-        </a>
-        <a class="card" href="https://localhost:8443" target="_blank" rel="noreferrer">
-          <span class="kicker">Threat Intel</span>
-          <h3>MISP</h3>
-          <div class="url">https://localhost:8443</div>
-          <div class="meta">Usuario: admin@admin.test · Pass: admin</div>
-        </a>
+      <h1>NOVADEF Architecture Hub (OODA)</h1>
+      <p class="subtitle">Click any module to open its web UI. CLI-only components open the Docker Log Hub automatically.</p>
+      <span class="badge">Lab mode · End-to-end flow: Monitor -> Detect -> Profile -> MISP -> D3FEND -> SOARCA -> Report</span>
+      <div style="margin-top:10px;">
+        <button class="node" data-url="http://localhost:18080/experiments.html" style="max-width:360px;">
+          <span class="t">Open Experiments Console</span>
+          <span class="d">Launch exp1/exp2 guide and follow incident progression</span>
+        </button>
+        <button class="node" data-url="http://localhost:18082/health" style="max-width:360px;">
+          <span class="t">Experiments API Health</span>
+          <span class="d">Backend endpoint used to launch experiments from web</span>
+        </button>
       </div>
-      <div class="footer">
-        Si algún enlace no responde, espera a que termine el arranque completo.<br />
-        <span class="warn">Nota:</span> Algunos navegadores mostrarán aviso de certificado en MISP (entorno lab).
+
+      <div class="board">
+        <div class="ooda">
+          <div class="lane data-lane data-row" style="grid-column: 1 / -1;">
+            <h2>Data</h2>
+            <div class="data-grid">
+              <button class="node" data-url="http://localhost:7474">
+                <span class="t">Neo4j</span>
+                <span class="d">Graph database for TAPCD context</span>
+              </button>
+              <button class="node" data-dozzle="mongodb_novadef" data-cmd="docker logs -f mongodb_novadef">
+                <span class="t">MongoDB</span>
+                <span class="d">Operational data store</span>
+              </button>
+              <button class="node" data-url="http://localhost:9200">
+                <span class="t">OpenSearch</span>
+                <span class="d">Indexed event and log storage</span>
+                <span class="status" data-check-container="opensearch-node">CHECKING</span>
+              </button>
+              <button class="node" data-dozzle="pmp-misp-db" data-cmd="docker logs -f pmp-misp-db">
+                <span class="t">MISP DB</span>
+                <span class="d">Threat intel database backend</span>
+                <span class="status" data-check-container="pmp-misp-db">CHECKING</span>
+              </button>
+              <button class="node" data-dozzle="kafka_novadef" data-cmd="docker logs -f kafka_novadef">
+                <span class="t">Kafka</span>
+                <span class="d">Event streaming backbone</span>
+                <span class="status" data-check-container="kafka_novadef">CHECKING</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="lane observe">
+            <h2>Observe</h2>
+            <button class="node" data-dozzle="falco_novadef" data-cmd="docker logs -f falco_novadef || docker ps --format 'table {{.Names}}'">
+              <span class="t">Falco</span>
+              <span class="d">Host runtime monitoring</span>
+              <span class="status" data-check-container="falco_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="tshark_novadef" data-cmd="docker logs -f tshark_novadef">
+              <span class="t">tshark</span>
+              <span class="d">Network packet capture</span>
+              <span class="status" data-check-container="tshark_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-url="http://localhost:9090">
+              <span class="t">Prometheus</span>
+              <span class="d">Metrics and targets</span>
+              <span class="status" data-check-container="prometheus_server_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-url="http://localhost:3000">
+              <span class="t">Grafana</span>
+              <span class="d">Dashboards and observability view</span>
+              <span class="status" data-check-container="novadef-grafana">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="flow_module_novadef" data-cmd="docker logs -f flow_module_novadef">
+              <span class="t">Flow Module</span>
+              <span class="d">Flow collection and preprocessing</span>
+              <span class="status" data-check-container="flow_module_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="fluentd_novadef" data-cmd="docker logs -f fluentd_novadef">
+              <span class="t">Fluentd</span>
+              <span class="d">Centralized log ingestion</span>
+              <span class="status" data-check-container="fluentd_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="filebeat_novadef" data-cmd="docker logs -f filebeat_novadef">
+              <span class="t">Filebeat</span>
+              <span class="d">Log shipping from containers</span>
+              <span class="status" data-check-container="filebeat_novadef">CHECKING</span>
+            </button>
+          </div>
+
+          <div class="lane orient">
+            <h2>Orient</h2>
+            <button class="node" data-dozzle="snort_novadef" data-cmd="docker logs -f snort_novadef || docker ps --format 'table {{.Names}}'">
+              <span class="t">Snort IDS</span>
+              <span class="d">Signature-based detection</span>
+              <span class="status" data-check-container="snort_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="network_intrusion_detector_novadef" data-cmd="docker logs -f network_intrusion_detector_novadef">
+              <span class="t">Network Anomaly Detector</span>
+              <span class="d">Password spraying behavior analytics</span>
+              <span class="status" data-check-container="network_intrusion_detector_novadef">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="alert_module_novadef" data-cmd="docker logs -f alert_module_novadef">
+              <span class="t">Alert Module</span>
+              <span class="d">Detection normalization and alert flow</span>
+              <span class="status" data-check-container="alert_module_novadef">CHECKING</span>
+            </button>
+          </div>
+
+          <div class="lane decide">
+            <h2>Decide</h2>
+            <button class="node" data-url="https://localhost:8443">
+              <span class="t">MISP</span>
+              <span class="d">Incident enrichment and intel events</span>
+              <span class="status" data-check-container="pmp-misp-server">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="novadef-novadef_stream_low-1" data-cmd="docker logs -f novadef-novadef_stream_low-1">
+              <span class="t">TAPCD</span>
+              <span class="d">Attacker profiling and decision context</span>
+              <span class="status" data-check-container="novadef-novadef_stream_low-1">CHECKING</span>
+            </button>
+          </div>
+
+          <div class="lane act">
+            <h2>Act</h2>
+            <button class="node" data-dozzle="pmp-soarca-core" data-cmd="docker logs -f pmp-soarca-core">
+              <span class="t">SOARCA Core</span>
+              <span class="d">Playbook orchestration and response execution</span>
+              <span class="status" data-check-container="pmp-soarca-core">CHECKING</span>
+            </button>
+            <button class="node" data-dozzle="pmp-soarca-executor-ssh" data-cmd="docker logs -f pmp-soarca-executor-ssh">
+              <span class="t">SOARCA Executor</span>
+              <span class="d">Action execution on target systems</span>
+              <span class="status" data-check-container="pmp-soarca-executor-ssh">CHECKING</span>
+            </button>
+          </div>
+        </div>
+        <div class="flow">Data layer over OODA: Observe -> Orient -> Decide -> Act</div>
+      </div>
+
+      <div class="scenario">
+        <h2>Scenario</h2>
+        <div class="scenario-grid">
+          <button class="node" data-dozzle="scenario_attacker" data-cmd="docker logs -f scenario_attacker">
+            <span class="t">Attacker</span>
+            <span class="d">Attack stimulus source machine</span>
+            <span class="status" data-check-container="scenario_attacker">CHECKING</span>
+          </button>
+          <button class="node" data-dozzle="scenario_victim" data-cmd="docker logs -f scenario_victim">
+            <span class="t">Victim</span>
+            <span class="d">Target machine under defense response</span>
+            <span class="status" data-check-container="scenario_victim">CHECKING</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="legend">
+        <div class="pill">Web modules open directly in a new tab.</div>
+        <div class="pill">CLI modules open Docker Log Hub and also provide a terminal command.</div>
+        <div class="pill">If a URL does not respond, wait until full startup finishes.</div>
       </div>
     </section>
   </main>
+
+  <div id="cmdModal" class="modal" aria-hidden="true">
+    <div class="sheet">
+      <h3>Run Command in Terminal</h3>
+      <p>Browsers cannot open a local terminal session directly. Copy this command and run it in your terminal.</p>
+      <pre id="cmdText"></pre>
+      <div class="actions">
+        <button id="copyBtn" class="btn">Copy command</button>
+        <button id="closeBtn" class="btn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const modal = document.getElementById("cmdModal");
+    const cmdText = document.getElementById("cmdText");
+    const copyBtn = document.getElementById("copyBtn");
+    const closeBtn = document.getElementById("closeBtn");
+    let currentCmd = "";
+
+    function showCommand(cmd) {
+      currentCmd = cmd;
+      cmdText.textContent = cmd;
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+    }
+
+    function closeModal() {
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+      currentCmd = "";
+    }
+
+    document.querySelectorAll(".node").forEach((node) => {
+      node.addEventListener("click", () => {
+        const url = node.getAttribute("data-url");
+        const cmd = node.getAttribute("data-cmd");
+        const dozzle = node.getAttribute("data-dozzle");
+        if (url) {
+          window.open(url, "_blank", "noopener,noreferrer");
+          return;
+        }
+        if (dozzle) {
+          window.open("http://localhost:18081/show?name=" + encodeURIComponent(dozzle), "_blank", "noopener,noreferrer");
+        }
+        if (cmd) {
+          showCommand(cmd);
+        }
+      });
+    });
+
+    async function updateContainerStatuses() {
+      let map = {};
+      try {
+        const res = await fetch("http://localhost:18081/api/containers", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          for (const c of data) {
+            map[c.name] = String(c.state || "").toLowerCase();
+          }
+        }
+      } catch (err) {}
+
+      document.querySelectorAll("[data-check-container]").forEach((el) => {
+        const name = el.getAttribute("data-check-container");
+        const st = map[name];
+        if (!st) {
+          el.textContent = "UNKNOWN";
+          return;
+        }
+        if (st.includes("running")) {
+          el.textContent = "UP";
+          el.classList.add("up");
+          el.classList.remove("down");
+        } else {
+          el.textContent = "DOWN";
+          el.classList.add("down");
+          el.classList.remove("up");
+        }
+      });
+    }
+
+
+    copyBtn.addEventListener("click", async () => {
+      if (!currentCmd) return;
+      try {
+        await navigator.clipboard.writeText(currentCmd);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy command"; }, 1200);
+      } catch (err) {
+        copyBtn.textContent = "Copy failed";
+        setTimeout(() => { copyBtn.textContent = "Copy command"; }, 1200);
+      }
+    });
+
+    closeBtn.addEventListener("click", closeModal);
+    modal.addEventListener("click", (ev) => {
+      if (ev.target === modal) closeModal();
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") closeModal();
+    });
+
+    updateContainerStatuses();
+    setInterval(updateContainerStatuses, 5000);
+  </script>
 </body>
 </html>

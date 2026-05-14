@@ -44,10 +44,15 @@ services:
     container_name: pmp-misp-soarca-trigger
     restart: on-failure
     environment:
-      - MISP_URL=http://misp-server:80   # La ip de la máquina si está en otra red
+      - MISP_URL=https://misp-server
       - MISP_KEY=NOVADEFMISPINTEGRATIONKEYpmp1234567890ab
       - SOARCA_API=http://soarca-core:8080
       - PLAYBOOK_PATH=/app/playbooks/block_ip.json
+      - MISP_DB_HOST=misp-db
+      - MISP_DB_PORT=3306
+      - MISP_DB_USER=misp
+      - MISP_DB_PASSWORD=misp_password
+      - MISP_DB_NAME=misp
     volumes:
       - trigger_state:/app/state
       - ./playbooks:/app/playbooks:ro

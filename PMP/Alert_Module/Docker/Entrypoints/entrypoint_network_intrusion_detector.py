@@ -29,6 +29,7 @@ MIN_FAILURES = int(os.getenv("DETECTOR_MIN_FAILURES", "20"))
 MIN_UNIQUE_USERS = int(os.getenv("DETECTOR_MIN_UNIQUE_USERS", "8"))
 MIN_UNIQUE_IPS = int(os.getenv("DETECTOR_MIN_UNIQUE_IPS", "4"))
 DEDUP_SECONDS = int(os.getenv("DETECTOR_DEDUP_SECONDS", "60"))
+REQUIRE_MODEL_ANOMALY = os.getenv("DETECTOR_REQUIRE_MODEL_ANOMALY", "false").lower() in {"1", "true", "yes"}
 
 RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "/app/results"))
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -219,6 +220,8 @@ def main() -> None:
 
     recent_events: deque[dict[str, Any]] = deque()
     last_alert_by_target: dict[str, float] = {}
+    target_last_seen_ts: dict[str, float] = {}
+    alerted_active_targets: set[str] = set()
 
     logger.info("Escuchando %s y publicando alertas en %s", KAFKA_TOPIC_IN, KAFKA_TOPIC_OUT)
 
@@ -251,6 +254,17 @@ def main() -> None:
         for item in recent_events:
             key = (str(item["dst_ip"]), int(item["dst_port"]))
             by_target.setdefault(key, []).append(item)
+            target_last_seen_ts[f"{item['dst_ip']}:{int(item['dst_port'])}"] = float(item["timestamp"])
+
+        # Expira campañas activas sin actividad reciente para permitir que
+        # un ataque nuevo futuro vuelva a generar exactamente una alerta.
+        stale_targets = [
+            target
+            for target in alerted_active_targets
+            if (now_ts - target_last_seen_ts.get(target, 0.0)) > WINDOW_SECONDS
+        ]
+        for target in stale_targets:
+            alerted_active_targets.discard(target)
 
         for (dst_ip, dst_port), window_events in by_target.items():
             failed_attempts = sum(1 for item in window_events if not item["auth_success"])
@@ -264,13 +278,21 @@ def main() -> None:
                 continue
 
             is_anomaly, score, feature_map = model.score(window_events)
-            if not is_anomaly:
+            # Para escenarios controlados de laboratorio, permitimos disparar por patrón
+            # fuerte de spraying aunque el modelo no marque anomalía en esa ventana.
+            if REQUIRE_MODEL_ANOMALY and not is_anomaly:
                 continue
 
             dedup_key = f"{dst_ip}:{dst_port}"
+
+            # Una sola alerta por campaña activa para evitar replicar el incidente.
+            if dedup_key in alerted_active_targets:
+                continue
+
             if now_ts - last_alert_by_target.get(dedup_key, 0.0) < DEDUP_SECONDS:
                 continue
             last_alert_by_target[dedup_key] = now_ts
+            alerted_active_targets.add(dedup_key)
 
             alert = {
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
@@ -285,6 +307,7 @@ def main() -> None:
                 "window_seconds": WINDOW_SECONDS,
                 "requests_per_minute": feature_map["requests_per_minute"],
                 "anomaly_score": score,
+                "model_anomaly": bool(is_anomaly),
                 "features": feature_map,
                 "mitre_attack": ["T1110", "T1110.003", "T1133"],
                 "d3fend_candidates": [

@@ -44,9 +44,10 @@ services:
       - KAFKA_TOPIC_IN=network_auth_events
       - KAFKA_TOPIC_OUT=network_intrusion_alerts
       - DETECTOR_WINDOW_SECONDS=300
-      - DETECTOR_MIN_FAILURES=20
-      - DETECTOR_MIN_UNIQUE_USERS=8
-      - DETECTOR_MIN_UNIQUE_IPS=4
+      - DETECTOR_MIN_FAILURES=8
+      - DETECTOR_MIN_UNIQUE_USERS=4
+      - DETECTOR_MIN_UNIQUE_IPS=3
+      - DETECTOR_DEDUP_SECONDS=15
     volumes:
       - ${PFD}/Results/Network_IDS:/app/results
     restart: unless-stopped

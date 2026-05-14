@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NOVADEF Experiments Console</title>
+  <style>
+    :root {
+      --bg0: #07111d;
+      --bg1: #0d1e31;
+      --panel: rgba(13, 26, 42, 0.86);
+      --line: rgba(167, 190, 216, 0.26);
+      --text: #e6eef7;
+      --muted: #9cb1c8;
+      --ok: #22c55e;
+      --active: #22d3ee;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      background:
+        radial-gradient(920px 520px at -20% -10%, #123f60 0%, transparent 62%),
+        radial-gradient(940px 520px at 120% -5%, #0d3a59 0%, transparent 62%),
+        linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%);
+      min-height: 100vh;
+      padding: 24px 16px 36px;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      background: var(--panel);
+      box-shadow: 0 16px 30px rgba(0, 0, 0, 0.35);
+      margin-bottom: 12px;
+    }
+    h1 { margin: 0; font-size: clamp(1.35rem, 2.3vw, 2rem); }
+    .sub { margin: 7px 0 0; color: var(--muted); }
+    .btns {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .btn {
+      border: 1px solid rgba(154, 182, 209, 0.38);
+      border-radius: 10px;
+      background: rgba(21, 38, 58, 0.92);
+      color: var(--text);
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: rgba(96, 234, 255, 0.68); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .kpi {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px;
+      background: rgba(10, 20, 33, 0.78);
+    }
+    .kpi b {
+      display: block;
+      font-size: 1.05rem;
+      color: #c8f7ff;
+      margin-bottom: 3px;
+    }
+    .kpi span {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .stage {
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 9px;
+      background: rgba(11, 22, 36, 0.78);
+      min-height: 88px;
+      transition: transform 120ms ease, border-color 120ms ease;
+    }
+    .stage.active {
+      border-color: rgba(34, 211, 238, 0.7);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+      transform: translateY(-2px);
+    }
+    .stage.done {
+      border-color: rgba(34, 197, 94, 0.7);
+    }
+    .stage .t { font-weight: 700; font-size: 0.9rem; display: block; margin-bottom: 5px; }
+    .stage .d { color: var(--muted); font-size: 0.8rem; }
+    .arrow {
+      text-align: center;
+      color: #7fb4d5;
+      font-size: 0.88rem;
+      margin-top: 8px;
+    }
+    .logs {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .logbtn {
+      width: 100%;
+      border: 1px solid rgba(154, 182, 209, 0.38);
+      border-radius: 10px;
+      background: rgba(21, 38, 58, 0.92);
+      color: var(--text);
+      text-align: left;
+      padding: 9px 10px;
+      cursor: pointer;
+    }
+    .logbtn b { display: block; font-size: 0.88rem; margin-bottom: 2px; }
+    .logbtn span { color: var(--muted); font-size: 0.77rem; }
+    pre {
+      margin: 0;
+      padding: 10px;
+      border: 1px solid rgba(166, 189, 212, 0.35);
+      border-radius: 10px;
+      background: #09111d;
+      color: #c5f6ff;
+      overflow-x: auto;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="panel">
+      <h1>NOVADEF Experiments Console</h1>
+      <p class="sub">Run `exp1`/`exp2` and follow the incident path across NOVADEF until SOARCA applies the response.</p>
+      <div class="btns">
+        <button class="btn" id="homeBtn">Open Architecture Hub</button>
+        <button class="btn" id="exp1Btn">Run Exp1 from Web</button>
+        <button class="btn" id="exp2Btn">Run Exp2 from Web</button>
+        <button class="btn" id="downloadBtn">Download Latest Report</button>
+        <button class="btn" id="resetBtn">Reset Visual Flow</button>
+        <button class="btn" id="promBtn">Open Prometheus</button>
+        <button class="btn" id="grafBtn">Open Grafana</button>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><b id="kpiAlerts">0</b><span>alert signals</span></div>
+        <div class="kpi"><b id="kpiProfile">0</b><span>profiling signals</span></div>
+        <div class="kpi"><b id="kpiMisp">0</b><span>MISP signals</span></div>
+        <div class="kpi"><b id="kpiSoarca">0</b><span>SOARCA signals</span></div>
+      </div>
+    </section>
+
+    <section class="panel grid">
+      <div>
+        <div class="flow" id="flow">
+          <div class="stage" data-step="0"><span class="t">1. Observe</span><span class="d">Falco/tshark/Flow ingest</span></div>
+          <div class="stage" data-step="1"><span class="t">2. Detect</span><span class="d">Snort/Anomaly/Alert module</span></div>
+          <div class="stage" data-step="2"><span class="t">3. Profile</span><span class="d">TAPCD profile context</span></div>
+          <div class="stage" data-step="3"><span class="t">4. Enrich</span><span class="d">MISP event publication</span></div>
+          <div class="stage" data-step="4"><span class="t">5. Decide</span><span class="d">D3FEND-based selection</span></div>
+          <div class="stage" data-step="5"><span class="t">6. Act</span><span class="d">SOARCA executes response</span></div>
+        </div>
+        <div class="arrow">Observe -> Detect -> Profile -> MISP -> Decide -> SOARCA/Countermeasure</div>
+      </div>
+
+      <div class="logs">
+        <button class="logbtn" data-c="scenario_attacker"><b>Scenario Attacker</b><span>Attack stimulus execution</span></button>
+        <button class="logbtn" data-c="tshark_novadef"><b>tshark</b><span>Packet capture stream</span></button>
+        <button class="logbtn" data-c="falco_novadef"><b>Falco</b><span>Host runtime detections</span></button>
+        <button class="logbtn" data-c="snort_novadef"><b>Snort IDS</b><span>Signature alerts</span></button>
+        <button class="logbtn" data-c="network_intrusion_detector_novadef"><b>Anomaly Detector</b><span>Password spraying analytics</span></button>
+        <button class="logbtn" data-c="alert_module_novadef"><b>Alert Module</b><span>Alert normalization and publication</span></button>
+        <button class="logbtn" data-c="novadef-novadef_stream_low-1"><b>TAPCD</b><span>Attacker profiling pipeline</span></button>
+        <button class="logbtn" data-c="pmp-misp-integrator"><b>MISP Integrator</b><span>Incident enrichment feed</span></button>
+        <button class="logbtn" data-c="pmp-misp-server"><b>MISP Server</b><span>MISP event handling</span></button>
+        <button class="logbtn" data-c="pmp-soarca-core"><b>SOARCA Core</b><span>Playbook decision/execution</span></button>
+        <button class="logbtn" data-c="pmp-soarca-executor-ssh"><b>SOARCA Executor</b><span>Countermeasure actions</span></button>
+        <button class="logbtn" data-c="scenario_victim"><b>Scenario Victim</b><span>Defense actions on target</span></button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <p class="sub">API status, latest run output, and automatic report status:</p>
+      <pre id="cmdBox">Waiting for experiment run...</pre>
+    </section>
+  </main>
+
+  <script>
+    const steps = [...document.querySelectorAll(".stage")];
+    const cmdBox = document.getElementById("cmdBox");
+    let current = -1;
+
+    function paintFlow() {
+      steps.forEach((el, i) => {
+        el.classList.remove("active", "done");
+        if (i < current) el.classList.add("done");
+        if (i === current) el.classList.add("active");
+      });
+    }
+    function resetFlow() { current = -1; paintFlow(); }
+
+    document.getElementById("homeBtn").addEventListener("click", () => {
+      window.open("http://localhost:18080/index.html", "_blank", "noopener,noreferrer");
+    });
+    document.getElementById("resetBtn").addEventListener("click", resetFlow);
+    document.getElementById("promBtn").addEventListener("click", () => {
+      window.open("http://localhost:9090", "_blank", "noopener,noreferrer");
+    });
+    document.getElementById("grafBtn").addEventListener("click", () => {
+      window.open("http://localhost:3000", "_blank", "noopener,noreferrer");
+    });
+    document.getElementById("downloadBtn").addEventListener("click", async () => {
+      try {
+        const res = await fetch("http://localhost:18082/api/report/latest");
+        const data = await res.json();
+        if (!res.ok) {
+          cmdBox.textContent = "No report available yet. Run exp1/exp2 first (report is automatic).";
+          return;
+        }
+        window.open("http://localhost:18082" + data.download_url, "_blank", "noopener,noreferrer");
+      } catch (err) {
+        cmdBox.textContent = "Cannot reach report API.";
+      }
+    });
+    async function runExperiment(experiment) {
+      cmdBox.textContent = "Launching " + experiment + " via backend API...";
+      try {
+        const res = await fetch("http://localhost:18082/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ experiment })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          cmdBox.textContent = "API error: " + (data.error || "unknown");
+          return;
+        }
+        current = 0;
+        paintFlow();
+        cmdBox.textContent = "Started " + experiment + ". Follow logs and advance stages as evidence appears.";
+      } catch (err) {
+        cmdBox.textContent = "Cannot reach Experiments API at http://localhost:18082";
+      }
+    }
+
+    async function pollState() {
+      try {
+        const res = await fetch("http://localhost:18082/api/state", { cache: "no-store" });
+        if (!res.ok) return;
+        const st = await res.json();
+        let msg = "Experiment: " + (st.last_experiment || "-") + "\n";
+        msg += "Running: " + (st.running ? "yes" : "no") + "\n";
+        msg += "Return code: " + (st.last_return_code == null ? "-" : st.last_return_code) + "\n";
+        if (st.last_output) {
+          msg += "\nLast output tail:\n" + st.last_output;
+        }
+        try {
+          const repRes = await fetch("http://localhost:18082/api/report/latest", { cache: "no-store" });
+          if (repRes.ok) {
+            const rep = await repRes.json();
+            msg += "\n\nLatest report: " + rep.report_id + "\nDownload: http://localhost:18082" + rep.download_url;
+          }
+        } catch (err) {}
+        cmdBox.textContent = msg;
+      } catch (err) {}
+    }
+
+    async function pollProgress() {
+      try {
+        const res = await fetch("http://localhost:18082/api/progress", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        let maxDone = -1;
+        data.stages.forEach((s, idx) => {
+          if (s.done) maxDone = idx;
+        });
+        current = maxDone;
+        paintFlow();
+      } catch (err) {}
+    }
+
+    async function pollMetrics() {
+      try {
+        const res = await fetch("http://localhost:18082/api/metrics", { cache: "no-store" });
+        if (!res.ok) return;
+        const m = await res.json();
+        document.getElementById("kpiAlerts").textContent = m.alert_signals ?? 0;
+        document.getElementById("kpiProfile").textContent = m.profile_signals ?? 0;
+        document.getElementById("kpiMisp").textContent = m.misp_signals ?? 0;
+        document.getElementById("kpiSoarca").textContent = m.soarca_signals ?? 0;
+      } catch (err) {}
+    }
+
+    document.getElementById("exp1Btn").addEventListener("click", () => {
+      window.open("http://localhost:18080/experiment_live.html?experiment=exp1&start=1", "_blank", "noopener,noreferrer");
+    });
+    document.getElementById("exp2Btn").addEventListener("click", () => {
+      window.open("http://localhost:18080/experiment_live.html?experiment=exp2&start=1", "_blank", "noopener,noreferrer");
+    });
+
+    document.querySelectorAll(".logbtn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const container = btn.getAttribute("data-c");
+        window.open("http://localhost:18081/show?name=" + encodeURIComponent(container), "_blank", "noopener,noreferrer");
+      });
+    });
+
+    resetFlow();
+    pollState();
+    pollProgress();
+    pollMetrics();
+    setInterval(pollState, 3000);
+    setInterval(pollProgress, 3000);
+    setInterval(pollMetrics, 3000);
+  </script>
+</body>
+</html>

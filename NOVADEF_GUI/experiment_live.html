@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NOVADEF Live Experiment</title>
+  <style>
+    body { margin: 0; font-family: "Avenir Next", "Segoe UI", sans-serif; background:#0b1624; color:#e8f0f7; padding:18px; }
+    .box { max-width: 980px; margin: 0 auto; border:1px solid #2a3a4e; border-radius:12px; padding:14px; background:#101f31; }
+    h1 { margin:0 0 8px; font-size:1.3rem; }
+    .muted { color:#9eb3c8; font-size:.9rem; }
+    .flow { margin-top:12px; display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); gap:8px; }
+    .st { border:1px solid #34465c; border-radius:10px; padding:8px; background:#0d1a2a; font-size:.84rem; }
+    .st.done { border-color:#22c55e; }
+    .st.active { border-color:#22d3ee; }
+    pre { margin-top:12px; background:#09111d; border:1px solid #34465c; border-radius:10px; padding:10px; white-space:pre-wrap; max-height:260px; overflow:auto; }
+    .row { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+    .btn { border:1px solid #3c526b; border-radius:9px; background:#16283d; color:#e8f0f7; padding:8px 10px; cursor:pointer; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1 id="title">Live Experiment</h1>
+    <div class="muted" id="sub">Starting...</div>
+    <div class="flow" id="flow">
+      <div class="st" data-i="0">Observe</div>
+      <div class="st" data-i="1">Detect</div>
+      <div class="st" data-i="2">Profile</div>
+      <div class="st" data-i="3">Enrich (MISP)</div>
+      <div class="st" data-i="4">Decide</div>
+      <div class="st" data-i="5">Act (SOARCA)</div>
+    </div>
+    <div class="row">
+      <a class="btn" target="_blank" href="http://localhost:18081">Open Logs Hub</a>
+      <a class="btn" target="_blank" href="http://localhost:18080/experiments.html">Back To Console</a>
+      <a class="btn" id="reportBtn" target="_blank" href="#">Download Report</a>
+    </div>
+    <pre id="out">Waiting...</pre>
+  </div>
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const experiment = qs.get("experiment") || "exp1";
+    const start = qs.get("start") === "1";
+    const title = document.getElementById("title");
+    const sub = document.getElementById("sub");
+    const out = document.getElementById("out");
+    const reportBtn = document.getElementById("reportBtn");
+    const stages = [...document.querySelectorAll(".st")];
+    title.textContent = "Live " + experiment.toUpperCase();
+
+    function paint(maxDone) {
+      stages.forEach((s, i) => {
+        s.classList.remove("done", "active");
+        if (i < maxDone) s.classList.add("done");
+        if (i === maxDone) s.classList.add("active");
+      });
+    }
+
+    async function run() {
+      if (!start) return;
+      const res = await fetch("http://localhost:18082/api/run", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ experiment })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        out.textContent = "Run error: " + (data.error || "unknown");
+      }
+    }
+
+    async function poll() {
+      try {
+        const [s,p,r] = await Promise.all([
+          fetch("http://localhost:18082/api/state").then(x=>x.json()),
+          fetch("http://localhost:18082/api/progress").then(x=>x.json()),
+          fetch("http://localhost:18082/api/report/latest").then(x=>x.json()).catch(()=>null)
+        ]);
+        let maxDone = -1;
+        (p.stages || []).forEach((st, i) => { if (st.done) maxDone = i; });
+        paint(maxDone);
+        sub.textContent = s.running ? "Running..." : "Idle";
+        out.textContent = [
+          "Experiment: " + (s.last_experiment || "-"),
+          "Running: " + (s.running ? "yes" : "no"),
+          "Return code: " + (s.last_return_code ?? "-"),
+          "",
+          (s.last_output || "")
+        ].join("\n");
+        if (r && r.ok) {
+          reportBtn.href = "http://localhost:18082" + r.download_url;
+        }
+      } catch (e) {}
+    }
+
+    run().then(() => {
+      poll();
+      setInterval(poll, 2500);
+    });
+  </script>
+</body>
+</html>

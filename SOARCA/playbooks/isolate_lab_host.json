@@ -44,11 +44,7 @@
             "commands": [
                 {
                     "type": "ssh",
-                    "command": "sudo -n iptables -P INPUT DROP 2>&1; echo ISOLATION_INPUT___isolation_comment__:value"
-                },
-                {
-                    "type": "ssh",
-                    "command": "sudo -n iptables -P OUTPUT DROP 2>&1; echo ISOLATION_OUTPUT___isolation_comment__:value"
+                    "command": "sudo -n sh -lc 'iptables -P INPUT DROP; iptables -P OUTPUT DROP; echo ISOLATION___isolation_comment__:value'"
                 }
             ],
             "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",
