@@ -586,8 +586,10 @@ def check_misp_for_new_threats():
 
 if __name__ == "__main__":
     logger.info("Integrador MISP -> SOARCA Iniciado.")
-    # Cada minuto mira si MISP ha publicado un ataque nuevo para actuar.
-    schedule.every(1).minutes.do(check_misp_for_new_threats)
+    poll_seconds = int(os.getenv("SOARCA_TRIGGER_POLL_SECONDS", "15"))
+    # Poll más frecuente para que la contramedida se refleje durante la ventana
+    # del experimento/live report.
+    schedule.every(poll_seconds).seconds.do(check_misp_for_new_threats)
     
     # Ejecuta una vez al arrancar
     check_misp_for_new_threats()

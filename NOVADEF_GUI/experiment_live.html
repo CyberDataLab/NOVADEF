@@ -16,6 +16,10 @@
     pre { margin-top:12px; background:#09111d; border:1px solid #34465c; border-radius:10px; padding:10px; white-space:pre-wrap; max-height:260px; overflow:auto; }
     .row { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
     .btn { border:1px solid #3c526b; border-radius:9px; background:#16283d; color:#e8f0f7; padding:8px 10px; cursor:pointer; text-decoration:none; }
+    .intel { margin-top: 12px; border:1px solid #34465c; border-radius:10px; padding:10px; background:#0b1828; }
+    .intel h3 { margin:0 0 8px; font-size:.9rem; color:#9dc0de; }
+    .graph { width:100%; height:320px; border:1px solid rgba(120,165,202,.35); border-radius:10px; background: radial-gradient(circle at 20% 20%, #11243a, #09111d 70%); }
+    .edges { margin-top:8px; color:#8db0ce; font-size:.75rem; white-space:pre-wrap; }
   </style>
 </head>
 <body>
@@ -33,9 +37,16 @@
     <div class="row">
       <a class="btn" target="_blank" href="http://localhost:18081">Open Logs Hub</a>
       <a class="btn" target="_blank" href="http://localhost:18080/experiments.html">Back To Console</a>
-      <a class="btn" id="reportBtn" target="_blank" href="#">Download Report</a>
+      <button class="btn" id="reportBtn" type="button">Download Report</button>
+      <button class="btn" id="mispLogBtn" type="button">Download MISP Log</button>
+      <button class="btn" id="tapcdLogBtn" type="button">Download TAPCD Log</button>
     </div>
     <pre id="out">Waiting...</pre>
+    <div class="intel">
+      <h3>Incident Intelligence Graph (Live)</h3>
+      <svg id="graphSvg" class="graph" viewBox="0 0 980 320" preserveAspectRatio="none"></svg>
+      <div id="graphEdges" class="edges">No graph data yet.</div>
+    </div>
   </div>
   <script>
     const qs = new URLSearchParams(location.search);
@@ -44,7 +55,15 @@
     const title = document.getElementById("title");
     const sub = document.getElementById("sub");
     const out = document.getElementById("out");
+    const graphSvg = document.getElementById("graphSvg");
+    const graphEdges = document.getElementById("graphEdges");
     const reportBtn = document.getElementById("reportBtn");
+    const mispLogBtn = document.getElementById("mispLogBtn");
+    const tapcdLogBtn = document.getElementById("tapcdLogBtn");
+    let latestReportUrl = "";
+    let latestReportId = "";
+    let liveRunId = qs.get("run_id") || "";
+    let maxDoneSeen = -1;
     const stages = [...document.querySelectorAll(".st")];
     title.textContent = "Live " + experiment.toUpperCase();
 
@@ -55,14 +74,66 @@
         if (i === maxDone) s.classList.add("active");
       });
     }
+    function esc(v) {
+      return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+    }
+    function renderGraph(s) {
+      const p = s.report_panel || {};
+      const m = p.misp || {};
+      const t = p.tapcd || {};
+      const actor = (t.actor_profiles || [])[0] || null;
+      const eventId = (m.event_ids_detected_in_logs || [])[0] || "none";
+      const cm = s.summary?.countermeasure || "-";
+      const victimLine = (m.event_detail_lines || []).find(x => x.toLowerCase().includes("ip-dst")) || "";
+      const victimMatch = victimLine.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
+      const victimIp = victimMatch ? victimMatch[1] : "unknown-victim";
+      if (eventId === "none" && !actor) {
+        graphSvg.innerHTML = "";
+        graphEdges.textContent = "No graph data yet.";
+        return;
+      }
+      const nodes = [
+        { id: "actor", x: 80, y: 120, title: "Actor", lines: actor ? [
+          `id=${actor.actor_id || "-"}`, `profile=${actor.profile || "-"}`, `affiliation=${actor.affiliation || "-"}`,
+          `attitude=${actor.attitude || "-"}`, `skills=${actor.skills || "-"}`, `automation=${actor.automationLevel || "-"}`
+        ] : ["no actor profile"] },
+        { id: "target", x: 360, y: 120, title: "Target Asset", lines: [`ip=${victimIp}`] },
+        { id: "misp", x: 620, y: 40, title: "MISP Event", lines: [`event_id=${eventId}`, `signals=${m.event_signal_count ?? 0}`, `details=${m.event_details_extracted ?? 0}`] },
+        { id: "cm", x: 840, y: 120, title: "Countermeasure", lines: [cm] }
+      ];
+      const links = [["actor","target","TARGETS"],["target","misp","DETECTED_IN"],["misp","cm","TRIGGERS"]];
+      const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+      let svg = `<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><polygon points="0 0, 8 3.5, 0 7" fill="#5bc0de"></polygon></marker></defs>`;
+      links.forEach(([a,b,lbl]) => {
+        const na = byId[a], nb = byId[b];
+        const x1 = na.x + 160, y1 = na.y + 35, x2 = nb.x, y2 = nb.y + 35;
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#5bc0de" stroke-width="2" marker-end="url(#arrow)"></line>`;
+        svg += `<text x="${(x1+x2)/2}" y="${(y1+y2)/2 - 7}" fill="#9fd4e4" font-size="10" text-anchor="middle">${lbl}</text>`;
+      });
+      nodes.forEach(n => {
+        const h = 24 + (n.lines.length * 12);
+        svg += `<rect x="${n.x}" y="${n.y}" width="160" height="${h}" rx="10" ry="10" fill="#17314c" stroke="#6aa6cc" stroke-width="1.2"></rect>`;
+        svg += `<text x="${n.x+8}" y="${n.y+14}" fill="#dff2ff" font-size="11" font-weight="700">${esc(n.title)}</text>`;
+        n.lines.forEach((ln, i) => { svg += `<text x="${n.x+8}" y="${n.y+28+(i*12)}" fill="#b9d6ee" font-size="10">${esc(ln)}</text>`; });
+      });
+      graphSvg.innerHTML = svg;
+      graphEdges.textContent = `Actor -> Target (${victimIp}) [TARGETS]\nTarget -> MISP Event ${eventId} [DETECTED_IN]\nMISP Event ${eventId} -> Countermeasure [TRIGGERS]`;
+    }
 
     async function run() {
-      if (!start) return;
+      if (!start || liveRunId) return;
       const res = await fetch("http://localhost:18082/api/run", {
         method:"POST", headers:{ "Content-Type":"application/json" },
         body: JSON.stringify({ experiment })
       });
       const data = await res.json();
+      if (data && data.run_id) {
+        liveRunId = data.run_id;
+        const u = new URL(window.location.href);
+        u.searchParams.set("run_id", liveRunId);
+        u.searchParams.set("start", "0");
+        history.replaceState({}, "", u.toString());
+      }
       if (!res.ok) {
         out.textContent = "Run error: " + (data.error || "unknown");
       }
@@ -71,26 +142,90 @@
     async function poll() {
       try {
         const [s,p,r] = await Promise.all([
-          fetch("http://localhost:18082/api/state").then(x=>x.json()),
-          fetch("http://localhost:18082/api/progress").then(x=>x.json()),
-          fetch("http://localhost:18082/api/report/latest").then(x=>x.json()).catch(()=>null)
+          fetch("http://localhost:18082/api/state" + (liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "")).then(x=>x.json()),
+          fetch("http://localhost:18082/api/progress" + (liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "")).then(x=>x.json()),
+          fetch("http://localhost:18082/api/report/latest" + (liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "")).then(x=>x.json()).catch(()=>null)
         ]);
         let maxDone = -1;
         (p.stages || []).forEach((st, i) => { if (st.done) maxDone = i; });
-        paint(maxDone);
+        if (maxDone > maxDoneSeen) maxDoneSeen = maxDone;
+        paint(maxDoneSeen);
         sub.textContent = s.running ? "Running..." : "Idle";
-        out.textContent = [
+        const lines = [
           "Experiment: " + (s.last_experiment || "-"),
           "Running: " + (s.running ? "yes" : "no"),
           "Return code: " + (s.last_return_code ?? "-"),
-          "",
-          (s.last_output || "")
-        ].join("\n");
+          ""
+        ];
+        if (s.summary) {
+          lines.push("Observation scope: " + (s.summary.observation_scope || "-"));
+          lines.push("Detection method: " + (s.summary.detection_method || "-"));
+          lines.push("Generated profile: " + (s.summary.tapcd_profile || "-"));
+          lines.push("Applied countermeasure: " + (s.summary.countermeasure || "-"));
+          lines.push("");
+        }
+        if (s.report_panel) {
+          const m = s.report_panel.misp || {};
+          const t = s.report_panel.tapcd || {};
+          const mispIds = (m.event_ids_detected_in_logs || []).join(", ") || "none";
+          lines.push("## MISP");
+          lines.push("- Event IDs detected in logs: `" + mispIds + "`");
+          lines.push("- Event signal count: `" + (m.event_signal_count ?? 0) + "`");
+          lines.push("- Event details extracted: `" + (m.event_details_extracted ?? 0) + "`");
+          lines.push("## TAPCD");
+          lines.push("- Profile mentions: `" + (t.profile_mentions ?? 0) + "`");
+          lines.push("- Attacker mentions: `" + (t.attacker_mentions ?? 0) + "`");
+          lines.push("- Incident mentions: `" + (t.incident_mentions ?? 0) + "`");
+          lines.push("- Profile details extracted: `" + (t.profile_details_extracted ?? 0) + "`");
+          lines.push("- Actor profiles from Neo4j: `" + (t.actor_profile_count ?? 0) + "`");
+          lines.push("");
+          lines.push("## MISP Object (full)");
+          lines.push("```json");
+          lines.push(JSON.stringify(m.event_object || {}, null, 2));
+          lines.push("```");
+          lines.push("");
+          lines.push("## TAPCD Profile Object (full)");
+          lines.push("```json");
+          lines.push(JSON.stringify(t.profile_object || { actors: t.actor_profiles || [] }, null, 2));
+          lines.push("```");
+          lines.push("");
+        }
+        lines.push(s.last_output || "");
+        out.textContent = lines.join("\n");
+        renderGraph(s);
         if (r && r.ok) {
-          reportBtn.href = "http://localhost:18082" + r.download_url;
+          latestReportId = r.report_id || "";
+          latestReportUrl = "http://localhost:18082" + r.download_url;
+        } else {
+          latestReportId = "";
+          latestReportUrl = "";
         }
       } catch (e) {}
     }
+
+    reportBtn.addEventListener("click", () => {
+      if (!latestReportUrl) {
+        out.textContent = "Report not available yet. Run an experiment and wait until it finishes.";
+        return;
+      }
+      window.open(latestReportUrl, "_blank", "noopener,noreferrer");
+    });
+
+    mispLogBtn.addEventListener("click", () => {
+      if (!latestReportId) {
+        out.textContent = "MISP log not available yet. Wait for report generation.";
+        return;
+      }
+      window.open(`http://localhost:18082/api/report/log/${encodeURIComponent(latestReportId)}/misp_full.log`, "_blank", "noopener,noreferrer");
+    });
+
+    tapcdLogBtn.addEventListener("click", () => {
+      if (!latestReportId) {
+        out.textContent = "TAPCD log not available yet. Wait for report generation.";
+        return;
+      }
+      window.open(`http://localhost:18082/api/report/log/${encodeURIComponent(latestReportId)}/tapcd_full.log`, "_blank", "noopener,noreferrer");
+    });
 
     run().then(() => {
       poll();

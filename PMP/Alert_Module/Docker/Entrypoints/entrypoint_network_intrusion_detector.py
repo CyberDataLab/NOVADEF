@@ -245,26 +245,37 @@ def main() -> None:
         if event is None:
             continue
 
-        now_ts = float(event["timestamp"])
+        # Use wall clock for dedup/lifecycle state to avoid drift or out-of-order
+        # telemetry timestamps reopening the same campaign.
+        event_ts = float(event["timestamp"])
+        wall_now = time.time()
+        current_target_key = f"{event['dst_ip']}:{int(event['dst_port'])}"
+        prev_seen = target_last_seen_ts.get(current_target_key, 0.0)
+        # If this target has been quiet longer than the campaign window,
+        # force-close previous active campaign before ingesting new events.
+        if prev_seen and (wall_now - prev_seen) > WINDOW_SECONDS:
+            alerted_active_targets.discard(current_target_key)
+
         recent_events.append(event)
-        while recent_events and (now_ts - float(recent_events[0]["timestamp"])) > WINDOW_SECONDS:
+        while recent_events and (event_ts - float(recent_events[0]["timestamp"])) > WINDOW_SECONDS:
             recent_events.popleft()
+
+        # Expire active campaigns BEFORE refreshing per-target last-seen with
+        # current window data. Otherwise, old active targets can remain pinned
+        # forever when a new run starts on the same destination.
+        stale_targets = [
+            target
+            for target in alerted_active_targets
+            if (wall_now - target_last_seen_ts.get(target, 0.0)) > WINDOW_SECONDS
+        ]
+        for target in stale_targets:
+            alerted_active_targets.discard(target)
 
         by_target: dict[tuple[str, int], list[dict[str, Any]]] = {}
         for item in recent_events:
             key = (str(item["dst_ip"]), int(item["dst_port"]))
             by_target.setdefault(key, []).append(item)
             target_last_seen_ts[f"{item['dst_ip']}:{int(item['dst_port'])}"] = float(item["timestamp"])
-
-        # Expira campañas activas sin actividad reciente para permitir que
-        # un ataque nuevo futuro vuelva a generar exactamente una alerta.
-        stale_targets = [
-            target
-            for target in alerted_active_targets
-            if (now_ts - target_last_seen_ts.get(target, 0.0)) > WINDOW_SECONDS
-        ]
-        for target in stale_targets:
-            alerted_active_targets.discard(target)
 
         for (dst_ip, dst_port), window_events in by_target.items():
             failed_attempts = sum(1 for item in window_events if not item["auth_success"])
@@ -284,19 +295,24 @@ def main() -> None:
                 continue
 
             dedup_key = f"{dst_ip}:{dst_port}"
+            correlation_id = (
+                f"nid-{dst_ip}-{dst_port}-"
+                f"{time.strftime('%Y%m%d%H%M', time.gmtime(min(float(item['timestamp']) for item in window_events)))}"
+            )
 
             # Una sola alerta por campaña activa para evitar replicar el incidente.
             if dedup_key in alerted_active_targets:
                 continue
 
-            if now_ts - last_alert_by_target.get(dedup_key, 0.0) < DEDUP_SECONDS:
+            if wall_now - last_alert_by_target.get(dedup_key, 0.0) < DEDUP_SECONDS:
                 continue
-            last_alert_by_target[dedup_key] = now_ts
+            last_alert_by_target[dedup_key] = wall_now
             alerted_active_targets.add(dedup_key)
 
             alert = {
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(wall_now)),
                 "detector": "network_intrusion_detector",
+                "correlation_id": correlation_id,
                 "alert_type": "distributed_password_spraying",
                 "title": f"Distributed Password Spraying against {dst_ip}:{dst_port}",
                 "src_ips": sorted(unique_src_ips),

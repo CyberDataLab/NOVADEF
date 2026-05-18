@@ -9,7 +9,10 @@ OUTPUT_FILE="${LOG_DIR}/password_spraying_attempts.jsonl"
 SLEEP_SECONDS="${SLEEP_SECONDS:-1}"
 
 mkdir -p "${LOG_DIR}"
-: > "${OUTPUT_FILE}"
+# Recreate file with a fresh inode so Filebeat filestream resets offset
+# and reliably ingests each experiment run from the beginning.
+rm -f "${OUTPUT_FILE}"
+touch "${OUTPUT_FILE}"
 
 resolved_victim_ip="$(getent ahostsv4 "${VICTIM_IP}" | awk 'NR==1 {print $1}')"
 if [ -n "${resolved_victim_ip}" ]; then

@@ -138,6 +138,23 @@
       overflow-x: auto;
       font-size: 0.8rem;
     }
+    .intel {
+      margin-top: 12px;
+      border: 1px solid rgba(166, 189, 212, 0.35);
+      border-radius: 10px;
+      background: #0a1524;
+      padding: 10px;
+    }
+    .gtitle { margin: 0 0 8px; font-size: 0.9rem; color: #9dc0de; }
+    .graph {
+      width: 100%;
+      height: 330px;
+      border: 1px solid rgba(120,165,202,.35);
+      border-radius: 10px;
+      background: radial-gradient(circle at 20% 20%, #11243a, #09111d 70%);
+      overflow: hidden;
+    }
+    .edges { color:#8db0ce; font-size:.75rem; white-space:pre-wrap; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -192,15 +209,28 @@
     </section>
 
     <section class="panel">
-      <p class="sub">API status, latest run output, and automatic report status:</p>
-      <pre id="cmdBox">Waiting for experiment run...</pre>
+      <p class="sub">Use <b>Run Exp1 from Web</b> or <b>Run Exp2 from Web</b> to open the live experiment view with full runtime details.</p>
+      <pre id="cmdBox">General view active. Runtime experiment details are shown only in the live experiment window.</pre>
+    </section>
+    <section class="panel grid">
+      <div>
+        <p class="sub">Executed experiments</p>
+        <div id="runsList" class="logs"></div>
+      </div>
+      <div>
+        <p class="sub">Selected execution details</p>
+        <pre id="runDetail">Select one execution from the list.</pre>
+      </div>
     </section>
   </main>
 
   <script>
     const steps = [...document.querySelectorAll(".stage")];
     const cmdBox = document.getElementById("cmdBox");
+    const runsList = document.getElementById("runsList");
+    const runDetail = document.getElementById("runDetail");
     let current = -1;
+    let runsCache = [];
 
     function paintFlow() {
       steps.forEach((el, i) => {
@@ -234,63 +264,6 @@
         cmdBox.textContent = "Cannot reach report API.";
       }
     });
-    async function runExperiment(experiment) {
-      cmdBox.textContent = "Launching " + experiment + " via backend API...";
-      try {
-        const res = await fetch("http://localhost:18082/api/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ experiment })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          cmdBox.textContent = "API error: " + (data.error || "unknown");
-          return;
-        }
-        current = 0;
-        paintFlow();
-        cmdBox.textContent = "Started " + experiment + ". Follow logs and advance stages as evidence appears.";
-      } catch (err) {
-        cmdBox.textContent = "Cannot reach Experiments API at http://localhost:18082";
-      }
-    }
-
-    async function pollState() {
-      try {
-        const res = await fetch("http://localhost:18082/api/state", { cache: "no-store" });
-        if (!res.ok) return;
-        const st = await res.json();
-        let msg = "Experiment: " + (st.last_experiment || "-") + "\n";
-        msg += "Running: " + (st.running ? "yes" : "no") + "\n";
-        msg += "Return code: " + (st.last_return_code == null ? "-" : st.last_return_code) + "\n";
-        if (st.last_output) {
-          msg += "\nLast output tail:\n" + st.last_output;
-        }
-        try {
-          const repRes = await fetch("http://localhost:18082/api/report/latest", { cache: "no-store" });
-          if (repRes.ok) {
-            const rep = await repRes.json();
-            msg += "\n\nLatest report: " + rep.report_id + "\nDownload: http://localhost:18082" + rep.download_url;
-          }
-        } catch (err) {}
-        cmdBox.textContent = msg;
-      } catch (err) {}
-    }
-
-    async function pollProgress() {
-      try {
-        const res = await fetch("http://localhost:18082/api/progress", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json();
-        let maxDone = -1;
-        data.stages.forEach((s, idx) => {
-          if (s.done) maxDone = idx;
-        });
-        current = maxDone;
-        paintFlow();
-      } catch (err) {}
-    }
-
     async function pollMetrics() {
       try {
         const res = await fetch("http://localhost:18082/api/metrics", { cache: "no-store" });
@@ -317,13 +290,77 @@
       });
     });
 
+    function renderRunDetail(run) {
+      if (!run) {
+        runDetail.textContent = "Select one execution from the list.";
+        return;
+      }
+      let txt = "";
+      txt += "Run ID: " + (run.run_id || "-") + "\n";
+      txt += "Experiment: " + (run.experiment || "-") + "\n";
+      txt += "Running: " + (run.running ? "yes" : "no") + "\n";
+      txt += "Return code: " + (run.return_code == null ? "-" : run.return_code) + "\n";
+      txt += "Started at: " + (run.started_at ? new Date(run.started_at * 1000).toISOString() : "-") + "\n";
+      txt += "Finished at: " + (run.finished_at ? new Date(run.finished_at * 1000).toISOString() : "-") + "\n";
+      if (run.summary) {
+        txt += "\nObservation scope: " + (run.summary.observation_scope || "-") + "\n";
+        txt += "Detection method: " + (run.summary.detection_method || "-") + "\n";
+        txt += "Generated profile: " + (run.summary.tapcd_profile || "-") + "\n";
+        txt += "Applied countermeasure: " + (run.summary.countermeasure || "-") + "\n";
+      }
+      if (run.report_panel) {
+        const m = run.report_panel.misp || {};
+        const t = run.report_panel.tapcd || {};
+        txt += "\n## MISP\n";
+        txt += "- Event IDs: " + ((m.event_ids_detected_in_logs || []).join(", ") || "none") + "\n";
+        txt += "- Event signals: " + (m.event_signal_count ?? 0) + "\n";
+        txt += "- Event details extracted: " + (m.event_details_extracted ?? 0) + "\n";
+        txt += "\n## TAPCD\n";
+        txt += "- Profile mentions: " + (t.profile_mentions ?? 0) + "\n";
+        txt += "- Actor profiles from Neo4j: " + (t.actor_profile_count ?? 0) + "\n";
+      }
+      if (run.output_tail) {
+        txt += "\nOutput tail:\n" + run.output_tail;
+      }
+      runDetail.textContent = txt;
+    }
+
+    function renderRunsList() {
+      if (!runsCache.length) {
+        runsList.innerHTML = '<div class="logbtn"><b>No executions yet</b><span>Run exp1/exp2 to create history</span></div>';
+        return;
+      }
+      runsList.innerHTML = "";
+      runsCache.forEach((run) => {
+        const btn = document.createElement("button");
+        btn.className = "logbtn";
+        const status = run.running ? "running" : (run.return_code === 0 ? "ok" : "failed");
+        btn.innerHTML = `<b>${run.experiment} · ${run.run_id}</b><span>${status}</span>`;
+        btn.addEventListener("click", () => {
+          renderRunDetail(run);
+          const exp = encodeURIComponent(run.experiment || "exp1");
+          const rid = encodeURIComponent(run.run_id || "");
+          window.open(`http://localhost:18080/experiment_live.html?experiment=${exp}&start=0&run_id=${rid}`, "_blank", "noopener,noreferrer");
+        });
+        runsList.appendChild(btn);
+      });
+    }
+
+    async function pollHistory() {
+      try {
+        const res = await fetch("http://localhost:18082/api/history", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        runsCache = data.runs || [];
+        renderRunsList();
+      } catch (err) {}
+    }
+
     resetFlow();
-    pollState();
-    pollProgress();
     pollMetrics();
-    setInterval(pollState, 3000);
-    setInterval(pollProgress, 3000);
+    pollHistory();
     setInterval(pollMetrics, 3000);
+    setInterval(pollHistory, 5000);
   </script>
 </body>
 </html>

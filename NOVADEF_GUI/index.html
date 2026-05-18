@@ -458,7 +458,7 @@
     async function updateContainerStatuses() {
       let map = {};
       try {
-        const res = await fetch("http://localhost:18081/api/containers", { cache: "no-store" });
+        const res = await fetch("http://localhost:18082/api/containers", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
           for (const c of data) {

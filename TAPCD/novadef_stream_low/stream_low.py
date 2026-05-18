@@ -246,6 +246,15 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ───────────── Aggregation ─────────────
 
 def build_agg(df: pd.DataFrame) -> Dict[str, tuple]:
+    def _safe_mode_first(x):
+        if x is None or len(x) == 0:
+            return np.nan
+        s = pd.Series(x).dropna()
+        if s.empty:
+            return np.nan
+        m = s.mode()
+        return m.iloc[0] if not m.empty else np.nan
+
     def _unique_sessions_count(x, _df=df):
         if x.empty:
             return 0
@@ -296,9 +305,9 @@ def build_agg(df: pd.DataFrame) -> Dict[str, tuple]:
         "tcp_count": ("protocol", lambda x: int((pd.Series(x).astype(str).str.upper() == "TCP").sum())),
 
         "unique_dst_ports_count": ("dst_port", lambda x: pd.Series(x).nunique()),
-        "most_frequent_dst_port": ("dst_port", lambda x: pd.Series(x).mode().iloc[0] if len(x) else np.nan),
+        "most_frequent_dst_port": ("dst_port", _safe_mode_first),
         "num_unique_src_ports": ("src_port", lambda x: pd.Series(x).nunique()),
-        "most_frequent_src_port": ("src_port", lambda x: pd.Series(x).mode().iloc[0] if len(x) else np.nan),
+        "most_frequent_src_port": ("src_port", _safe_mode_first),
         "unique_dst_ips": ("dst_ip", lambda x: pd.Series(x).nunique()),
         "entropy_dst_ips": ("dst_ip", lambda x: _entropy(x)),
         "entropy_dst_ports": ("dst_port", lambda x: _entropy(x)),

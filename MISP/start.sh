@@ -509,6 +509,73 @@ done
 # ----------------------------------------------------------------
 docker compose restart misp-integrator 2>/dev/null || true
 
+# ----------------------------------------------------------------
+# Smoke test funcional de API: validar que /events/add responde bien.
+# Crea un evento efímero y lo elimina, para garantizar que el integrador
+# no recibirá errores 500 al comenzar a procesar alertas reales.
+# ----------------------------------------------------------------
+echo ""
+echo "🧪 [8b/8] Smoke test de API MISP (/events/add)..."
+SMOKE_OK=0
+for _i in $(seq 1 8); do
+    RESP=$(curl -ksS -X POST "https://localhost:8443/events/add" \
+      -H "Authorization: ${MISP_API_KEY}" \
+      -H "Accept: application/json" \
+      -H "Content-Type: application/json" \
+      -d '{"info":"NOVADEF startup smoke test","distribution":0,"threat_level_id":2,"analysis":0}' 2>/dev/null || true)
+
+    EID=$(printf "%s" "$RESP" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    ev=d.get("Event",{}) if isinstance(d,dict) else {}
+    v=ev.get("id","")
+    print(v if str(v).isdigit() else "")
+except Exception:
+    print("")')
+    if [ -n "$EID" ]; then
+        curl -ksS -X POST "https://localhost:8443/events/delete/${EID}" \
+          -H "Authorization: ${MISP_API_KEY}" \
+          -H "Accept: application/json" >/dev/null 2>&1 || true
+        SMOKE_OK=1
+        _ok "Smoke test OK (events/add)."
+        break
+    fi
+    _warn "Smoke test fallido intento ${_i}/8, reintentando..."
+    docker exec pmp-misp-server service php7.4-fpm restart 2>/dev/null || true
+    sleep 3
+done
+
+if [ "$SMOKE_OK" -ne 1 ]; then
+    echo "❌ MISP API no estable tras reintentos (/events/add)."
+    exit 1
+fi
+
+# ----------------------------------------------------------------
+# Limpieza final post-smoke: dejar MISP en estado inicial real para
+# que el primer evento operativo del experimento comience en ID 1.
+# ----------------------------------------------------------------
+echo ""
+echo "🧹 [8c/8] Limpiando artefactos de smoke y reseteando contador de eventos..."
+docker exec pmp-misp-db sh -lc "mysql -uroot -pmy_root_password misp -e \"
+SET FOREIGN_KEY_CHECKS=0;
+TRUNCATE TABLE attributes;
+TRUNCATE TABLE shadow_attributes;
+TRUNCATE TABLE event_tags;
+TRUNCATE TABLE sightings;
+TRUNCATE TABLE object_references;
+TRUNCATE TABLE objects;
+TRUNCATE TABLE event_reports;
+TRUNCATE TABLE cryptographic_keys;
+TRUNCATE TABLE logs;
+TRUNCATE TABLE correlations;
+TRUNCATE TABLE default_correlations;
+TRUNCATE TABLE no_acl_correlations;
+TRUNCATE TABLE shadow_attribute_correlations;
+TRUNCATE TABLE events;
+SET FOREIGN_KEY_CHECKS=1;
+\"" >/dev/null 2>&1 || true
+_ok "Estado MISP limpio para ejecución de experimentos."
+
 echo ""
 echo "✅ MISP completamente funcional."
 echo "   🌍 Web:  http://localhost:8080  ($ADMIN_EMAIL / admin)"

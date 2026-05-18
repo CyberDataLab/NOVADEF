@@ -199,12 +199,18 @@ def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_colle
             is_duplicate = False
             try:
                 alert_doc = json.loads(line)
-                src_ap = alert_doc.get('src_ap', '')
-                dst_ap = alert_doc.get('dst_ap', '')
-                src_ip = src_ap.split(':')[0] if src_ap else ''
-                dst_ip = dst_ap.split(':')[0] if dst_ap else ''
-                msg    = alert_doc.get('msg', '')
-                dedup_key = (src_ip, dst_ip, msg)
+                correlation_id = alert_doc.get('correlation_id')
+                if correlation_id:
+                    # Prefer campaign correlation id when present to guarantee
+                    # one alert per attack campaign across detector retries.
+                    dedup_key = ("correlation_id", str(correlation_id))
+                else:
+                    src_ap = alert_doc.get('src_ap', '')
+                    dst_ap = alert_doc.get('dst_ap', '')
+                    src_ip = src_ap.split(':')[0] if src_ap else ''
+                    dst_ip = dst_ap.split(':')[0] if dst_ap else ''
+                    msg = alert_doc.get('msg', '')
+                    dedup_key = (src_ip, dst_ip, msg)
                 now = time.time()
 
                 # Limpiar entradas expiradas cada 1000 alertas aprox.
@@ -217,7 +223,10 @@ def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_colle
                     is_duplicate = True
                 else:
                     dedup_cache[dedup_key] = now
-                    print(f"🚨 Nueva alerta: {msg} | {src_ip} -> {dst_ip}")
+                    if correlation_id:
+                        print(f"🚨 Nueva alerta (corr={correlation_id})")
+                    else:
+                        print(f"🚨 Nueva alerta: {msg} | {src_ip} -> {dst_ip}")
             except Exception:
                 pass  # Si falla el parseo, dejar pasar la línea
 

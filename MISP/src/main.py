@@ -102,6 +102,24 @@ def _safe_text_attr(value: str) -> str:
     return text[:MISP_TEXT_ATTR_MAXLEN] + " ...[truncated]"
 
 
+def _time_window_bucket(ts_raw: str, window_secs: int = 1800) -> str:
+    """
+    Normalize timestamps into coarse fixed windows (default 30 min) so
+    repeated runs of the same campaign in the same period reuse incident key.
+    """
+    try:
+        if ts_raw:
+            # Accept ISO timestamps like 2026-05-18T22:41:17Z
+            dt = datetime.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S")
+            epoch = int(dt.timestamp())
+        else:
+            epoch = int(time.time())
+    except Exception:
+        epoch = int(time.time())
+    bucket_start = epoch - (epoch % int(window_secs))
+    return datetime.utcfromtimestamp(bucket_start).strftime("%Y-%m-%dT%H:%M")
+
+
 def upsert_tapcd_actor_profile(victim_ip: str, src_ips: list[str], mitre_attack: list[str], usernames: list[str]) -> bool:
     """
     Crea/actualiza un perfil mínimo de actor en Neo4j para garantizar
@@ -352,20 +370,29 @@ def get_network_flows_context(ip_target: str) -> str | None:
         return None
 
 
-def get_tapcd_actor_profile(victim_ip: str) -> dict | None:
+def get_tapcd_actor_profile(victim_ip: str, prefer_novadef: bool = False, attacker_ref: str | None = None) -> dict | None:
     """
     Consulta Neo4j para obtener el perfil de actor que ataca la IP víctima.
     La relación real es: (Actor)-[:TARGETS]->(Target) donde Target.ip CONTAINS victim_ip.
     """
+    where_extra = "AND a.id STARTS WITH 'novadef-'" if prefer_novadef else ""
+    attacker_extra = ""
+    params = {"ip": victim_ip}
+    if attacker_ref:
+        attacker_extra = " AND a.id CONTAINS $attacker_ref"
+        params["attacker_ref"] = str(attacker_ref).replace('.', '-')
+
     query = {
         "statements": [
             {
                 "statement": (
                     "MATCH (a:Actor)-[:TARGETS]->(t:Target) "
                     "WHERE t.ip CONTAINS $ip "
+                    f"{where_extra} "
+                    f"{attacker_extra} "
                     "RETURN a ORDER BY a.lastActivity DESC LIMIT 1"
                 ),
-                "parameters": {"ip": victim_ip}
+                "parameters": params
             }
         ]
     }
@@ -392,6 +419,27 @@ def init_misp():
         logger.error(f"Error al conectar con MISP: {e}")
         return None
 
+
+def add_event_with_retry(event_payload: dict, retries: int = 5, delay_sec: float = 2.0):
+    """
+    Retry MISP event creation to survive transient warm-up/500 windows.
+    Recreates the PyMISP client on each attempt.
+    """
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        misp_client = init_misp()
+        if not misp_client:
+            last_exc = RuntimeError("PyMISP client unavailable")
+            time.sleep(delay_sec)
+            continue
+        try:
+            return misp_client.add_event(event_payload, pythonify=True)
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"[MISP] add_event intento {attempt}/{retries} falló: {e}")
+            time.sleep(delay_sec)
+    raise last_exc if last_exc else RuntimeError("Unknown add_event failure")
+
 def extract_ip_from_ap(ap_string):
     """Extrae la IP si viene con puerto (ej: 10.0.2.15:57384)"""
     if not isinstance(ap_string, str):
@@ -417,6 +465,9 @@ def process_alert_to_misp(misp, topic, alert_data):
     if not misp:
         return
 
+    def _campaign_key(target: str, attack_type: str, time_bucket: str) -> str:
+        return f"campaign|target={target}|attack={attack_type}|time={time_bucket}"
+
     # Topics puramente métricos o de trazas crudas: no generan eventos MISP directos.
     # Falco sí debe recorrer el pipeline de enriquecimiento y publicación.
     if topic in ['telegraf_metrics', 'syslog_logs', 'systemd_logs', 'tshark_traces', 'cic_flow']:
@@ -438,14 +489,12 @@ def process_alert_to_misp(misp, topic, alert_data):
         msg       = alert_data.get('msg', 'Snort Alert')
         rule      = alert_data.get('rule', '')
 
-        # Si la alerta de Snort es la firma puente del detector de anomalías
-        # y ya publicamos la campaña de network IDS para ese destino, evitamos
-        # crear un segundo evento MISP redundante (reduce 500 intermitente).
+        # Firma puente del detector de anomalías (TAPCD compat):
+        # no debe generar un evento MISP propio para evitar duplicados del
+        # mismo incidente de spraying.
         if "NOVADEF-NID" in str(rule):
-            net_key = f"network_ids|{dst_ip}|{dst_port}"
-            if already_processed_persisted(net_key):
-                logger.info(f"[DEDUP-LINK] Snort puente omitida; campaña ya publicada: {net_key}")
-                return
+            logger.info("[DEDUP-LINK] Snort puente omitida; incidente lo publica network_intrusion_alerts.")
+            return
 
         # ── Deduplicación: misma regla + mismo par IP en ventana → ignorar ──
         dedup_key = f"{alert_data.get('rule','')}|{src_ip}|{dst_ip}"
@@ -516,7 +565,9 @@ def process_alert_to_misp(misp, topic, alert_data):
         )
         # Para exp2: una sola alerta por campaña de ransomware host.
         if is_lab_ransomware:
-            dedup_key = f"falco_ransomware|{SCENARIO_VICTIM_IP}"
+            evt_time = str(inner.get('time') or '')
+            evt_bucket = evt_time[:16] if evt_time else datetime.utcnow().strftime('%Y-%m-%dT%H:%M')
+            dedup_key = _campaign_key(SCENARIO_VICTIM_IP, "T1486_T1490_T1489_T1005_host_ransomware", evt_bucket)
             persisted_ts = _persisted_dedup.get(dedup_key)
             if persisted_ts and (time.time() - float(persisted_ts)) <= HOST_RANSOMWARE_COOLDOWN_SECS:
                 logger.info(f"[DEDUP-PERSIST] Ransomware host ya procesado recientemente: {dedup_key}")
@@ -587,10 +638,11 @@ def process_alert_to_misp(misp, topic, alert_data):
         mitre_attack = alert_data.get('mitre_attack', []) or []
 
         first_seen_raw = str(alert_data.get('first_seen') or alert_data.get('timestamp') or '')
-        first_seen_bucket = first_seen_raw[:16] if first_seen_raw else datetime.utcnow().strftime('%Y-%m-%dT%H:%M')
+        # Stable campaign window for dedup: same target+attack within 30m reuses incident.
+        first_seen_bucket = _time_window_bucket(first_seen_raw, NETWORK_ATTACK_COOLDOWN_SECS)
         src_fingerprint = _stable_hash(sorted(set(str(x) for x in src_ips)))
         # Clave estable por campaña de spraying sobre mismo servicio destino.
-        dedup_key = f"network_ids|{dst_ip}|{dst_port}"
+        dedup_key = _campaign_key(f"{dst_ip}:{dst_port}", "T1110.003_password_spraying", first_seen_bucket)
         persisted_ts = _persisted_dedup.get(dedup_key)
         if persisted_ts and (time.time() - float(persisted_ts)) <= NETWORK_ATTACK_COOLDOWN_SECS:
             logger.info(f"[DEDUP-PERSIST] Campaña de spraying ya procesada recientemente: {dedup_key}")
@@ -660,20 +712,19 @@ def process_alert_to_misp(misp, topic, alert_data):
 
     # ── Crear un evento MISP nuevo para esta alerta ───────────────────────────
     try:
-        new_event = misp.add_event(
+        new_event = add_event_with_retry(
             {
                 'info': event_title,
                 'distribution': 0,
                 'threat_level_id': 2,
                 'analysis': 0,
-            },
-            pythonify=True,
+            }
         )
         event_id = new_event.id
         logger.info(f"Nuevo evento MISP #{event_id}: {event_title}")
         if topic == 'network_intrusion_alerts':
             mark_processed_persisted(dedup_key)
-        elif topic == 'falco_events' and dedup_key.startswith('falco_ransomware|'):
+        elif topic == 'falco_events' and dedup_key.startswith('campaign|target='):
             mark_processed_persisted(dedup_key)
     except Exception as e:
         logger.error(f"Error creando evento MISP '{event_title}': {e}")
@@ -740,13 +791,21 @@ def process_alert_to_misp(misp, topic, alert_data):
         dst_ip = SCENARIO_VICTIM_IP
 
     if dst_ip:
-        actor = get_tapcd_actor_profile(dst_ip)
-        if not actor and topic == 'network_intrusion_alerts':
+        actor = None
+        if topic == 'network_intrusion_alerts':
+            # For exp1 we always ensure a fresh NOVADEF actor profile for this campaign.
             upsert_tapcd_actor_profile(dst_ip, src_ips, mitre_attack, usernames)
-            actor = get_tapcd_actor_profile(dst_ip)
-        elif not actor and topic == 'falco_events':
+            actor_ref = src_ips[0] if src_ips else None
+            actor = get_tapcd_actor_profile(dst_ip, prefer_novadef=True, attacker_ref=actor_ref)
+            if not actor:
+                actor = get_tapcd_actor_profile(dst_ip, prefer_novadef=True)
+            if not actor:
+                actor = get_tapcd_actor_profile(dst_ip)
+        elif topic == 'falco_events':
             upsert_tapcd_host_ransomware_profile(dst_ip, detector="falco")
-            actor = get_tapcd_actor_profile(dst_ip)
+            actor = get_tapcd_actor_profile(dst_ip, prefer_novadef=True)
+            if not actor:
+                actor = get_tapcd_actor_profile(dst_ip)
         if actor:
             profile_text = (
                 f"[TAPCD - Perfil del Actor Amenaza]\n"
@@ -789,13 +848,12 @@ def main():
         logger.warning("MISP no está preparado o las credenciales fallaron. Saliendo para reintentar...")
         sys.exit(1)  # Docker (restart: on-failure) reiniciará hasta que MISP esté listo
 
-    # earliest: no perder mensajes nuevos aunque el integrador se reinicie.
-    # Los mensajes recientes (< 2 min) se procesan; los más antiguos se descartan
-    # para evitar reprocesar eventos de arranques anteriores.
+    # latest: empezar desde mensajes nuevos para evitar reprocesar histórico
+    # al arrancar en limpio y crear eventos "fantasma" antes del experimento.
     consumer = KafkaConsumer(
         *KAFKA_TOPICS,
         bootstrap_servers=[KAFKA_BROKER],
-        auto_offset_reset='earliest',
+        auto_offset_reset='latest',
         enable_auto_commit=True,
         group_id='misp-integration-group',
         value_deserializer=safe_json_deserializer
@@ -803,9 +861,8 @@ def main():
     
     logger.info(f"Conectado a Kafka: {KAFKA_BROKER}")
 
-    # Ignorar mensajes anteriores al arranque del laboratorio.
-    # 30 min de margen cubre el tiempo de init de MISP (~5 min) + holgura.
-    startup_cutoff_ms = (time.time() - 1800) * 1000  # 30 min atrás en ms epoch
+    # Ignorar mensajes anteriores al arranque del integrador.
+    startup_cutoff_ms = time.time() * 1000  # now in ms epoch
 
     for message in consumer:
         # Filtrar mensajes anteriores al arranque del integrador
