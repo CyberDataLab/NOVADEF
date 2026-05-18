@@ -197,8 +197,8 @@
           latestReportId = r.report_id || "";
           latestReportUrl = "http://localhost:18082" + r.download_url;
         } else {
-          latestReportId = "";
-          latestReportUrl = "";
+          latestReportId = s.last_report_id || "";
+          latestReportUrl = latestReportId ? `http://localhost:18082/api/report/download/${encodeURIComponent(latestReportId)}` : "";
         }
       } catch (e) {}
     }
