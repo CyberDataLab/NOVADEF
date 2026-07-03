@@ -31,6 +31,11 @@ __pycache__/
 *.log
 *.pid
 
-# ── Runtime JSONL (generados en ejecución) ───────────────────────────────────
+# ── Runtime JSONL / logs de ejecución ────────────────────────────────────────
 PMP/Results/Network_IDS/*.jsonl
 Scenario/shared-logs/*.jsonl
+Scenario/shared-logs/*.out
+Scenario/artifacts/logs/*
+
+.novadef_runtime/
+.novadev_runtime/

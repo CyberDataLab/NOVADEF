@@ -44,7 +44,7 @@
             "commands": [
                 {
                     "type": "ssh",
-                    "command": "sudo -n sh -lc 'iptables -P INPUT DROP; iptables -P OUTPUT DROP; echo ISOLATION___isolation_comment__:value'"
+                    "command": "sudo -n sh /opt/novadef/apply_isolation.sh"
                 }
             ],
             "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",
@@ -70,7 +70,7 @@
             "name": "scenario_victim",
             "description": "Lab endpoint target used for isolation demonstrations.",
             "address": {
-                "ipv4": ["172.18.0.10"]
+                "ipv4": ["172.18.0.3"]
             },
             "port": "2222",
             "authentication_info": "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"

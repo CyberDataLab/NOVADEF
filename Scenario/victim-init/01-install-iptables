@@ -1,8 +1,53 @@
 #!/bin/sh
-# Instalar iptables en la víctima (Alpine base no lo incluye)
-apk add --no-cache iptables ip6tables 2>/dev/null && echo "[victim-init] iptables instalado" || echo "[victim-init] WARN: fallo instalando iptables"
+# Instalar iptables y openssl en la víctima (Alpine base no los incluye)
+apk add --no-cache iptables ip6tables openssl sudo bash 2>/dev/null && echo "[victim-init] iptables+openssl+sudo+bash instalados" || echo "[victim-init] WARN: fallo instalando paquetes"
 
-# Configurar sudo sin contraseña para novadef (contenedor de demo)
-# Sobreescribimos la línea existente que requiere password
-sed -i 's/^novadef ALL=(ALL) ALL/novadef ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
-echo "[victim-init] NOPASSWD configurado para novadef"
+# Configurar sudo sin contraseña para novadef.
+# sudo -n (non-interactive) falla si CUALQUIER regla coincidente requiere
+# contraseña, aunque otra regla NOPASSWD también coincida (sudo >= 1.9).
+# Eliminamos la línea "novadef ALL=(ALL) ALL" del sudoers principal para
+# evitar el conflicto, y ponemos solo NOPASSWD en sudoers.d.
+sed -i '/^novadef[[:space:]]/d' /etc/sudoers 2>/dev/null || true
+mkdir -p /etc/sudoers.d
+echo "novadef ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/novadef-nopasswd
+chmod 440 /etc/sudoers.d/novadef-nopasswd
+echo "[victim-init] NOPASSWD configurado para novadef (sin conflicto en sudoers)"
+
+# Observabilidad de tráfico de RED (no-loopback) para la gráfica de la víctima.
+# Crea una cadena de CONTEO que NO bloquea nada (solo cuenta y retorna), de modo
+# que la GUI pueda medir el tráfico de red real destinado a la víctima en ambas
+# fases (antes y después de la contramedida), excluyendo el ruido de loopback.
+# Sin esto, la policy ACCEPT por defecto mezcla loopback (telegraf) con la red y
+# la curva queda inflada; tras el aislamiento el contador refleja el DROP real.
+iptables -N NOVADEF_NET_IN 2>/dev/null || iptables -F NOVADEF_NET_IN 2>/dev/null || true
+iptables -A NOVADEF_NET_IN -j RETURN 2>/dev/null || true
+# Insertar al principio de INPUT solo el tráfico NO-loopback (interfaz de red).
+iptables -C INPUT ! -i lo -j NOVADEF_NET_IN 2>/dev/null || iptables -I INPUT 1 ! -i lo -j NOVADEF_NET_IN 2>/dev/null || true
+echo "[victim-init] Cadena de conteo NOVADEF_NET_IN instalada (observabilidad de red)"
+
+# Pre-accept SSH desde la subred de INFRAESTRUCTURA de SOARCA (172.18.0.0/27,
+# .0-.31) en puerto 2222 — NUNCA toda la /24. El atacante usa IPs spoofed en
+# 172.18.0.160-175 (dentro de la /24 pero fuera de la /27 de infra); si esta
+# whitelist cubriera la /24 completa, el atacante podría seguir hablando al
+# puerto 2222 incluso DESPUÉS del aislamiento (política DROP con excepción que
+# le da acceso). Restringir a /27 garantiza que el aislamiento sea real.
+# Esto garantiza que el ejecutor SSH de SOARCA puede conectar para aplicar las
+# reglas iptables incluso cuando el atacante está haciendo SYN flood masivo al
+# puerto 2222, que de lo contrario satura el TCP backlog y bloquea a SOARCA.
+# Las reglas de DROP del playbook se insertan DESPUÉS de esta, así que SOARCA
+# siempre tiene acceso prioritario independientemente de la contramedida activa.
+iptables -N NOVADEF_SOARCA_SSH 2>/dev/null || iptables -F NOVADEF_SOARCA_SSH 2>/dev/null || true
+iptables -A NOVADEF_SOARCA_SSH -p tcp --dport 2222 -s 172.18.0.0/27 -j ACCEPT 2>/dev/null || true
+iptables -C INPUT -p tcp --dport 2222 -s 172.18.0.0/27 -j NOVADEF_SOARCA_SSH 2>/dev/null || \
+  iptables -I INPUT 1 -p tcp --dport 2222 -s 172.18.0.0/27 -j NOVADEF_SOARCA_SSH 2>/dev/null || true
+echo "[victim-init] Regla ACCEPT-SSH para SOARCA (172.18.0.0/27:2222) instalada con prioridad máxima"
+
+# Helper function stored for use by isolation script:
+# Reinstall SOARCA SSH rule after any iptables flush.
+_install_soarca_ssh_rule() {
+  iptables -N NOVADEF_SOARCA_SSH 2>/dev/null || true
+  iptables -F NOVADEF_SOARCA_SSH 2>/dev/null || true
+  iptables -A NOVADEF_SOARCA_SSH -p tcp --dport 2222 -s 172.18.0.0/27 -j ACCEPT 2>/dev/null || true
+  iptables -C INPUT -p tcp --dport 2222 -s 172.18.0.0/27 -j NOVADEF_SOARCA_SSH 2>/dev/null || \
+    iptables -I INPUT 1 -p tcp --dport 2222 -s 172.18.0.0/27 -j NOVADEF_SOARCA_SSH 2>/dev/null || true
+}

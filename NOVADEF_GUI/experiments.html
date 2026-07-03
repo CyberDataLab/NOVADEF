@@ -6,176 +6,389 @@
   <title>NOVADEF Experiments Console</title>
   <style>
     :root {
-      --bg0: #07111d;
-      --bg1: #0d1e31;
-      --panel: rgba(13, 26, 42, 0.86);
-      --line: rgba(167, 190, 216, 0.26);
-      --text: #e6eef7;
-      --muted: #9cb1c8;
-      --ok: #22c55e;
-      --active: #22d3ee;
+      --bg:     #0a0e27;
+      --panel:  rgba(15,19,48,0.85);
+      --card:   rgba(10,14,39,0.80);
+      --line:   rgba(255,255,255,0.08);
+      --line2:  rgba(6,182,212,0.20);
+      --text:   #f0f4ff;
+      --muted:  #8fa3c0;
+      --cyan:   #22d3ee;
+      --ok:     #34d399;
+      --warn:   #fbbf24;
+      --danger: #f87171;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       color: var(--text);
-      font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
-      background:
-        radial-gradient(920px 520px at -20% -10%, #123f60 0%, transparent 62%),
-        radial-gradient(940px 520px at 120% -5%, #0d3a59 0%, transparent 62%),
-        linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       min-height: 100vh;
-      padding: 24px 16px 36px;
+      padding: 0;
+      position: relative;
     }
-    .wrap { max-width: 1200px; margin: 0 auto; }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      z-index: -2;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 6, 20, 0.82);
+      z-index: -1;
+    }
+
+    /* ── Topbar ──────────────────────────────────────────────────────────── */
+    .topbar {
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      overflow: hidden;
+    }
+    .topbar::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(4,6,22,0.62);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      z-index: 0;
+    }
+    .topbar > * { position: relative; z-index: 1; }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; }
+    .topbar-logo {
+      width: 34px; height: 34px;
+      flex-shrink: 0;
+      filter: drop-shadow(0 0 6px rgba(34,211,238,0.5));
+    }
+    .topbar h1 { margin: 0; font-size: 0.95rem; font-weight: 700; color: #fff; }
+    .topbar-sub { font-size: 0.68rem; color: rgba(200,220,255,0.7); }
+
+    /* ── Layout ──────────────────────────────────────────────────────────── */
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 20px 20px 48px; }
+
+    /* ── Panels ──────────────────────────────────────────────────────────── */
     .panel {
       border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 16px;
+      border-radius: 14px;
+      padding: 18px;
       background: var(--panel);
-      box-shadow: 0 16px 30px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 16px 40px rgba(0,0,0,0.35);
       margin-bottom: 12px;
     }
-    h1 { margin: 0; font-size: clamp(1.35rem, 2.3vw, 2rem); }
-    .sub { margin: 7px 0 0; color: var(--muted); }
-    .btns {
-      margin-top: 12px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .btn {
-      border: 1px solid rgba(154, 182, 209, 0.38);
-      border-radius: 10px;
-      background: rgba(21, 38, 58, 0.92);
+    .panel-title {
+      margin: 0 0 4px;
+      font-size: 1rem;
+      font-weight: 700;
       color: var(--text);
-      padding: 9px 12px;
-      font-size: 0.9rem;
+    }
+    .sub {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    /* ── Buttons ─────────────────────────────────────────────────────────── */
+    .btns { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      padding: 8px 14px;
+      font-size: 0.82rem;
+      font-weight: 500;
       cursor: pointer;
+      transition: border-color 150ms, background 150ms;
     }
-    .btn:hover { border-color: rgba(96, 234, 255, 0.68); }
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
+    .btn:hover { border-color: rgba(6,182,212,0.5); background: rgba(6,182,212,0.08); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn.accent {
+      border-color: rgba(6,182,212,0.5);
+      background: rgba(6,182,212,0.1);
+      color: #a5f3fc;
     }
+    .btn.accent:hover { background: rgba(6,182,212,0.18); }
+
+    /* ── KPI cards ───────────────────────────────────────────────────────── */
     .kpis {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       gap: 8px;
-      margin-top: 10px;
+      margin-top: 14px;
     }
     .kpi {
       border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 9px;
-      background: rgba(10, 20, 33, 0.78);
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: var(--card);
+      transition: border-color 150ms;
     }
+    .kpi:hover { border-color: rgba(6,182,212,0.25); }
     .kpi b {
       display: block;
-      font-size: 1.05rem;
-      color: #c8f7ff;
-      margin-bottom: 3px;
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--cyan);
+      line-height: 1.1;
+      margin-bottom: 4px;
     }
     .kpi span {
-      font-size: 0.78rem;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
       color: var(--muted);
     }
+
+    /* ── Grid ────────────────────────────────────────────────────────────── */
+    .grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+
+    /* ── OODA flow stages ────────────────────────────────────────────────── */
     .flow {
       display: grid;
-      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
       gap: 8px;
     }
     .stage {
       border: 1px solid var(--line);
-      border-radius: 11px;
-      padding: 9px;
-      background: rgba(11, 22, 36, 0.78);
-      min-height: 88px;
-      transition: transform 120ms ease, border-color 120ms ease;
+      border-radius: 10px;
+      padding: 10px;
+      background: var(--card);
+      min-height: 80px;
+      transition: border-color 150ms, transform 150ms, box-shadow 150ms;
     }
     .stage.active {
-      border-color: rgba(34, 211, 238, 0.7);
-      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+      border-color: rgba(34,211,238,0.6);
+      box-shadow: 0 0 16px rgba(34,211,238,0.12);
       transform: translateY(-2px);
     }
-    .stage.done {
-      border-color: rgba(34, 197, 94, 0.7);
-    }
-    .stage .t { font-weight: 700; font-size: 0.9rem; display: block; margin-bottom: 5px; }
-    .stage .d { color: var(--muted); font-size: 0.8rem; }
+    .stage.done { border-color: rgba(52,211,153,0.5); }
+    .stage.done .t { color: var(--ok); }
+    .stage .t { font-weight: 700; font-size: 0.82rem; display: block; margin-bottom: 4px; color: var(--text); }
+    .stage .d { color: var(--muted); font-size: 0.73rem; }
+
     .arrow {
       text-align: center;
-      color: #7fb4d5;
-      font-size: 0.88rem;
+      color: var(--muted);
+      font-size: 0.78rem;
       margin-top: 8px;
+      letter-spacing: 0.03em;
     }
+
+    /* ── Log buttons / scenario cards ───────────────────────────────────── */
     .logs {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 8px;
       margin-top: 8px;
     }
     .logbtn {
       width: 100%;
-      border: 1px solid rgba(154, 182, 209, 0.38);
+      border: 1px solid rgba(255,255,255,0.08);
       border-radius: 10px;
-      background: rgba(21, 38, 58, 0.92);
+      background: var(--card);
       color: var(--text);
       text-align: left;
-      padding: 9px 10px;
+      padding: 10px 12px;
       cursor: pointer;
+      transition: border-color 150ms, background 150ms;
     }
-    .logbtn b { display: block; font-size: 0.88rem; margin-bottom: 2px; }
-    .logbtn span { color: var(--muted); font-size: 0.77rem; }
+    .logbtn:hover { border-color: rgba(6,182,212,0.35); background: rgba(6,182,212,0.05); }
+    .logbtn b { display: block; font-size: 0.84rem; font-weight: 600; margin-bottom: 3px; }
+    .logbtn span { color: var(--muted); font-size: 0.73rem; }
+    .logbtn.selected {
+      border-color: rgba(34,211,238,0.6);
+      background: rgba(34,211,238,0.06);
+      box-shadow: 0 0 0 1px rgba(34,211,238,0.2) inset;
+    }
+    .logbtn[data-status="running"] b { color: var(--cyan); }
+    .logbtn[data-status="ok"]   span { color: var(--ok); }
+    .logbtn[data-status="failed"] span { color: var(--danger); }
+
+    /* ── Group header ────────────────────────────────────────────────────── */
+    .group-header {
+      grid-column: 1 / -1;
+      font-size: 0.67rem;
+      font-weight: 700;
+      color: var(--cyan);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 8px 4px 4px;
+      border-bottom: 1px solid rgba(34,211,238,0.18);
+      margin-bottom: 2px;
+    }
+
+    /* ── Inline row ──────────────────────────────────────────────────────── */
+    .inline {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 10px;
+    }
+    .mutedSmall { color: var(--muted); font-size: 0.74rem; }
+
+    /* ── Inputs ──────────────────────────────────────────────────────────── */
+    .input {
+      border: 1px solid rgba(6,182,212,0.25);
+      border-radius: 8px;
+      background: rgba(10,14,39,0.8);
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 0.84rem;
+      min-width: 180px;
+      transition: border-color 150ms;
+      outline: none;
+    }
+    .input:focus { border-color: rgba(6,182,212,0.55); box-shadow: 0 0 0 3px rgba(6,182,212,0.1); }
+    .input::placeholder { color: rgba(143,163,192,0.5); }
+
+    /* ── Tiny action buttons (scenario cards) ────────────────────────────── */
+    .tiny {
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      padding: 5px 9px;
+      font-size: 0.72rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: border-color 150ms, background 150ms;
+    }
+    .tiny:hover { border-color: rgba(6,182,212,0.45); background: rgba(6,182,212,0.08); }
+    .scenarioActions { margin-top: 8px; display: flex; gap: 5px; flex-wrap: wrap; }
+
+    /* ── Pre / code ──────────────────────────────────────────────────────── */
     pre {
       margin: 0;
-      padding: 10px;
-      border: 1px solid rgba(166, 189, 212, 0.35);
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
       border-radius: 10px;
-      background: #09111d;
-      color: #c5f6ff;
+      background: rgba(5,8,26,0.9);
+      color: #a5f3fc;
       overflow-x: auto;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
+      font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+      white-space: pre-wrap;
     }
+
+    /* ── Section label ───────────────────────────────────────────────────── */
+    .section-label {
+      font-size: 0.67rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--muted);
+      margin: 0 0 8px;
+    }
+
+    /* ── Intel / graph wrappers ──────────────────────────────────────────── */
     .intel {
       margin-top: 12px;
-      border: 1px solid rgba(166, 189, 212, 0.35);
+      border: 1px solid rgba(255,255,255,0.08);
       border-radius: 10px;
-      background: #0a1524;
-      padding: 10px;
+      background: rgba(5,8,26,0.7);
+      padding: 12px;
     }
-    .gtitle { margin: 0 0 8px; font-size: 0.9rem; color: #9dc0de; }
+    .gtitle { margin: 0 0 8px; font-size: 0.82rem; color: #93c5fd; font-weight: 600; }
     .graph {
       width: 100%;
       height: 330px;
-      border: 1px solid rgba(120,165,202,.35);
+      border: 1px solid rgba(255,255,255,0.08);
       border-radius: 10px;
-      background: radial-gradient(circle at 20% 20%, #11243a, #09111d 70%);
+      background: radial-gradient(circle at 20% 20%, #111b35, #06090f 70%);
       overflow: hidden;
     }
-    .edges { color:#8db0ce; font-size:.75rem; white-space:pre-wrap; margin-top: 8px; }
+    .edges { color: var(--muted); font-size: 0.73rem; white-space: pre-wrap; margin-top: 8px; }
   </style>
+  <script>
+    (function(){
+      var tok = localStorage.getItem('novadef_token');
+      if (!tok) { window.location.replace('login.html'); }
+    })();
+  </script>
 </head>
 <body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img class="topbar-logo" src="novadef-logo.png" alt="NOVADEF">
+      <div>
+        <h1>NOVADEF Experiments Console</h1>
+        <div class="topbar-sub">Run exp1 / exp2 / exp3 and follow the OODA incident path</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-shrink:0;">
+      <button class="btn accent" id="exp1Btn">Run Exp1</button>
+      <button class="btn accent" id="exp2Btn">Run Exp2</button>
+      <button class="btn accent" id="exp3Btn">Run Exp3</button>
+    </div>
+  </header>
+
   <main class="wrap">
     <section class="panel">
-      <h1>NOVADEF Experiments Console</h1>
-      <p class="sub">Run `exp1`/`exp2` and follow the incident path across NOVADEF until SOARCA applies the response.</p>
-      <div class="btns">
-        <button class="btn" id="homeBtn">Open Architecture Hub</button>
-        <button class="btn" id="exp1Btn">Run Exp1 from Web</button>
-        <button class="btn" id="exp2Btn">Run Exp2 from Web</button>
-        <button class="btn" id="downloadBtn">Download Latest Report</button>
-        <button class="btn" id="resetBtn">Reset Visual Flow</button>
-        <button class="btn" id="promBtn">Open Prometheus</button>
-        <button class="btn" id="grafBtn">Open Grafana</button>
+      <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;margin-bottom:12px;">
+        <div class="kpis" style="margin:0;flex:1;min-width:360px;">
+          <div class="kpi"><b id="kpiAlerts">0</b><span>Alert signals</span></div>
+          <div class="kpi"><b id="kpiProfile">0</b><span>Profile signals</span></div>
+          <div class="kpi"><b id="kpiMisp">0</b><span>MISP signals</span></div>
+          <div class="kpi"><b id="kpiSoarca">0</b><span>SOARCA signals</span></div>
+        </div>
       </div>
-      <div class="kpis">
-        <div class="kpi"><b id="kpiAlerts">0</b><span>alert signals</span></div>
-        <div class="kpi"><b id="kpiProfile">0</b><span>profiling signals</span></div>
-        <div class="kpi"><b id="kpiMisp">0</b><span>MISP signals</span></div>
-        <div class="kpi"><b id="kpiSoarca">0</b><span>SOARCA signals</span></div>
+      <div>
+        <p class="section-label">Platform Controls</p>
+        <div class="btns" style="margin-top:0;">
+          <button class="btn" id="homeBtn">Architecture Hub</button>
+          <button class="btn" id="downloadBtn">Download Report</button>
+          <button class="btn" id="resetBtn">Reset Flow</button>
+          <button class="btn" id="promBtn">Prometheus</button>
+          <button class="btn" id="grafBtn">Grafana</button>
+        </div>
+        <div class="inline">
+          <label class="mutedSmall" for="selectedScenario">Active scenario:</label>
+          <select id="selectedScenario" class="input" title="Default scenario for run buttons"></select>
+          <span id="selectedScenarioNote" class="mutedSmall">No scenario selected.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel grid">
+      <div>
+        <p class="sub">Create scenario (without launching experiments)</p>
+        <div class="inline">
+          <input id="scenarioNameInput" class="input" placeholder="Display name (e.g., Lab A)" />
+          <input id="scenarioIdInput" class="input" placeholder="Optional ID (e.g., lab-a)" />
+          <button class="btn" id="createScenarioBtn">Create Scenario</button>
+          <button class="btn" id="refreshScenariosBtn">Refresh Scenarios</button>
+        </div>
+        <p id="scenarioMsg" class="sub">You can create scenarios now and launch experiments later on any of them.</p>
+      </div>
+      <div>
+        <p class="sub">Available scenarios</p>
+        <div id="scenariosList" class="logs"></div>
       </div>
     </section>
 
@@ -209,7 +422,7 @@
     </section>
 
     <section class="panel">
-      <p class="sub">Use <b>Run Exp1 from Web</b> or <b>Run Exp2 from Web</b> to open the live experiment view with full runtime details.</p>
+      <p class="sub">Use <b>Run Exp1</b>, <b>Run Exp2</b> or <b>Run Exp3</b> to open the live experiment view with full runtime details.</p>
       <pre id="cmdBox">General view active. Runtime experiment details are shown only in the live experiment window.</pre>
     </section>
     <section class="panel grid">
@@ -229,8 +442,42 @@
     const cmdBox = document.getElementById("cmdBox");
     const runsList = document.getElementById("runsList");
     const runDetail = document.getElementById("runDetail");
+    const scenariosList = document.getElementById("scenariosList");
+    const selectedScenario = document.getElementById("selectedScenario");
+    const selectedScenarioNote = document.getElementById("selectedScenarioNote");
+    const scenarioMsg = document.getElementById("scenarioMsg");
+    const scenarioNameInput = document.getElementById("scenarioNameInput");
+    const scenarioIdInput = document.getElementById("scenarioIdInput");
+    const createScenarioBtn = document.getElementById("createScenarioBtn");
+    const refreshScenariosBtn = document.getElementById("refreshScenariosBtn");
+    const expButtons = ["exp1Btn", "exp2Btn", "exp3Btn"].map(id => document.getElementById(id));
+    const API = "http://localhost:18082";
     let current = -1;
     let runsCache = [];
+    let scenariosCache = [];
+    let selectedScenarioId = "";
+    let launchInProgress = false;
+
+    function persistSelectedScenario(id) {
+      selectedScenarioId = id || "";
+      if (selectedScenario) selectedScenario.value = selectedScenarioId;
+      selectedScenarioNote.textContent = selectedScenarioId
+        ? `Selected scenario: ${selectedScenarioId}`
+        : "No scenario selected: API creates one on demand.";
+    }
+
+    async function stopActiveRunIfAny() {
+      try {
+        const res = await fetch(API + "/api/state", { cache: "no-store" });
+        if (!res.ok) return;
+        const state = await res.json();
+        const runId = String(state.current_run_id || "");
+        if (!runId || !state.running) return;
+        cmdBox.textContent = "Stopping active run before starting a new one...";
+        await fetch(`${API}/api/run/${encodeURIComponent(runId)}/stop`, { method: "POST" });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } catch (err) {}
+    }
 
     function paintFlow() {
       steps.forEach((el, i) => {
@@ -241,8 +488,95 @@
     }
     function resetFlow() { current = -1; paintFlow(); }
 
+    async function launchExperiment(experiment, scenarioOverride = "") {
+      if (launchInProgress) {
+        cmdBox.textContent = "Another experiment launch is already in progress.";
+        return;
+      }
+      const scenarioId = String(scenarioOverride || selectedScenarioId || "").trim();
+      cmdBox.textContent = scenarioId
+        ? `Creating ${experiment.toUpperCase()} run on scenario ${scenarioId}...`
+        : `Creating ${experiment.toUpperCase()} run...`;
+      launchInProgress = true;
+      expButtons.forEach(btn => { if (btn) btn.disabled = true; });
+      const sessionKey = "novadef_live_run_" + experiment;
+      try { sessionStorage.removeItem(sessionKey); } catch (e) {}
+      const popupName = "novadef-live-" + experiment + "-" + Date.now();
+      const popup = window.open("about:blank", popupName);
+      const popupBlocked = !popup;
+      if (popup) {
+        try {
+          const launchingHtml = "<!doctype html><html><head><title>NOVADEF</title><meta charset=\"utf-8\">" +
+            "<style>" +
+            "*{box-sizing:border-box;margin:0;padding:0;}" +
+            "html,body{height:100%;}" +
+            "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#f0f4ff;position:relative;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden;}" +
+            "body::before{content:'';position:fixed;inset:0;background-image:url('header-bg.jpg');background-size:cover;background-position:center;background-repeat:no-repeat;background-attachment:fixed;z-index:-2;}" +
+            "body::after{content:'';position:fixed;inset:0;background:rgba(4,6,20,0.82);z-index:-1;}" +
+            ".wrap{display:flex;flex-direction:column;align-items:center;gap:1.75rem;}" +
+            ".spinner{position:relative;width:132px;height:132px;display:flex;align-items:center;justify-content:center;}" +
+            ".spinner svg{position:absolute;inset:0;width:100%;height:100%;animation:spin 1.6s linear infinite;}" +
+            ".spinner .track{opacity:0.15;}" +
+            ".spinner .arc{stroke-linecap:round;}" +
+            ".spinner .label{position:relative;font-size:0.68rem;font-weight:700;letter-spacing:0.08em;text-align:center;line-height:1.3;padding:0 8px;}" +
+            "@keyframes spin{to{transform:rotate(360deg);}}" +
+            ".sub{color:#8fa3c0;font-size:0.85rem;letter-spacing:0.02em;}" +
+            "</style></head><body>" +
+            "<div class=\"wrap\">" +
+            "<div class=\"spinner\">" +
+            "<svg viewBox=\"0 0 100 100\"><circle class=\"track\" cx=\"50\" cy=\"50\" r=\"44\" fill=\"none\" stroke=\"#22d3ee\" stroke-width=\"5\"/>" +
+            "<circle class=\"arc\" cx=\"50\" cy=\"50\" r=\"44\" fill=\"none\" stroke=\"#22d3ee\" stroke-width=\"5\" stroke-dasharray=\"70 207\"/></svg>" +
+            "<div class=\"label\">Launching<br>" + experiment.toUpperCase() + "</div>" +
+            "</div>" +
+            "<div class=\"sub\">Provisioning scenario and containers…</div>" +
+            "</div>" +
+            "</body></html>";
+          popup.document.write(launchingHtml);
+          popup.document.close();
+        } catch (e) {}
+      }
+      try {
+        const body = { experiment };
+        if (scenarioId) body.scenario_id = scenarioId;
+        const res = await fetch(API + "/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok || !data.run_id) {
+          cmdBox.textContent = data.error || `Failed to start ${experiment.toUpperCase()}.`;
+          return;
+        }
+        sessionStorage.setItem(sessionKey, data.run_id);
+        const runScenarioId = String(data.scenario_id || scenarioId || "").trim();
+        const liveUrl = `http://localhost:18082/experiment_live.html?experiment=${encodeURIComponent(experiment)}&start=0&run_id=${encodeURIComponent(data.run_id)}${runScenarioId ? `&scenario_id=${encodeURIComponent(runScenarioId)}` : ""}`;
+        let popupFallbackMessage = "";
+        if (popup && !popup.closed) {
+          popup.location.replace(liveUrl);
+        } else {
+          // Async window.open can still be blocked by browsers; fallback to same-tab navigation.
+          window.location.href = liveUrl;
+          popupFallbackMessage = popupBlocked
+            ? " Popup was blocked by the browser, opening live view in this tab."
+            : " Opening live view in this tab.";
+        }
+        cmdBox.textContent = `Launching ${experiment.toUpperCase()} with run ${data.run_id}${scenarioId ? ` on ${scenarioId}` : ""}...`;
+        cmdBox.textContent += " Scenario and containers are being provisioned now.";
+        if (popupFallbackMessage) {
+          cmdBox.textContent += popupFallbackMessage;
+        }
+      } catch (err) {
+        try { if (popup && !popup.closed) popup.close(); } catch (e) {}
+        cmdBox.textContent = `Cannot reach the experiments API to start ${experiment.toUpperCase()}. ${err && err.message ? err.message : ""}`.trim();
+      } finally {
+        launchInProgress = false;
+        expButtons.forEach(btn => { if (btn) btn.disabled = false; });
+      }
+    }
+
     document.getElementById("homeBtn").addEventListener("click", () => {
-      window.open("http://localhost:18080/index.html", "_blank", "noopener,noreferrer");
+      window.open("http://localhost:18082/index.html", "_blank", "noopener,noreferrer");
     });
     document.getElementById("resetBtn").addEventListener("click", resetFlow);
     document.getElementById("promBtn").addEventListener("click", () => {
@@ -253,34 +587,38 @@
     });
     document.getElementById("downloadBtn").addEventListener("click", async () => {
       try {
-        const res = await fetch("http://localhost:18082/api/report/latest");
+        const res = await fetch(API + "/api/report/latest");
         const data = await res.json();
         if (!res.ok) {
-          cmdBox.textContent = "No report available yet. Run exp1/exp2 first (report is automatic).";
+          cmdBox.textContent = "No report available yet. Run exp1/exp2/exp3 first (report is automatic).";
           return;
         }
-        window.open("http://localhost:18082" + data.download_url, "_blank", "noopener,noreferrer");
+        window.open(API + data.download_url, "_blank", "noopener,noreferrer");
       } catch (err) {
         cmdBox.textContent = "Cannot reach report API.";
       }
     });
     async function pollMetrics() {
       try {
-        const res = await fetch("http://localhost:18082/api/metrics", { cache: "no-store" });
+        const res = await fetch(API + "/api/metrics", { cache: "no-store" });
         if (!res.ok) return;
         const m = await res.json();
-        document.getElementById("kpiAlerts").textContent = m.alert_signals ?? 0;
-        document.getElementById("kpiProfile").textContent = m.profile_signals ?? 0;
-        document.getElementById("kpiMisp").textContent = m.misp_signals ?? 0;
-        document.getElementById("kpiSoarca").textContent = m.soarca_signals ?? 0;
+        const s = m.legacy_signals || m;
+        document.getElementById("kpiAlerts").textContent = s.alert_signals ?? 0;
+        document.getElementById("kpiProfile").textContent = s.profile_signals ?? 0;
+        document.getElementById("kpiMisp").textContent = s.misp_signals ?? 0;
+        document.getElementById("kpiSoarca").textContent = s.soarca_signals ?? 0;
       } catch (err) {}
     }
 
     document.getElementById("exp1Btn").addEventListener("click", () => {
-      window.open("http://localhost:18080/experiment_live.html?experiment=exp1&start=1", "_blank", "noopener,noreferrer");
+      launchExperiment("exp1");
     });
     document.getElementById("exp2Btn").addEventListener("click", () => {
-      window.open("http://localhost:18080/experiment_live.html?experiment=exp2&start=1", "_blank", "noopener,noreferrer");
+      launchExperiment("exp2");
+    });
+    document.getElementById("exp3Btn").addEventListener("click", () => {
+      launchExperiment("exp3");
     });
 
     document.querySelectorAll(".logbtn").forEach((btn) => {
@@ -308,17 +646,6 @@
         txt += "Generated profile: " + (run.summary.tapcd_profile || "-") + "\n";
         txt += "Applied countermeasure: " + (run.summary.countermeasure || "-") + "\n";
       }
-      if (run.report_panel) {
-        const m = run.report_panel.misp || {};
-        const t = run.report_panel.tapcd || {};
-        txt += "\n## MISP\n";
-        txt += "- Event IDs: " + ((m.event_ids_detected_in_logs || []).join(", ") || "none") + "\n";
-        txt += "- Event signals: " + (m.event_signal_count ?? 0) + "\n";
-        txt += "- Event details extracted: " + (m.event_details_extracted ?? 0) + "\n";
-        txt += "\n## TAPCD\n";
-        txt += "- Profile mentions: " + (t.profile_mentions ?? 0) + "\n";
-        txt += "- Actor profiles from Neo4j: " + (t.actor_profile_count ?? 0) + "\n";
-      }
       if (run.output_tail) {
         txt += "\nOutput tail:\n" + run.output_tail;
       }
@@ -327,28 +654,61 @@
 
     function renderRunsList() {
       if (!runsCache.length) {
-        runsList.innerHTML = '<div class="logbtn"><b>No executions yet</b><span>Run exp1/exp2 to create history</span></div>';
+        runsList.innerHTML = '<div class="logbtn"><b>No executions yet</b><span>Run exp1/exp2/exp3 to create history</span></div>';
         return;
       }
       runsList.innerHTML = "";
+
+      // Group runs by scenario_id, preserving insertion order.
+      const groups = new Map();
       runsCache.forEach((run) => {
-        const btn = document.createElement("button");
-        btn.className = "logbtn";
-        const status = run.running ? "running" : (run.return_code === 0 ? "ok" : "failed");
-        btn.innerHTML = `<b>${run.experiment} · ${run.run_id}</b><span>${status}</span>`;
-        btn.addEventListener("click", () => {
-          renderRunDetail(run);
-          const exp = encodeURIComponent(run.experiment || "exp1");
-          const rid = encodeURIComponent(run.run_id || "");
-          window.open(`http://localhost:18080/experiment_live.html?experiment=${exp}&start=0&run_id=${rid}`, "_blank", "noopener,noreferrer");
+        const sid = String(run.scenario_id || "").trim() || "(no scenario)";
+        if (!groups.has(sid)) groups.set(sid, []);
+        groups.get(sid).push(run);
+      });
+
+      groups.forEach((runs, sid) => {
+        // Section header — only shown when there is more than one group.
+        if (groups.size > 1) {
+          const header = document.createElement("div");
+          header.className = "group-header";
+          // Show the human-readable scenario name if available in scenariosCache.
+          const meta = scenariosCache.find(s => String(s.scenario_id || "") === sid);
+          const label = (meta && meta.display_name && meta.display_name !== sid)
+            ? `${meta.display_name} (${sid})`
+            : sid;
+          header.textContent = label;
+          runsList.appendChild(header);
+        }
+
+        runs.forEach((run) => {
+          const btn = document.createElement("button");
+          const status = run.running ? "running" : (run.return_code === 0 ? "ok" : "failed");
+          btn.className = "logbtn";
+          btn.dataset.status = status;
+          // Show experiment type + short run id + timestamp if available.
+          const ts = run.started_at
+            ? new Date(run.started_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "";
+          btn.innerHTML = `<b>${run.experiment} · ${run.run_id}</b><span>${status}${ts ? " · " + ts : ""}</span>`;
+          btn.addEventListener("click", () => {
+            renderRunDetail(run);
+            // Highlight selected.
+            runsList.querySelectorAll(".logbtn").forEach(b => b.classList.remove("selected"));
+            btn.classList.add("selected");
+            const exp = encodeURIComponent(run.experiment || "exp1");
+            const rid = encodeURIComponent(run.run_id || "");
+            const sid2 = encodeURIComponent(String(run.scenario_id || "").trim());
+            window.open(`http://localhost:18082/experiment_live.html?experiment=${exp}&start=0&run_id=${rid}${sid2 ? `&scenario_id=${sid2}` : ""}`, "_blank", "noopener,noreferrer");
+          });
+          runsList.appendChild(btn);
         });
-        runsList.appendChild(btn);
       });
     }
 
     async function pollHistory() {
       try {
-        const res = await fetch("http://localhost:18082/api/history", { cache: "no-store" });
+        const res = await fetch(API + "/api/history", { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
         runsCache = data.runs || [];
@@ -356,11 +716,161 @@
       } catch (err) {}
     }
 
+    function scenarioStatusText(s) {
+      const v = s.victim_status || "missing";
+      const a = s.attacker_status || "missing";
+      return `victim=${v} · attacker=${a}`;
+    }
+
+    function refreshScenarioSelect() {
+      if (!selectedScenario) return;
+      const opts = [`<option value="">(on-demand per run)</option>`];
+      scenariosCache.forEach((s) => {
+        const sid = String(s.scenario_id || "");
+        const name = String(s.display_name || sid);
+        const status = s.running ? "running" : "stopped";
+        opts.push(`<option value="${sid}">${sid} · ${name} · ${status}</option>`);
+      });
+      selectedScenario.innerHTML = opts.join("");
+      if (selectedScenarioId && !scenariosCache.some(s => String(s.scenario_id || "") === selectedScenarioId)) {
+        selectedScenarioId = "";
+      }
+      persistSelectedScenario(selectedScenarioId);
+    }
+
+    async function apiScenarioAction(method, path, body = null) {
+      const res = await fetch(API + path, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      let data = {};
+      try { data = await res.json(); } catch (e) {}
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    async function renderScenarios() {
+      if (!scenariosCache.length) {
+        scenariosList.innerHTML = '<div class="logbtn"><b>No scenarios yet</b><span>Create one to reuse across multiple experiments.</span></div>';
+        return;
+      }
+      scenariosList.innerHTML = "";
+      scenariosCache.forEach((s) => {
+        const sid = String(s.scenario_id || "");
+        const btn = document.createElement("div");
+        btn.className = "logbtn" + (sid === selectedScenarioId ? " selected" : "");
+        btn.innerHTML = `
+          <b>${sid} · ${s.display_name || sid}</b>
+          <span>${scenarioStatusText(s)} · network=${s.network || "-"}</span>
+        `;
+
+        const actions = document.createElement("div");
+        actions.className = "scenarioActions";
+
+        const mk = (label, fn) => {
+          const b = document.createElement("button");
+          b.className = "tiny";
+          b.textContent = label;
+          b.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            try {
+              await fn();
+            } catch (err) {
+              scenarioMsg.textContent = String(err.message || err);
+            }
+          });
+          return b;
+        };
+
+        actions.appendChild(mk("Select", async () => {
+          persistSelectedScenario(sid);
+          await pollScenarios();
+        }));
+        actions.appendChild(mk("Start", async () => {
+          scenarioMsg.textContent = `Starting scenario ${sid}...`;
+          await apiScenarioAction("POST", `/api/scenarios/${encodeURIComponent(sid)}/start`);
+          await pollScenarios();
+        }));
+        actions.appendChild(mk("Stop", async () => {
+          scenarioMsg.textContent = `Stopping scenario ${sid}...`;
+          await apiScenarioAction("POST", `/api/scenarios/${encodeURIComponent(sid)}/stop`);
+          await pollScenarios();
+        }));
+        actions.appendChild(mk("Delete", async () => {
+          if (!confirm(`Delete scenario ${sid}?`)) return;
+          scenarioMsg.textContent = `Deleting scenario ${sid}...`;
+          await apiScenarioAction("DELETE", `/api/scenarios/${encodeURIComponent(sid)}`);
+          if (selectedScenarioId === sid) persistSelectedScenario("");
+          await pollScenarios();
+        }));
+        actions.appendChild(mk("Run Exp1", async () => launchExperiment("exp1", sid)));
+        actions.appendChild(mk("Run Exp2", async () => launchExperiment("exp2", sid)));
+        actions.appendChild(mk("Run Exp3", async () => launchExperiment("exp3", sid)));
+
+        btn.appendChild(actions);
+        scenariosList.appendChild(btn);
+      });
+    }
+
+    async function pollScenarios() {
+      try {
+        const res = await fetch(API + "/api/scenarios", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        scenariosCache = data.scenarios || [];
+        refreshScenarioSelect();
+        await renderScenarios();
+      } catch (err) {}
+    }
+
+    if (selectedScenario) {
+      selectedScenario.addEventListener("change", () => {
+        persistSelectedScenario(selectedScenario.value || "");
+      });
+    }
+
+    if (createScenarioBtn) {
+      createScenarioBtn.addEventListener("click", async () => {
+        const displayName = String((scenarioNameInput && scenarioNameInput.value) || "").trim();
+        const sid = String((scenarioIdInput && scenarioIdInput.value) || "").trim();
+        if (!displayName && !sid) {
+          scenarioMsg.textContent = "Please provide at least display name or scenario ID.";
+          return;
+        }
+        try {
+          scenarioMsg.textContent = "Creating scenario...";
+          const payload = {};
+          if (displayName) payload.display_name = displayName;
+          if (sid) payload.scenario_id = sid;
+          const data = await apiScenarioAction("POST", "/api/scenarios", payload);
+          const createdId = String((data.scenario || {}).scenario_id || "");
+          if (createdId) persistSelectedScenario(createdId);
+          if (scenarioNameInput) scenarioNameInput.value = "";
+          if (scenarioIdInput) scenarioIdInput.value = "";
+          scenarioMsg.textContent = createdId
+            ? `Scenario ${createdId} created and selected.`
+            : "Scenario created.";
+          await pollScenarios();
+        } catch (err) {
+          scenarioMsg.textContent = String(err.message || err);
+        }
+      });
+    }
+
+    if (refreshScenariosBtn) {
+      refreshScenariosBtn.addEventListener("click", () => {
+        pollScenarios();
+      });
+    }
+
     resetFlow();
     pollMetrics();
     pollHistory();
+    pollScenarios();
     setInterval(pollMetrics, 3000);
     setInterval(pollHistory, 5000);
+    setInterval(pollScenarios, 5000);
   </script>
 </body>
 </html>

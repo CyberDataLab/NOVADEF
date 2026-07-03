@@ -47,7 +47,17 @@ services:
       - MISP_URL=https://misp-server
       - MISP_KEY=NOVADEFMISPINTEGRATIONKEYpmp1234567890ab
       - SOARCA_API=http://soarca-core:8080
-      - PLAYBOOK_PATH=/app/playbooks/block_ip.json
+      - KAFKA_BOOTSTRAP=kafka_novadef:29092
+      - SOARCA_TAPCD_PROFILE_TOPIC=profiles_out
+      - SOARCA_USE_TAPCD_STREAM=1
+      - SOARCA_ENABLE_MISP_POLLING=0
+      - PLAYBOOK_PATH=/app/playbooks/block_ip_range.json
+      # Block ONLY the spraying source range (attacker spoofed IPs 172.18.0.160-175).
+      # Must NOT cover the benign-noise sources (172.18.0.150-153) so the victim
+      # traffic graph drops back to the benign baseline after the countermeasure
+      # instead of going to 0 (exp1 is a selective filter, not full isolation).
+      - SOARCA_ATTACKER_IP_RANGE_START=172.18.0.160
+      - SOARCA_ATTACKER_IP_RANGE_END=172.18.0.175
       - MISP_DB_HOST=misp-db
       - MISP_DB_PORT=3306
       - MISP_DB_USER=misp

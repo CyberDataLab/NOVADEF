@@ -15,29 +15,21 @@ services:
       - SUDO_ACCESS=true
     cap_add:
       - NET_ADMIN  # Fundamental para que SOARCA pueda ejecutar iptables dentro
-    ports:
-      - "2222:2222" # SSH externo (si quisieras conectarte a mano)
     volumes:
       - ./victim-init:/custom-cont-init.d:ro  # instala iptables al arrancar
       - ./victim-tools:/opt/novadef:ro
-      - ./shared-logs:/var/novadef/logs
-    networks:
-      - kafka_net
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - ${SCENARIO_SHARED_LOGS_DIR:-./artifacts/logs}:/var/novadef/logs
 
   atacante:
-    image: kalilinux/kali-rolling
+    build:
+      context: ./attacker-image
+    image: novadef-scenario-attacker:latest
     container_name: scenario_attacker
     restart: unless-stopped
-    command: /bin/sh -c "apt-get update && apt-get install -y nmap hping3 curl iputils-ping iproute2 openssh-client sshpass && tail -f /dev/null"
+    command: /bin/sh -c "tail -f /dev/null"
     cap_add:
       - NET_ADMIN
     volumes:
       - ./attacker-tools:/opt/novadef:ro
-      - ./shared-logs:/var/novadef/logs
-    networks:
-      - kafka_net
-
-networks:
-  kafka_net:
-    external: true
-    name: launcher_default
+      - ${SCENARIO_SHARED_LOGS_DIR:-./artifacts/logs}:/var/novadef/logs

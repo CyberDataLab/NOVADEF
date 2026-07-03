@@ -5,27 +5,292 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>NOVADEF Live Experiment</title>
   <style>
-    body { margin: 0; font-family: "Avenir Next", "Segoe UI", sans-serif; background:#0b1624; color:#e8f0f7; padding:18px; }
-    .box { max-width: 980px; margin: 0 auto; border:1px solid #2a3a4e; border-radius:12px; padding:14px; background:#101f31; }
-    h1 { margin:0 0 8px; font-size:1.3rem; }
-    .muted { color:#9eb3c8; font-size:.9rem; }
-    .flow { margin-top:12px; display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); gap:8px; }
-    .st { border:1px solid #34465c; border-radius:10px; padding:8px; background:#0d1a2a; font-size:.84rem; }
-    .st.done { border-color:#22c55e; }
-    .st.active { border-color:#22d3ee; }
-    pre { margin-top:12px; background:#09111d; border:1px solid #34465c; border-radius:10px; padding:10px; white-space:pre-wrap; max-height:260px; overflow:auto; }
-    .row { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
-    .btn { border:1px solid #3c526b; border-radius:9px; background:#16283d; color:#e8f0f7; padding:8px 10px; cursor:pointer; text-decoration:none; }
-    .intel { margin-top: 12px; border:1px solid #34465c; border-radius:10px; padding:10px; background:#0b1828; }
-    .intel h3 { margin:0 0 8px; font-size:.9rem; color:#9dc0de; }
-    .graph { width:100%; height:320px; border:1px solid rgba(120,165,202,.35); border-radius:10px; background: radial-gradient(circle at 20% 20%, #11243a, #09111d 70%); }
-    .edges { margin-top:8px; color:#8db0ce; font-size:.75rem; white-space:pre-wrap; }
+    :root {
+      --bg:     #0a0e27;
+      --panel:  rgba(15,19,48,0.88);
+      --card:   rgba(10,14,39,0.80);
+      --line:   rgba(255,255,255,0.08);
+      --text:   #f0f4ff;
+      --muted:  #8fa3c0;
+      --cyan:   #22d3ee;
+      --ok:     #34d399;
+      --warn:   #fbbf24;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--text);
+      min-height: 100vh;
+      padding: 0;
+      position: relative;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      z-index: -2;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 6, 20, 0.82);
+      z-index: -1;
+    }
+
+    /* ── Topbar ──────────────────────────────────────────────────────────── */
+    .topbar {
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      overflow: hidden;
+    }
+    .topbar::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(4,6,22,0.62);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      z-index: 0;
+    }
+    .topbar > * { position: relative; z-index: 1; }
+    .topbar-logo {
+      width: 30px; height: 30px;
+      flex-shrink: 0;
+      filter: drop-shadow(0 0 5px rgba(34,211,238,0.5));
+    }
+    #title { margin: 0; font-size: 0.95rem; font-weight: 700; flex: 1; color: #fff; }
+    .muted { color: rgba(200,220,255,0.7); font-size: 0.78rem; }
+
+    /* ── Main container ──────────────────────────────────────────────────── */
+    .box { max-width: 1000px; margin: 0 auto; padding: 20px 20px 48px; }
+
+    /* ── OODA stage chips ────────────────────────────────────────────────── */
+    .flow {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(6, minmax(110px, 1fr));
+      gap: 8px;
+    }
+    .st {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: var(--card);
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      transition: border-color 150ms, box-shadow 150ms, color 150ms;
+    }
+    .st.done {
+      border-color: rgba(52,211,153,0.45);
+      background: rgba(52,211,153,0.06);
+      color: var(--ok);
+    }
+    .st.active {
+      border-color: rgba(34,211,238,0.55);
+      background: rgba(34,211,238,0.06);
+      color: var(--cyan);
+      box-shadow: 0 0 14px rgba(34,211,238,0.1);
+    }
+    .st.done.active { border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.06); color: var(--ok); }
+
+    /* ── Action row ──────────────────────────────────────────────────────── */
+    .row { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      padding: 7px 12px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      cursor: pointer;
+      text-decoration: none;
+      transition: border-color 150ms, background 150ms;
+    }
+    .btn:hover { border-color: rgba(6,182,212,0.45); background: rgba(6,182,212,0.08); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* ── Log output ──────────────────────────────────────────────────────── */
+    pre {
+      margin-top: 12px;
+      background: rgba(5,8,26,0.9);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      white-space: pre-wrap;
+      max-height: 240px;
+      overflow: auto;
+      font-size: 0.75rem;
+      font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+      color: #a5f3fc;
+    }
+
+    /* ── Intel grid (TAPCD / MISP / SOARCA) ─────────────────────────────── */
+    .intelGrid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0,1fr));
+      gap: 10px;
+    }
+    .intelCard {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: var(--card);
+      min-height: 110px;
+      transition: border-color 150ms;
+    }
+    .intelCard:hover { border-color: rgba(6,182,212,0.25); }
+    .intelCard h4 {
+      margin: 0 0 6px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }
+    .intelMeta { color: var(--muted); font-size: 0.72rem; margin-bottom: 6px; }
+    .intelList { color: #c8dff8; font-size: 0.76rem; line-height: 1.5; white-space: pre-wrap; }
+
+    /* ── Intel section wrapper ───────────────────────────────────────────── */
+    .intel {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: var(--card);
+    }
+    .intel h3 {
+      margin: 0 0 10px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }
+
+    /* ── Charts ──────────────────────────────────────────────────────────── */
+    .chart {
+      width: 100%;
+      height: 220px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: linear-gradient(180deg, rgba(17,27,53,0.8), rgba(5,8,26,0.9));
+      margin-bottom: 10px;
+      display: block;
+    }
+    .graph {
+      width: 100%;
+      height: 300px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: radial-gradient(circle at 20% 20%, #111b35, #06090f 70%);
+    }
+    .edges { margin-top: 8px; color: var(--muted); font-size: 0.72rem; white-space: pre-wrap; }
+    .lineLegend {
+      margin-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.7rem;
+    }
+    .lineLegend .item { display: inline-flex; align-items: center; gap: 5px; }
+    .lineLegend .sw { width: 14px; height: 3px; border-radius: 999px; display: inline-block; }
+    .lineLegend .sw-dash { border-top: 2px dashed rgba(148,163,184,0.5); width: 14px; height: 0; display: inline-block; }
+
+    /* ── Falco widgets ───────────────────────────────────────────────────── */
+    .falcoSummary {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 8px;
+    }
+    .falcoMetric {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: rgba(5,8,26,0.7);
+    }
+    .falcoMetric b {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 0.67rem;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+    .falcoMetric span { font-size: 1.2rem; font-weight: 700; color: var(--cyan); }
+    .falcoTypes { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .falcoType {
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(6,182,212,0.07);
+      color: #a5f3fc;
+      font-size: 0.74rem;
+    }
+    .falcoRules { margin-top: 8px; color: var(--muted); font-size: 0.73rem; white-space: pre-wrap; }
+
+    /* ── Grafana embed ───────────────────────────────────────────────────── */
+    .grafanaWrap {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: rgba(5,8,26,0.8);
+    }
+    .grafanaHeader {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10,14,39,0.9);
+    }
+    .grafanaHeader h3 { margin: 0; font-size: 0.78rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
+    .grafanaFrame { width: 100%; height: 500px; border: 0; display: block; }
+    .grafanaNote { color: var(--muted); font-size: 0.72rem; }
   </style>
+  <script>
+    (function(){
+      var tok = localStorage.getItem('novadef_token');
+      if (!tok) { window.location.replace('login.html'); }
+    })();
+  </script>
 </head>
 <body>
-  <div class="box">
+  <header class="topbar">
+    <img class="topbar-logo" src="novadef-logo.png" alt="NOVADEF">
     <h1 id="title">Live Experiment</h1>
-    <div class="muted" id="sub">Starting...</div>
+    <div class="muted" id="sub" style="margin-left:auto;flex-shrink:0;">Starting...</div>
+  </header>
+
+  <div class="box">
     <div class="flow" id="flow">
       <div class="st" data-i="0">Observe</div>
       <div class="st" data-i="1">Detect</div>
@@ -35,164 +300,1890 @@
       <div class="st" data-i="5">Act (SOARCA)</div>
     </div>
     <div class="row">
-      <a class="btn" target="_blank" href="http://localhost:18081">Open Logs Hub</a>
-      <a class="btn" target="_blank" href="http://localhost:18080/experiments.html">Back To Console</a>
+      <a class="btn" target="_blank" href="http://localhost:18081">Logs Hub</a>
+      <a class="btn" target="_blank" href="http://localhost:18082/experiments.html">← Console</a>
+      <button class="btn" id="stopBtn" type="button">Stop Run</button>
+      <button class="btn" id="deleteBtn" type="button">Delete Run</button>
+      <button class="btn" id="removeScenarioBtn" type="button">Remove Scenario</button>
+      <button class="btn" id="runExp1Btn" type="button">Run Exp1</button>
+      <button class="btn" id="runExp2Btn" type="button">Run Exp2</button>
+      <button class="btn" id="runExp3Btn" type="button">Run Exp3</button>
       <button class="btn" id="reportBtn" type="button">Download Report</button>
-      <button class="btn" id="mispLogBtn" type="button">Download MISP Log</button>
-      <button class="btn" id="tapcdLogBtn" type="button">Download TAPCD Log</button>
     </div>
     <pre id="out">Waiting...</pre>
-    <div class="intel">
-      <h3>Incident Intelligence Graph (Live)</h3>
-      <svg id="graphSvg" class="graph" viewBox="0 0 980 320" preserveAspectRatio="none"></svg>
-      <div id="graphEdges" class="edges">No graph data yet.</div>
+    <div class="intelGrid">
+      <div class="intelCard">
+        <h4>TAPCD</h4>
+        <div class="intelMeta" id="tapcdMeta">Waiting for profile evidence.</div>
+        <div class="intelList" id="tapcdInfo">No TAPCD profile data yet.</div>
+      </div>
+      <div class="intelCard">
+        <h4>MISP</h4>
+        <div class="intelMeta" id="mispMeta">Waiting for enrichment.</div>
+        <div class="intelList" id="mispInfo">No MISP event yet.</div>
+      </div>
+      <div class="intelCard">
+        <h4>SOARCA / Response</h4>
+        <div class="intelMeta" id="soarcaMeta">Waiting for response decision.</div>
+        <div class="intelList" id="soarcaInfo">No countermeasure selected yet.</div>
+      </div>
     </div>
+    <div class="intel">
+      <h3>Victim Network Traffic (Live)</h3>
+      <canvas id="trafficCanvas" class="chart" width="980" height="240"></canvas>
+      <div id="trafficLineLegend" class="lineLegend">
+        <span class="item"><span class="sw" style="background:#f59e0b"></span>Tráfico antes de contramedida</span>
+        <span class="item"><span class="sw" style="background:#22c55e"></span>Tráfico tras contramedida</span>
+        <span class="item"><span class="sw" style="background:#60a5fa"></span>Detección red (Network IDS)</span>
+        <span class="item"><span class="sw" style="background:#e879f9"></span>Detección host (Falco/Ransomware)</span>
+        <span class="item"><span class="sw-dash"></span>Otras marcas verticales (inicio/detección/fin)</span>
+        <span class="item"><span class="sw" id="detectionSwatch" style="background:#ef4444"></span><span id="detectionLegendText">Detección (pendiente/no confirmada)</span></span>
+      </div>
+      <div id="trafficLegend" class="edges">Waiting for victim traffic samples.</div>
+    </div>
+    <div class="intel">
+      <h3>Victim Host Metrics (CPU / RAM)</h3>
+      <canvas id="hostCanvas" class="chart" width="980" height="240"></canvas>
+      <div id="hostLineLegend" class="lineLegend">
+        <span class="item"><span class="sw" style="background:#ef4444"></span>CPU % (durante ataque)</span>
+        <span class="item"><span class="sw" style="background:#22c55e"></span>CPU % (tras contramedida)</span>
+        <span class="item"><span class="sw" style="background:#f59e0b"></span>RAM %</span>
+        <span class="item"><span class="sw-dash"></span>Marcas verticales (ataque / detección / contramedida)</span>
+      </div>
+      <div id="hostLegend" class="edges">Waiting for victim host metrics.</div>
+    </div>
+    <div class="intel">
+      <h3>Falco Runtime Signals (Live)</h3>
+      <div id="falcoSummary" class="falcoSummary"></div>
+      <div id="falcoTypes" class="falcoTypes"></div>
+      <div id="falcoRules" class="falcoRules"></div>
+      <canvas id="falcoCanvas" class="chart" width="980" height="240"></canvas>
+      <div id="falcoLegend" class="edges">Waiting for victim Falco signals.</div>
+    </div>
+
   </div>
   <script>
     const qs = new URLSearchParams(location.search);
     const experiment = qs.get("experiment") || "exp1";
     const start = qs.get("start") === "1";
+    const scenarioIdFromQuery = (qs.get("scenario_id") || "").trim();
     const title = document.getElementById("title");
     const sub = document.getElementById("sub");
     const out = document.getElementById("out");
-    const graphSvg = document.getElementById("graphSvg");
-    const graphEdges = document.getElementById("graphEdges");
+    const trafficCanvas = document.getElementById("trafficCanvas");
+    const trafficCtx = trafficCanvas.getContext("2d");
+    const trafficLegend = document.getElementById("trafficLegend");
+    const detectionSwatch = document.getElementById("detectionSwatch");
+    const detectionLegendText = document.getElementById("detectionLegendText");
+    const hostCanvas = document.getElementById("hostCanvas");
+    const hostCtx = hostCanvas.getContext("2d");
+    const hostLegend = document.getElementById("hostLegend");
+    const falcoCanvas = document.getElementById("falcoCanvas");
+    const falcoCtx = falcoCanvas.getContext("2d");
+    const falcoSummary = document.getElementById("falcoSummary");
+    const falcoTypes = document.getElementById("falcoTypes");
+    const falcoRules = document.getElementById("falcoRules");
+    const falcoLegend = document.getElementById("falcoLegend");
+    const tapcdMeta = document.getElementById("tapcdMeta");
+    const tapcdInfo = document.getElementById("tapcdInfo");
+    const mispMeta = document.getElementById("mispMeta");
+    const mispInfo = document.getElementById("mispInfo");
+    const soarcaMeta = document.getElementById("soarcaMeta");
+    const soarcaInfo = document.getElementById("soarcaInfo");
+    const stopBtn = document.getElementById("stopBtn");
+    const deleteBtn = document.getElementById("deleteBtn");
+    const removeScenarioBtn = document.getElementById("removeScenarioBtn");
+    const runExp1Btn = document.getElementById("runExp1Btn");
+    const runExp2Btn = document.getElementById("runExp2Btn");
+    const runExp3Btn = document.getElementById("runExp3Btn");
     const reportBtn = document.getElementById("reportBtn");
-    const mispLogBtn = document.getElementById("mispLogBtn");
-    const tapcdLogBtn = document.getElementById("tapcdLogBtn");
     let latestReportUrl = "";
     let latestReportId = "";
-    let liveRunId = qs.get("run_id") || "";
-    let maxDoneSeen = -1;
+    const sessionKey = "novadef_live_run_" + experiment;
+    const persistentRunKey = "novadef_last_run_" + experiment;
+    let liveRunId = qs.get("run_id") || sessionStorage.getItem(sessionKey) || localStorage.getItem(persistentRunKey) || "";
+    let lastAttachNoticeRunId = "";
+    let latestStageStates = [false, false, false, false, false, false];
+    let latestTrafficPayload = null;
+    let trafficSeriesHistory = [];
+    let trafficSeriesByTs = new Map();
+    let lastKnownStartedAt = null;
+    let latestCountermeasureVisible = false;
+    let latestCountermeasureEvidence = false;
+    let currentScenarioId = scenarioIdFromQuery;
+    let latestFullState = null;
+    let latchedNarrative = {
+      detectionMethod: "",
+      generatedProfile: "",
+      appliedCountermeasure: "",
+    };
+    // Once detection is confirmed it must never flicker back to pending.
+    let latchedDetectionConfirmed = false;
+    let lastOutText = "";
+    let trafficAxisMax = 1;
+    let trafficAxisRunId = "";
+    let snapshotLocked = false;
+    let lockedRunId = "";
+    let lockedState = null;
+    let lockedTrafficPayload = null;
+    let lockedStageStates = null;
+    let pollBusy = false;
+    let trafficBusy = false;
+    let detachedFromRun = false;
+    let pollTimerId = null;
+    let trafficTimerId = null;
+    let pollTick = 0;
+    let pollNotFoundStreak = 0;
+    const POLL_INTERVAL_MS = 2500;
+    const TRAFFIC_INTERVAL_MS = 1500;
+    const FULL_STATE_EVERY = 6;
+    // Extra time to keep the "Launching..." screen up AFTER a run is launched,
+    // on top of whatever the backend's own setup/settle delays already take.
+    // Right after launch the backend is still mid-setup (container sync,
+    // benign-noise settle, stability gate) — polling and rendering real data
+    // immediately showed transient/bad-looking values during that window. This
+    // just holds the launch screen a bit longer so the user never sees that
+    // in-between state.
+    const LAUNCH_SCREEN_EXTRA_SECONDS = 5;
+    let launchSuppressUntil = 0;
+    const FETCH_TIMEOUT_MS = 6500;
+    const RECONNECT_TOLERANCE = 18;  // Tolerate up to ~45s of transient failures
     const stages = [...document.querySelectorAll(".st")];
     title.textContent = "Live " + experiment.toUpperCase();
 
-    function paint(maxDone) {
+    async function fetchJsonSafe(url, timeoutMs = FETCH_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { cache: "no-store", signal: controller.signal });
+        if (res.status === 404) return { __notFound: true };
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return await res.json();
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    function setGrafanaFrames(startTsSec) {
+      return;
+    }
+
+    function paint(stageStates) {
       stages.forEach((s, i) => {
         s.classList.remove("done", "active");
-        if (i < maxDone) s.classList.add("done");
-        if (i === maxDone) s.classList.add("active");
+        if (stageStates[i]) {
+          s.classList.add("done");
+          return;
+        }
+        const allPreviousDone = stageStates.slice(0, i).every(Boolean);
+        if (allPreviousDone && i < stages.length) {
+          s.classList.add("active");
+        }
       });
     }
     function esc(v) {
       return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
     }
-    function renderGraph(s) {
-      const p = s.report_panel || {};
-      const m = p.misp || {};
-      const t = p.tapcd || {};
-      const actor = (t.actor_profiles || [])[0] || null;
-      const eventId = (m.event_ids_detected_in_logs || [])[0] || "none";
-      const cm = s.summary?.countermeasure || "-";
-      const victimLine = (m.event_detail_lines || []).find(x => x.toLowerCase().includes("ip-dst")) || "";
-      const victimMatch = victimLine.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
-      const victimIp = victimMatch ? victimMatch[1] : "unknown-victim";
-      if (eventId === "none" && !actor) {
-        graphSvg.innerHTML = "";
-        graphEdges.textContent = "No graph data yet.";
-        return;
-      }
-      const nodes = [
-        { id: "actor", x: 80, y: 120, title: "Actor", lines: actor ? [
-          `id=${actor.actor_id || "-"}`, `profile=${actor.profile || "-"}`, `affiliation=${actor.affiliation || "-"}`,
-          `attitude=${actor.attitude || "-"}`, `skills=${actor.skills || "-"}`, `automation=${actor.automationLevel || "-"}`
-        ] : ["no actor profile"] },
-        { id: "target", x: 360, y: 120, title: "Target Asset", lines: [`ip=${victimIp}`] },
-        { id: "misp", x: 620, y: 40, title: "MISP Event", lines: [`event_id=${eventId}`, `signals=${m.event_signal_count ?? 0}`, `details=${m.event_details_extracted ?? 0}`] },
-        { id: "cm", x: 840, y: 120, title: "Countermeasure", lines: [cm] }
-      ];
-      const links = [["actor","target","TARGETS"],["target","misp","DETECTED_IN"],["misp","cm","TRIGGERS"]];
-      const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
-      let svg = `<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><polygon points="0 0, 8 3.5, 0 7" fill="#5bc0de"></polygon></marker></defs>`;
-      links.forEach(([a,b,lbl]) => {
-        const na = byId[a], nb = byId[b];
-        const x1 = na.x + 160, y1 = na.y + 35, x2 = nb.x, y2 = nb.y + 35;
-        svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#5bc0de" stroke-width="2" marker-end="url(#arrow)"></line>`;
-        svg += `<text x="${(x1+x2)/2}" y="${(y1+y2)/2 - 7}" fill="#9fd4e4" font-size="10" text-anchor="middle">${lbl}</text>`;
-      });
-      nodes.forEach(n => {
-        const h = 24 + (n.lines.length * 12);
-        svg += `<rect x="${n.x}" y="${n.y}" width="160" height="${h}" rx="10" ry="10" fill="#17314c" stroke="#6aa6cc" stroke-width="1.2"></rect>`;
-        svg += `<text x="${n.x+8}" y="${n.y+14}" fill="#dff2ff" font-size="11" font-weight="700">${esc(n.title)}</text>`;
-        n.lines.forEach((ln, i) => { svg += `<text x="${n.x+8}" y="${n.y+28+(i*12)}" fill="#b9d6ee" font-size="10">${esc(ln)}</text>`; });
-      });
-      graphSvg.innerHTML = svg;
-      graphEdges.textContent = `Actor -> Target (${victimIp}) [TARGETS]\nTarget -> MISP Event ${eventId} [DETECTED_IN]\nMISP Event ${eventId} -> Countermeasure [TRIGGERS]`;
+    function fmtTs(ts) {
+      if (!ts) return "-";
+      try { return new Date(ts * 1000).toLocaleTimeString(); } catch { return "-"; }
     }
-
-    async function run() {
-      if (!start || liveRunId) return;
-      const res = await fetch("http://localhost:18082/api/run", {
-        method:"POST", headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ experiment })
-      });
-      const data = await res.json();
-      if (data && data.run_id) {
-        liveRunId = data.run_id;
+    function compactText(value, maxLen = 180) {
+      const txt = String(value || "").trim();
+      if (!txt) return "-";
+      return txt.length > maxLen ? (txt.slice(0, maxLen - 3) + "...") : txt;
+    }
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    function normalizeText(v) {
+      return String(v || "").trim().toLowerCase();
+    }
+    function isPendingLabel(v) {
+      const t = normalizeText(v);
+      return !t || t === "-" || t.includes("pending");
+    }
+    function hasExecutionEvidence(text) {
+      const low = normalizeText(text);
+      // Only accept strong, specific execution signals. Generic keywords like
+      // "block", "lock", "isolation" match startup noise and D3FEND label
+      // text that appears long before any playbook actually runs.
+      return [
+        "playbook ejecutado",
+        "playbook de aislamiento ejecutado",
+        "response applied",
+        "response executed",
+        "done_block_ip",
+        "soarca_countermeasure_applied",
+        "novadef_countermeasure_applied",
+        "exp1 mitigation chain applied",
+      ].some(k => low.includes(k));
+    }
+    function hasConcreteCountermeasure(s) {
+      const summaryCM = normalizeText(s && s.summary && s.summary.countermeasure);
+      const panelCM = normalizeText(s && s.report_panel && s.report_panel.countermeasure && s.report_panel.countermeasure.selected);
+      return [summaryCM, panelCM].some(txt => txt && txt !== "-" && txt !== "pending / no decision yet" && txt !== "pending" && !txt.includes("pending"));
+    }
+    function hasConcreteDetection(s) {
+      const method = normalizeText(s && s.summary && s.summary.detection_method);
+      return Boolean(method && method !== "-" && !method.includes("pending"));
+    }
+    function shouldLockSnapshot(s, stageStates, trafficPayload) {
+      if (!s) return false;
+      if (Boolean(s.running)) return false;
+      const panel = s.report_panel || {};
+      const tapcd = panel.tapcd || {};
+      const misp = panel.misp || {};
+      const cm = panel.countermeasure || {};
+      const markers = (trafficPayload && trafficPayload.markers) || ((s.traffic_panel || {}).markers || {});
+      const allDone = Array.isArray(stageStates) && stageStates.length >= 6 && stageStates.slice(0, 6).every(Boolean);
+      const detectReady = Boolean(markers.detection_at || hasConcreteDetection(s));
+      const profileReady = Boolean(Number(tapcd.actor_profile_count || 0) > 0 || tapcd.native_profile_ready);
+      const enrichReady = Boolean((misp.event_ids_detected_in_logs || []).length > 0 || Number(misp.event_details_extracted || 0) > 0);
+      const cmSelected = String(cm.selected || "").trim();
+      const actReady = Boolean(cmSelected && !["", "-", "Pending / no decision yet"].includes(cmSelected));
+      const hasFinalAnchor = Boolean(s.last_report_id || markers.finished_at || markers.countermeasure_at);
+      return Boolean(hasFinalAnchor && (allDone || (detectReady && profileReady && enrichReady && actReady)));
+    }
+    function lockSnapshot(s, trafficPayload) {
+      snapshotLocked = true;
+      lockedRunId = String(liveRunId || "");
+      lockedState = s ? JSON.parse(JSON.stringify(s)) : null;
+      lockedTrafficPayload = trafficPayload ? JSON.parse(JSON.stringify(trafficPayload)) : null;
+      lockedStageStates = Array.isArray(latestStageStates) ? latestStageStates.slice() : null;
+      sub.textContent = "Snapshot locked";
+    }
+    function clearSnapshotLock() {
+      snapshotLocked = false;
+      lockedRunId = "";
+      lockedState = null;
+      lockedTrafficPayload = null;
+      lockedStageStates = null;
+    }
+    function resetLiveRunState(message) {
+      clearSnapshotLock();
+      latestTrafficPayload = null;
+      resetTrafficHistory();
+      lastKnownStartedAt = null;
+      latestCountermeasureVisible = false;
+      latestCountermeasureEvidence = false;
+      latestFullState = null;
+      latchedNarrative = {
+        detectionMethod: "",
+        generatedProfile: "",
+        appliedCountermeasure: "",
+      };
+      latchedDetectionConfirmed = false;
+      lastOutText = "";
+      trafficAxisMax = 1;
+      trafficAxisRunId = "";
+      latestStageStates = [false, false, false, false, false, false];
+      paint(latestStageStates);
+      if (stopBtn) stopBtn.disabled = true;
+      if (deleteBtn) deleteBtn.disabled = true;
+      if (removeScenarioBtn) removeScenarioBtn.disabled = true;
+      if (runExp1Btn) runExp1Btn.disabled = true;
+      if (runExp2Btn) runExp2Btn.disabled = true;
+      if (runExp3Btn) runExp3Btn.disabled = true;
+      if (reportBtn) reportBtn.disabled = true;
+      out.textContent = message || "Waiting...";
+      // Clear canvas elements
+      trafficCtx.fillStyle = "#070b1f";
+      trafficCtx.fillRect(0, 0, trafficCanvas.width, trafficCanvas.height);
+      hostCtx.fillStyle = "#070b1f";
+      hostCtx.fillRect(0, 0, hostCanvas.width, hostCanvas.height);
+      falcoCtx.fillStyle = "#070b1f";
+      falcoCtx.fillRect(0, 0, falcoCanvas.width, falcoCanvas.height);
+      trafficLegend.textContent = "Waiting for victim traffic samples.";
+      hostLegend.textContent = "Waiting for victim Telegraf metrics.";
+      falcoLegend.textContent = "Waiting for victim Falco signals.";
+      if (tapcdMeta) tapcdMeta.textContent = "Waiting for profile evidence.";
+      if (tapcdInfo) tapcdInfo.textContent = "No TAPCD profile data yet.";
+      if (mispMeta) mispMeta.textContent = "Waiting for enrichment.";
+      if (mispInfo) mispInfo.textContent = "No MISP event yet.";
+      if (soarcaMeta) soarcaMeta.textContent = "Waiting for response decision.";
+      if (soarcaInfo) soarcaInfo.textContent = "No countermeasure selected yet.";
+    }
+    function setLiveRunId(runId) {
+      const previousRunId = liveRunId;
+      liveRunId = String(runId || "");
+      if (previousRunId !== liveRunId) {
+        clearSnapshotLock();
+        resetTrafficHistory();
+        trafficAxisMax = 1;
+        trafficAxisRunId = String(liveRunId || "");
+      }
+      // Only reset display when explicitly clearing the run (going to empty).
+      // Switching between valid run IDs should NOT flash "Waiting for a selected run..."
+      if (previousRunId && previousRunId !== liveRunId && !liveRunId) {
+        resetLiveRunState("Waiting for a selected run...");
+      }
+      if (liveRunId) {
+        sessionStorage.setItem(sessionKey, liveRunId);
+        try { localStorage.setItem(persistentRunKey, liveRunId); } catch (e) {}
         const u = new URL(window.location.href);
         u.searchParams.set("run_id", liveRunId);
         u.searchParams.set("start", "0");
         history.replaceState({}, "", u.toString());
+      } else {
+        sessionStorage.removeItem(sessionKey);
+        try { localStorage.removeItem(persistentRunKey); } catch (e) {}
+        const u = new URL(window.location.href);
+        u.searchParams.delete("run_id");
+        u.searchParams.set("start", "0");
+        history.replaceState({}, "", u.toString());
+      }
+      if (stopBtn) stopBtn.disabled = !liveRunId;
+      if (deleteBtn) deleteBtn.disabled = !liveRunId;
+    }
+    async function attachToCurrentRun() {
+      if (detachedFromRun) return false;
+      // Keep current run pinned: never auto-switch while this tab is already
+      // attached to a run, otherwise transient API hiccups can reset charts.
+      if (liveRunId) return true;
+      try {
+        const s = await fetchJsonSafe("http://localhost:18082/api/state?lite=1", 3500);
+        const currentRunId = String(s.current_run_id || "");
+        if (currentRunId) {
+          setLiveRunId(currentRunId);
+          if (s.last_started_at) {
+            lastKnownStartedAt = Number(s.last_started_at);
+            setGrafanaFrames(lastKnownStartedAt);
+          }
+          sub.textContent = s.running ? "Running..." : "Idle";
+          if (lastAttachNoticeRunId !== liveRunId) {
+            out.textContent = "Connected to active run " + liveRunId + ".";
+            lastAttachNoticeRunId = liveRunId;
+          }
+          return true;
+        }
+        const history = await fetchJsonSafe("http://localhost:18082/api/history", 3500);
+        const runs = Array.isArray(history && history.runs) ? history.runs : [];
+        const active = runs.find(r => r && r.running) || null;
+        let fallback = active;
+        if (!fallback) {
+          const sameExperimentRuns = runs.filter(r => r && String(r.experiment || "") === String(experiment || "") && !r.deleted);
+          fallback = (sameExperimentRuns.length ? sameExperimentRuns[0] : (runs.find(r => r && !r.deleted) || null));
+        }
+        const fallbackRunId = String(fallback && fallback.run_id ? fallback.run_id : "");
+        if (!fallbackRunId) return false;
+        setLiveRunId(fallbackRunId);
+        if (fallback && fallback.started_at) {
+          lastKnownStartedAt = Number(fallback.started_at);
+          setGrafanaFrames(lastKnownStartedAt);
+        }
+        currentScenarioId = String((fallback && fallback.scenario_id) || currentScenarioId || "").trim();
+        sub.textContent = fallback && fallback.running ? "Running..." : "Idle";
+        if (lastAttachNoticeRunId !== liveRunId) {
+          out.textContent = "Connected to recent run " + liveRunId + ".";
+          lastAttachNoticeRunId = liveRunId;
+        }
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+    function canShowCountermeasure() {
+      return latestCountermeasureVisible || latestCountermeasureEvidence || latestStageStates[5];
+    }
+
+    function resetTrafficHistory() {
+      trafficSeriesHistory = [];
+      trafficSeriesByTs = new Map();
+    }
+
+    function mergeTrafficHistory(payload) {
+      if (!payload) return;
+      const incoming = Array.isArray(payload.series) ? payload.series : [];
+      if (!incoming.length) return;
+      let needsSort = false;
+      for (const p of incoming) {
+        const ts = Number(p && p.ts);
+        if (!Number.isFinite(ts)) continue;
+        const prev = trafficSeriesByTs.get(ts);
+        if (!prev) {
+          trafficSeriesByTs.set(ts, p);
+          if (trafficSeriesHistory.length && ts < Number(trafficSeriesHistory[trafficSeriesHistory.length - 1].ts || 0)) {
+            needsSort = true;
+          }
+          trafficSeriesHistory.push(p);
+        } else {
+          trafficSeriesByTs.set(ts, { ...prev, ...p });
+        }
+      }
+      if (needsSort) {
+        trafficSeriesHistory.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+      }
+      trafficSeriesHistory = trafficSeriesHistory.map((p) => trafficSeriesByTs.get(Number(p.ts)) || p);
+    }
+
+    function pickTrafficSeries(payload) {
+      const fullSeries = trafficSeriesHistory;
+      const markers = (payload && payload.markers) || {};
+      if (!fullSeries.length) return [];
+      // Window the chart from ATTACK START, not from monitoring start. Between
+      // monitoring start (started_at + 15s) and the attack there is a long
+      // pre-attack window in which the benign-noise generator ramps the victim's
+      // netfilter INPUT counter up by hundreds→thousands of packets across
+      // consecutive ~1s samples. Those benign deltas produce a large per-second
+      // rate that — since the Y-axis only ever grows while running — permanently
+      // pinned the axis to a huge value (e.g. 6716 pkts/s) and flattened the real
+      // attack spike to a hairline. Anchoring to attack start makes the first
+      // plotted point the moment the attack begins, so only real attack traffic
+      // (and a short benign lead-in just before it) drives the curve and scale.
+      const attackAt = Number(markers.attack_started_at || 0);
+      const startedAt = Number(markers.started_at || 0);
+      if (attackAt > 0) {
+        // Keep a short benign lead-in (5s) before the attack so the baseline is
+        // visible, but drop everything earlier so the pre-attack ramp can't
+        // inflate the axis.
+        const visibleFrom = attackAt - 5.0;
+        return fullSeries.filter((p) => Number(p.ts || 0) >= visibleFrom);
+      }
+      // Attack not started yet: fall back to the monitoring-start window.
+      const monitorVisibleAt = startedAt > 0 ? (startedAt + 15.0) : 0;
+      if (monitorVisibleAt > 0) {
+        return fullSeries.filter((p) => Number(p.ts || 0) >= monitorVisibleAt);
+      }
+      return fullSeries;
+    }
+
+    function renderIntelSummary(s) {
+      const panel = (s && s.report_panel) || {};
+      const tapcd = panel.tapcd || {};
+      const misp = panel.misp || {};
+      const countermeasure = panel.countermeasure || {};
+      const markers = (latestTrafficPayload && latestTrafficPayload.markers) || ((s && s.traffic_panel && s.traffic_panel.markers) || {});
+      const actors = tapcd.actor_profiles || [];
+      const leadActor = actors[0] || {};
+      const eventObject = (misp.event_object || {}).event || {};
+      const mispAttrs = (misp.event_object || {}).attributes || [];
+      const eventIds = misp.event_ids_detected_in_logs || [];
+      const sourceIps = leadActor.source_ips || [];
+      const cmSelected = compactText(countermeasure.selected || (s && s.summary && s.summary.countermeasure) || "Pending / no decision yet", 120);
+      const soarcaExcerpt = compactText(countermeasure.soarca_excerpt || "No SOARCA execution evidence yet.", 180);
+
+      if (tapcdMeta) {
+        tapcdMeta.textContent = `Profiles=${Number(tapcd.actor_profile_count || actors.length || 0)} | Native=${tapcd.native_profile_ready ? "yes" : "no"} | Detection=${fmtTs(markers.detection_at)}`;
+      }
+      if (tapcdInfo) {
+        const techniques = Array.isArray(leadActor.techniques) ? leadActor.techniques.join("; ") : (leadActor.techniques || "-");
+        tapcdInfo.textContent = [
+          `Primary profile  : ${leadActor.profile || "-"}`,
+          `Motivation       : ${leadActor.motivation || "-"}`,
+          `Knowledge        : ${leadActor.knowledge || "-"}`,
+          `Skills           : ${leadActor.skills || "-"}`,
+          `Attitude         : ${leadActor.attitude || "-"}`,
+          `Affiliation      : ${leadActor.affiliation || "-"}`,
+          `Risk level       : ${leadActor.riskLevel || "-"}`,
+          `Automation level : ${leadActor.automationLevel || "-"}`,
+          `Source IPs       : ${sourceIps.join(", ") || "-"}`,
+          `Target           : ${leadActor.target || leadActor.preferred_target || "-"}`,
+          `Country          : ${leadActor.country || "-"}`,
+          `Threat group     : ${leadActor.threat_group || "-"}`,
+          `Kill chain       : ${leadActor.killChainPhase || "-"}`,
+          `TTPs             : ${techniques}`,
+          `Tools            : ${leadActor.tools || "-"}`,
+          `Evasion          : ${leadActor.evasion || "-"}`,
+          `Detection attack : ${leadActor.detection_attack || "-"}`,
+          `Detection stage  : ${leadActor.detection_stage || "-"}`,
+          `First seen       : ${leadActor.firstSeen || "-"}`,
+          `Last activity    : ${leadActor.lastActivity || "-"}`
+        ].filter(l => !l.endsWith(": -")).join("\n");
+      }
+
+      if (mispMeta) {
+        mispMeta.textContent = `Event=${eventObject.id || eventIds[0] || "-"} | Attributes=${Array.isArray(mispAttrs) ? mispAttrs.length : 0} | Enrich=${fmtTs(markers.detection_at)}`;
+      }
+      if (mispInfo) {
+        // Detect whether this single event correlates BOTH exp3 attack phases.
+        const _evInfoText = String(eventObject.info || "");
+        const _attrText = (Array.isArray(mispAttrs) ? mispAttrs : [])
+          .map(a => `${(a && (a.value || a.value1 || "")) || ""} ${(a && a.comment) || ""}`)
+          .join(" ");
+        const _hay = (_evInfoText + " " + _attrText).toLowerCase();
+        const _hasNet = _hay.includes("spraying") || _hay.includes("brute force") || _hay.includes("network");
+        const _hasRansom = _hay.includes("ransomware") || _hay.includes("t1486") || _hay.includes("encrypt");
+        let _phases = "-";
+        if (_hasNet && _hasRansom) _phases = "Password Spraying + Ransomware (campaña correlacionada)";
+        else if (_hasNet) _phases = "Password Spraying (red)";
+        else if (_hasRansom) _phases = "Ransomware (host)";
+        mispInfo.textContent = [
+          `Event IDs: ${eventIds.join(", ") || "-"}`,
+          `Correlated phases: ${_phases}`,
+          `Date: ${eventObject.date || "-"}`,
+          `Signals: ${Number(misp.event_signal_count || 0)}`,
+          `Details: ${Number(misp.event_details_extracted || 0)}`,
+          `Info: ${compactText(eventObject.info || "-", 250)}`
+        ].join("\n");
+      }
+
+      if (soarcaMeta) {
+        soarcaMeta.textContent = `Decision=${cmSelected} | Applied=${fmtTs(markers.countermeasure_at)} | End=${fmtTs(markers.finished_at)}`;
+      }
+      if (soarcaInfo) {
+        soarcaInfo.textContent = [
+          `Selected countermeasure: ${cmSelected}`,
+          `Execution evidence: ${soarcaExcerpt}`,
+          `Report ready: ${latestReportId || (s && s.last_report_id) || "pending"}`
+        ].join("\n");
+      }
+    }
+
+    function renderTrafficChart(payload, allowCountermeasure = false, liveState = null) {
+      const series = pickTrafficSeries(payload);
+      const markers = { ...((payload && payload.markers) || {}) };
+      if (hasConcreteDetection(liveState || latestFullState)) latchedDetectionConfirmed = true;
+      const detectionConfirmed = latchedDetectionConfirmed;
+      const detectionColor = detectionConfirmed ? "#22c55e" : "#ef4444";
+      if (!series.length) {
+        trafficCtx.fillStyle = "#070b1f";
+        trafficCtx.fillRect(0, 0, trafficCanvas.width, trafficCanvas.height);
+        trafficLegend.textContent = markers.attack_started_at ? "Waiting for visible attack-phase traffic samples." : "Waiting for victim traffic samples.";
+        if (detectionSwatch) detectionSwatch.style.background = "#ef4444";
+        if (detectionLegendText) detectionLegendText.textContent = "Detección (pendiente/no confirmada)";
+        return;
+      }
+      if (detectionSwatch) detectionSwatch.style.background = detectionColor;
+      if (detectionLegendText) detectionLegendText.textContent = detectionConfirmed
+        ? "Detección confirmada"
+        : "Detección (pendiente/no confirmada)";
+
+      const w = trafficCanvas.width, h = trafficCanvas.height;
+      const left = 46, right = 16, top = 18, bottom = 32;
+      const minTs = series[0].ts;
+      const maxTs = series[series.length - 1].ts || (minTs + 1);
+
+      // Per-second RATES derived from the cumulative counters.
+      //   - effective rate = d(rx_packets)/dt      → traffic that actually reaches
+      //       the victim (passes the firewall). This is the ATTACK IMPACT: high
+      //       while the attack lands, and ~0 once the countermeasure blocks it.
+      //       It's the main curve because it shows the defense working.
+      //   - inbound rate   = d(rx_packets_raw)/dt  → total traffic hitting the NIC,
+      //       shown as a faint dashed reference: the attacker keeps sending, but
+      //       after mitigation it is dropped (effective → 0).
+      //   - blocked rate   = d(blocked_packets)/dt → what iptables drops.
+      // MIN_SAMPLE_DT clamps the denominator to the sampler's real cadence
+      // (~1-2s). The backend takes 3 quick startup samples 0.15s apart before
+      // the steady ~2s sampler kicks in (and an on-demand fallback can also
+      // fire close to a regular sample if the API was recently restarted).
+      // With the raw 0.001s floor, a normal few-packet delta measured across
+      // one of those 0.15s gaps produced a rate an order of magnitude higher
+      // than the surrounding samples (e.g. a handful of packets / 0.15s ≈
+      // 1000+ pkt/s) — a measurement artifact, not real traffic — and since
+      // the Y-axis only ever grows while running, that one inflated point
+      // permanently flattened the rest of the real curve.
+      const MIN_SAMPLE_DT = 1.0;
+      const rateOf = (field) => series.map((p, idx) => {
+        if (idx === 0) return 0;
+        const prev = series[idx - 1];
+        const dt = Math.max(Number(p.ts || 0) - Number(prev.ts || 0), MIN_SAMPLE_DT);
+        const dv = Number(p[field] || 0) - Number(prev[field] || 0);
+        return dv > 0 ? dv / dt : 0;   // counters are monotonic; ignore resets
+      });
+      const smooth = (arr, win) => arr.map((_, idx) => {
+        const from = Math.max(0, idx - win + 1);
+        const slice = arr.slice(from, idx + 1);
+        return slice.reduce((a, v) => a + v, 0) / Math.max(slice.length, 1);
+      });
+      // Keep the smoothing window SMALL. Samples arrive ~2s apart, so a window
+      // of 5 spreads a real 1-2s surge across ~10s of chart, turning the sharp
+      // attack peak into a broad plateau (the user wants "el pico en 1-2s, no en
+      // varios segundos"). A window of 2 removes single-sample jitter without
+      // smearing the surge — the peak stays sharp and drops back after it.
+      const smoothWindow = 2;
+      let inboundRate = smooth(rateOf("rx_packets_raw"), smoothWindow);
+      const blockedRate = smooth(rateOf("blocked_packets"), smoothWindow);
+      let effectiveRate = smooth(rateOf("rx_packets"), smoothWindow);
+      // Fallback: if the effective counter is flat/absent, use delta_packets.
+      if (!effectiveRate.some(v => v > 0)) {
+        effectiveRate = smooth(series.map(p => Number(p.delta_packets || 0)), smoothWindow);
+      }
+      // Suppress the PRE-ATTACK container/benign-noise BURST ONLY. When a
+      // scenario spins up (or the benign-noise generator warms up) there is a
+      // short spike — rising to a few hundred pkt/s then falling back to the
+      // defined noise range — that has nothing to do with the attack. Any
+      // traffic BEFORE attack_started_at is by definition not the attack, so we
+      // cap pre-attack rate to a ceiling well above normal noise.
+      //
+      // The ceiling must sit ABOVE the real noise level's natural fluctuation,
+      // not at/below it — an earlier version used 20 pkt/s as the ceiling, but
+      // normal benign noise itself regularly ticks at/above 20, so `Math.min(v,
+      // 20)` flattened ordinary noise into a visibly constant "20 paquetes" line
+      // for the first few seconds instead of only clipping genuine outlier
+      // bursts. 200 pkt/s is well above real noise (a few, to a few dozen,
+      // pkt/s) but well below the hundreds-to-thousands a startup/container burst
+      // or a mis-measured single-sample spike produces.
+      //
+      // CRITICAL: this must also apply while the attack has NOT started yet
+      // (attack_started_at is null during the whole setup/benign phase). Earlier
+      // the cap only ran `if (attackTs > 0)`, so during setup nothing was capped
+      // and a benign burst (or a counter reset producing a huge single-sample
+      // rate) pinned the Y-axis to a huge value (e.g. 6249) before the attack
+      // even launched. When there's no attack timestamp yet, cap the ENTIRE
+      // series; once the attack starts, cap only the samples before it.
+      const attackTs = Number(markers.attack_started_at || 0);
+      const PRE_ATTACK_BURST_CEIL = 200; // pkt/s — above real noise, below a burst
+      const capPre = (arr) => arr.map((v, i) => {
+        const ts = Number(series[i].ts || 0);
+        const isPreAttack = attackTs > 0 ? ts < attackTs : true; // no attack yet → all pre-attack
+        return isPreAttack ? Math.min(Number(v || 0), PRE_ATTACK_BURST_CEIL) : v;
+      });
+      effectiveRate = capPre(effectiveRate);
+      inboundRate = capPre(inboundRate);
+      const hasInboundRef = inboundRate.some(v => v > 0);
+      const primaryRate = effectiveRate;         // main curve = victim-impacting traffic
+      const smoothDelta = primaryRate;           // keep name used by the last-point circle
+      // Scale the axis to BOTH curves so the network attack SURGE is visible as a
+      // real spike (the surge shows up on the inbound/raw curve — the attacker
+      // sends ~9.7k packets even if most get blocked). The pre-attack cap above
+      // already flattens benign-noise bursts, so before the attack the axis stays
+      // small; it only grows when the real surge arrives. This is what lets "el
+      // spike grande" actually appear on screen instead of being flattened.
+      let targetMax = Math.max(...primaryRate, ...inboundRate, 1);
+      // Defense in depth against a single bad backend sample (e.g. a
+      // misresolved container name falling back to an unrelated/unscoped
+      // packet counter) pinning the Y-axis to a huge value for the rest of
+      // the run: the axis here only ever grows while running, so one
+      // multi-order-of-magnitude outlier would otherwise flatten all real
+      // traffic to a hairline for good. If the new target dwarfs the largest
+      // value already established (and we have established one), treat it as
+      // a transient glitch and ignore it for scaling purposes — a real
+      // traffic ramp grows gradually across samples, it doesn't 1000x in one.
+      const OUTLIER_GROWTH_FACTOR = 25;
+      if (trafficAxisMax > 1 && targetMax > trafficAxisMax * OUTLIER_GROWTH_FACTOR) {
+        targetMax = trafficAxisMax;
+      }
+      const isRunning = Boolean(liveState && liveState.running);
+      if (trafficAxisRunId !== String(liveRunId || "")) {
+        trafficAxisRunId = String(liveRunId || "");
+        trafficAxisMax = targetMax;
+      }
+      if (isRunning) {
+        trafficAxisMax = Math.max(trafficAxisMax, targetMax);
+      } else {
+        trafficAxisMax = Math.max(targetMax, trafficAxisMax * 0.92);
+      }
+      const maxVal = Math.max(trafficAxisMax, 1);
+      const x = ts => left + ((ts - minTs) / Math.max(maxTs - minTs, 1)) * (w - left - right);
+      const y = val => h - bottom - ((val / maxVal) * (h - top - bottom));
+
+      // Clear canvas
+      trafficCtx.fillStyle = "#070b1f";
+      trafficCtx.fillRect(0, 0, w, h);
+
+      // Draw grid
+      trafficCtx.strokeStyle = "rgba(130,170,210,.15)";
+      trafficCtx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const gy = top + ((h - top - bottom) / 3) * i;
+        trafficCtx.beginPath();
+        trafficCtx.moveTo(left, gy);
+        trafficCtx.lineTo(w - right, gy);
+        trafficCtx.stroke();
+      }
+
+      // Draw observe window if exists
+      if (markers.started_at && markers.attack_started_at && markers.attack_started_at > markers.started_at) {
+        const x1 = x(markers.started_at);
+        const x2 = x(markers.attack_started_at);
+        trafficCtx.fillStyle = "rgba(96,165,250,.08)";
+        trafficCtx.fillRect(x1, top, Math.max(x2 - x1, 1), h - top - bottom);
+        trafficCtx.strokeStyle = "rgba(96,165,250,.18)";
+        trafficCtx.lineWidth = 1;
+        trafficCtx.strokeRect(x1, top, Math.max(x2 - x1, 1), h - top - bottom);
+      }
+
+      // Vertical phase-marker lines are drawn HERE — BEFORE the traffic curve —
+      // so the horizontal traffic line paints ON TOP of them and crosses cleanly.
+      // Drawing them after the curve (even at reduced alpha) still repainted over
+      // the curve at the crossing point, so the horizontal line looked "cut" /
+      // erased wherever a vertical marker intersected it. Drawing them first, as
+      // a background layer, means the opaque curve always wins at the crossing.
+      // Every vertical marker line is held back by a plain 1s delay of real
+      // (wall-clock) time after its own timestamp before it is drawn — a
+      // threshold-based "is the spike visible yet" gate kept letting markers
+      // (esp. Net detection) slip through before the corresponding rise was on
+      // screen. A flat delay is simpler and applies uniformly to all markers,
+      // not just detection ones. This is purely a drawing delay — the real
+      // timestamps and reported latencies are untouched.
+      const MARKER_DRAW_DELAY_SECONDS = 1;
+      const nowSec = Date.now() / 1000;
+      const markerGated = (ts) => nowSec >= Number(ts || 0) + MARKER_DRAW_DELAY_SECONDS;
+      const markerDefs = [
+        ["Run start",      markers.started_at,       "#64748b"],
+        ["Attack start",   markers.attack_started_at, "#f59e0b"],
+        ["Net detection",  markers.network_detect_at, "#60a5fa"],
+        ["Host detection (Falco/Ransomware)", markers.host_detect_at, "#e879f9"],
+        [detectionConfirmed ? "Detection ✓" : "Detection…", markers.detection_at, detectionColor],
+        ["Countermeasure ✅", markers.countermeasure_at, "#22c55e"],
+        ["Run end",        markers.finished_at,       "#93c5fd"],
+      ];
+      const activeMarkers = [];
+      markerDefs.forEach(([label, ts, color]) => {
+        if (!ts) return;
+        if (!markerGated(ts)) return;
+        const isBeforeWindow = ts < minTs;
+        const isAfterWindow = ts > maxTs;
+        const px = isBeforeWindow ? left : (isAfterWindow ? (w - right) : x(ts));
+        trafficCtx.strokeStyle = color;
+        trafficCtx.lineWidth = 2;
+        trafficCtx.setLineDash([6, 4]);
+        trafficCtx.beginPath();
+        trafficCtx.moveTo(px, top);
+        trafficCtx.lineTo(px, h - bottom);
+        trafficCtx.stroke();
+        trafficCtx.setLineDash([]);
+        activeMarkers.push([label, color]);
+      });
+
+      // Helper: draw a filled area under a rate series in a given colour.
+      const drawArea = (rateArr, stroke, fill) => {
+        // Filled area
+        trafficCtx.fillStyle = fill;
+        trafficCtx.beginPath();
+        trafficCtx.moveTo(x(series[0].ts), y(0));
+        series.forEach((p, i) => trafficCtx.lineTo(x(p.ts), y(Number(rateArr[i] || 0))));
+        trafficCtx.lineTo(x(series[series.length - 1].ts), y(0));
+        trafficCtx.closePath();
+        trafficCtx.fill();
+        // Line on top
+        trafficCtx.strokeStyle = stroke;
+        trafficCtx.lineWidth = 2.5;
+        trafficCtx.beginPath();
+        series.forEach((p, i) => {
+          const px = x(p.ts), py = y(Number(rateArr[i] || 0));
+          if (i === 0) trafficCtx.moveTo(px, py);
+          else trafficCtx.lineTo(px, py);
+        });
+        trafficCtx.stroke();
+      };
+
+      const cmTs = (allowCountermeasure && markers.countermeasure_at) ? markers.countermeasure_at : null;
+
+      // 1) Inbound total (attacker send rate) — faint dashed reference line so you
+      //    can see the attack keeps arriving even after it's neutralised.
+      if (hasInboundRef) {
+        trafficCtx.strokeStyle = "rgba(148,163,184,.55)";
+        trafficCtx.lineWidth = 1.2;
+        trafficCtx.setLineDash([4, 3]);
+        trafficCtx.beginPath();
+        series.forEach((p, i) => {
+          const px = x(p.ts), py = y(Number(inboundRate[i] || 0));
+          if (i === 0) trafficCtx.moveTo(px, py);
+          else trafficCtx.lineTo(px, py);
+        });
+        trafficCtx.stroke();
+        trafficCtx.setLineDash([]);
+      }
+
+      // 2) Effective traffic reaching the victim = the attack IMPACT. Filled area,
+      //    orange before the countermeasure, green after (drops to ~0 = mitigated).
+      const drawImpactArea = (fromTs, toTs, stroke, fill) => {
+        const seg = series
+          .map((p, i) => ({ p, i }))
+          .filter(({ p }) => (fromTs === null || Number(p.ts) >= fromTs) && (toTs === null || Number(p.ts) < toTs));
+        if (seg.length < 1) return;
+        // Force the very first plotted point of this segment to 0 — rateOf()
+        // already returns 0 for the series' own index 0, but a segment here
+        // can start mid-series (e.g. the post-countermeasure segment), where
+        // primaryRate[i] is a real measured rate, not the series' first point.
+        // Always anchoring the visible start of the curve at 0 means the line
+        // never appears to "jump in" already elevated — it always rises from
+        // the axis, which is clearer than starting mid-height.
+        const rateAt = (i, isSegStart) => (isSegStart ? 0 : Number(primaryRate[i] || 0));
+        trafficCtx.fillStyle = fill;
+        trafficCtx.beginPath();
+        trafficCtx.moveTo(x(seg[0].p.ts), y(0));
+        seg.forEach(({ p, i }, k) => trafficCtx.lineTo(x(p.ts), y(rateAt(i, k === 0))));
+        trafficCtx.lineTo(x(seg[seg.length - 1].p.ts), y(0));
+        trafficCtx.closePath();
+        trafficCtx.fill();
+        trafficCtx.strokeStyle = stroke;
+        trafficCtx.lineWidth = 2.5;
+        trafficCtx.beginPath();
+        seg.forEach(({ p, i }, k) => {
+          const px = x(p.ts), py = y(rateAt(i, k === 0));
+          if (k === 0) trafficCtx.moveTo(px, py);
+          else trafficCtx.lineTo(px, py);
+        });
+        trafficCtx.stroke();
+      };
+      if (cmTs) {
+        drawImpactArea(null, cmTs, "#f59e0b", "rgba(245,158,11,.18)");
+        drawImpactArea(cmTs, null, "#22c55e", "rgba(34,197,94,.16)");
+      } else {
+        drawImpactArea(null, null, "#f59e0b", "rgba(245,158,11,.18)");
+      }
+
+      // Draw last point circle
+      const last = series[series.length - 1];
+      trafficCtx.fillStyle = "#f8fafc";
+      trafficCtx.beginPath();
+      trafficCtx.arc(x(last.ts), y(Number(smoothDelta[smoothDelta.length - 1] || 0)), 4, 0, 2 * Math.PI);
+      trafficCtx.fill();
+
+      // Marker vertical lines were already drawn as a background layer before the
+      // curve (see above). Here we only build the legend from the same set.
+      // Data series in the legend first (so it's clear what the curves mean),
+      // then the event markers.
+      const legendItems = [["Tráfico efectivo (impacto)", "#f59e0b"]];
+      if (cmTs) legendItems.push(["Efectivo tras mitigación", "#22c55e"]);
+      if (hasInboundRef) legendItems.push(["Entrante total (referencia)", "#94a3b8"]);
+      activeMarkers.forEach(m => legendItems.push(m));
+      // Compact legend in the top-left corner (swatch + name), one per line.
+      if (legendItems.length) {
+        trafficCtx.font = "10px sans-serif";
+        trafficCtx.textAlign = "left";
+        const lx = left + 6;
+        let ly = top + 10;
+        // Semi-transparent backdrop so the legend stays readable over the curves.
+        trafficCtx.fillStyle = "rgba(13,26,42,.72)";
+        trafficCtx.fillRect(lx - 6, top + 1, 196, legendItems.length * 13 + 6);
+        legendItems.forEach(([label, color]) => {
+          trafficCtx.fillStyle = color;
+          trafficCtx.fillRect(lx, ly - 7, 9, 9);
+          trafficCtx.fillStyle = "#cbd5e1";
+          trafficCtx.fillText(label, lx + 14, ly);
+          ly += 13;
+        });
+      }
+
+      // Draw Y-axis labels. Values here are a RATE (packets/second, derived
+      // from consecutive cumulative-counter deltas), so they are not whole
+      // packet counts — but always rounding to an integer keeps the axis
+      // readable as "how many packets per second", which matters more than
+      // sub-1-pkt/s precision at low traffic.
+      trafficCtx.fillStyle = "#9dc0de";
+      trafficCtx.font = "10px sans-serif";
+      const yTicks = [0, maxVal * 0.5, maxVal];
+      yTicks.forEach((val) => {
+        const yy = y(val);
+        trafficCtx.fillText(`${Number(val).toFixed(0)} pkts/s`, 6, yy + 4);
+      });
+
+      // Draw X-axis labels
+      trafficCtx.fillText(fmtTs(minTs), left, h - 8);
+      trafficCtx.fillText(fmtTs(maxTs), w - right - 70, h - 8);
+      trafficCtx.fillText("Paquetes/s (víctima)", left, top - 4);
+
+      const lastBlocked = Number(last.blocked_packets || 0);
+      const lastEffective = Number(last.rx_packets || 0);
+      const smoothed = Number(smoothDelta[smoothDelta.length - 1] || 0);
+      const flowState = series.every(p => Number(p.delta_packets || 0) === 0) ? "No traffic yet" : "Traffic flowing";
+
+      // Concise, human-facing summary — only what an operator needs at a
+      // glance: current rate, blocked count once relevant, and the phase
+      // timestamps. Verbose debug fields (raw sample counts, per-phase raw/
+      // effective/blocked breakdowns, cumulative counters) were dropped; they
+      // duplicate what the chart already shows visually and made this line
+      // unreadable as a single dense wall of text.
+      let parts = [
+        `${flowState}: ${smoothed.toFixed(1)} pkts/s`,
+        `Detection=${fmtTs(markers.detection_at)}${markers.detection_at ? (detectionConfirmed ? " (confirmed)" : " (pending)") : ""}`,
+      ];
+      if (allowCountermeasure && markers.countermeasure_at) {
+        parts.push(`Countermeasure=${fmtTs(markers.countermeasure_at)}`);
+        parts.push(`Blocked=${lastBlocked.toFixed(0)} pkts`);
+        const ds = (payload && payload.countermeasure_drop) || null;
+        if (ds && ds.status === "ok") {
+          const dropPct = Number(ds.drop_percent || 0);
+          const clear = Boolean(ds.clear_drop);
+          parts.push(clear ? `Traffic drop=${dropPct.toFixed(0)}%` : `No clear drop (${dropPct.toFixed(0)}%)`);
+        }
+      } else if (lastBlocked > 0) {
+        parts.push(`Blocked=${lastBlocked.toFixed(0)} pkts`);
+      }
+      if (markers.finished_at) {
+        parts.push(`Ended=${fmtTs(markers.finished_at)}`);
+      }
+      trafficLegend.textContent = parts.join(" · ");
+    }
+    function renderHostChart(payload) {
+      const series = (payload && payload.series) || [];
+      const markers = (payload && payload.markers) || {};
+      const cm_ts = markers.countermeasure_at || null;
+      if (!series.length) {
+        hostCtx.fillStyle = "#070b1f";
+        hostCtx.fillRect(0, 0, hostCanvas.width, hostCanvas.height);
+        hostLegend.textContent = "Waiting for victim host metrics.";
+        return;
+      }
+      const w = hostCanvas.width, h = hostCanvas.height;
+      const left = 46, right = 16, top = 18, bottom = 32;
+      const minTs = series[0].ts;
+      const maxTs = series[series.length - 1].ts || (minTs + 1);
+      const cpuMax = Math.max(...series.map(p => Number(p.cpu_percent || 0)), 1);
+      const memMax = Math.max(...series.map(p => Number(p.memory_percent || 0)), 1);
+      const maxVal = Math.max(cpuMax, memMax, 1);
+      const x = ts => left + ((ts - minTs) / Math.max(maxTs - minTs, 1)) * (w - left - right);
+      const y = val => h - bottom - ((val / maxVal) * (h - top - bottom));
+
+      // Clear canvas
+      hostCtx.fillStyle = "#070b1f";
+      hostCtx.fillRect(0, 0, w, h);
+
+      // Shade pre-attack observation window
+      if (markers.started_at && markers.attack_started_at && markers.attack_started_at > markers.started_at) {
+        const x1 = x(markers.started_at);
+        const x2 = x(markers.attack_started_at);
+        hostCtx.fillStyle = "rgba(96,165,250,.06)";
+        hostCtx.fillRect(x1, top, Math.max(x2 - x1, 1), h - top - bottom);
+      }
+
+      // Draw grid
+      hostCtx.strokeStyle = "rgba(130,170,210,.15)";
+      hostCtx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const gy = top + ((h - top - bottom) / 3) * i;
+        hostCtx.beginPath();
+        hostCtx.moveTo(left, gy);
+        hostCtx.lineTo(w - right, gy);
+        hostCtx.stroke();
+      }
+
+      // Vertical event markers — drawn HERE (before the metric lines) as a
+      // background layer so the horizontal metric curve paints on top and is not
+      // visually "cut" where a vertical marker crosses it.
+      if (hasConcreteDetection(latestFullState)) latchedDetectionConfirmed = true;
+      const detectionConfirmed = latchedDetectionConfirmed;
+      const detectionColor = detectionConfirmed ? "#22c55e" : "#ef4444";
+      // Same flat 1s draw delay as the traffic chart, applied to every marker.
+      const HOST_MARKER_DRAW_DELAY_SECONDS = 1;
+      const hostNowSec = Date.now() / 1000;
+      const hostMarkerGated = (ts) => hostNowSec >= Number(ts || 0) + HOST_MARKER_DRAW_DELAY_SECONDS;
+      const hostMarkerDefs = [
+        ["Attack start",         markers.attack_started_at, "#f59e0b"],
+        ["Net detection (IDS)",  markers.network_detect_at, "#60a5fa"],
+        ["Host detection (Falco)", markers.host_detect_at,  "#e879f9"],
+        [detectionConfirmed ? "Detection ✓" : "Detection…", markers.detection_at, detectionColor],
+        ["Countermeasure ✅",    markers.countermeasure_at, "#22c55e"],
+        ["Run end",              markers.finished_at,       "#93c5fd"],
+      ];
+      const hostActiveMarkers = [];
+      hostMarkerDefs.forEach(([label, ts, color]) => {
+        if (!ts) return;
+        if (!hostMarkerGated(ts)) return;
+        const isBeforeWindow = ts < minTs;
+        const isAfterWindow  = ts > maxTs;
+        const px = isBeforeWindow ? left : (isAfterWindow ? (w - right) : x(ts));
+        hostCtx.strokeStyle = color;
+        hostCtx.lineWidth = 2;
+        hostCtx.setLineDash([6, 4]);
+        hostCtx.beginPath();
+        hostCtx.moveTo(px, top);
+        hostCtx.lineTo(px, h - bottom);
+        hostCtx.stroke();
+        hostCtx.setLineDash([]);
+        hostActiveMarkers.push([label, color]);
+      });
+
+      // Helper: draw a metric line in two segments if countermeasure_at is set
+      function drawMetricLine(field, colorBefore, colorAfter) {
+        if (!cm_ts) {
+          hostCtx.strokeStyle = colorBefore;
+          hostCtx.lineWidth = 2.5;
+          hostCtx.beginPath();
+          series.forEach((p, i) => {
+            const px = x(p.ts), py = y(Number(p[field] || 0));
+            if (i === 0) hostCtx.moveTo(px, py); else hostCtx.lineTo(px, py);
+          });
+          hostCtx.stroke();
+        } else {
+          // Before countermeasure
+          hostCtx.strokeStyle = colorBefore;
+          hostCtx.lineWidth = 2.5;
+          hostCtx.beginPath();
+          let started = false;
+          series.forEach(p => {
+            if (Number(p.ts) >= cm_ts) return;
+            const px = x(p.ts), py = y(Number(p[field] || 0));
+            if (!started) { hostCtx.moveTo(px, py); started = true; } else hostCtx.lineTo(px, py);
+          });
+          if (started) hostCtx.stroke();
+          // After countermeasure (dimmed — attack stopped)
+          hostCtx.strokeStyle = colorAfter;
+          hostCtx.lineWidth = 2.5;
+          hostCtx.beginPath();
+          started = false;
+          series.forEach(p => {
+            if (Number(p.ts) < cm_ts) return;
+            const px = x(p.ts), py = y(Number(p[field] || 0));
+            if (!started) { hostCtx.moveTo(px, py); started = true; } else hostCtx.lineTo(px, py);
+          });
+          if (started) hostCtx.stroke();
+        }
+      }
+
+      drawMetricLine("cpu_percent",    "#ef4444", "#22c55e"); // red during attack, green after isolation
+      drawMetricLine("memory_percent", "#f59e0b", "#64748b"); // orange during attack, grey after
+
+      // Draw current-value dot
+      const last = series[series.length - 1];
+      hostCtx.fillStyle = cm_ts ? "#22c55e" : "#ef4444";
+      hostCtx.beginPath();
+      hostCtx.arc(x(last.ts), y(Number(last.cpu_percent || 0)), 4, 0, 2 * Math.PI);
+      hostCtx.fill();
+
+      // Vertical event markers were already drawn as a background layer before
+      // the metric lines (see above). Here we only build the legend.
+      if (hostActiveMarkers.length) {
+        hostCtx.font = "10px sans-serif";
+        hostCtx.textAlign = "left";
+        const lx = left + 6;
+        let ly = top + 10;
+        hostActiveMarkers.forEach(([label, color]) => {
+          hostCtx.fillStyle = color;
+          hostCtx.fillRect(lx, ly - 7, 9, 9);
+          hostCtx.fillStyle = "#cbd5e1";
+          hostCtx.fillText(label, lx + 14, ly);
+          ly += 13;
+        });
+      }
+
+      // Draw Y-axis labels
+      hostCtx.fillStyle = "#9dc0de";
+      hostCtx.font = "10px sans-serif";
+      [0, maxVal * 0.5, maxVal].forEach(val => {
+        hostCtx.fillText(`${Number(val).toFixed(maxVal >= 100 ? 0 : 1)}%`, 4, y(val) + 4);
+      });
+
+      // Draw X-axis labels
+      hostCtx.fillText(fmtTs(minTs), left, h - 8);
+      hostCtx.fillText(fmtTs(maxTs), w - right - 70, h - 8);
+      hostCtx.fillText("CPU / RAM (%)", left, top - 4);
+
+      // Legend
+      hostCtx.fillStyle = "#ef4444";
+      hostCtx.fillText("CPU % (during attack)", left + 10, top + 14);
+      hostCtx.fillStyle = "#22c55e";
+      hostCtx.fillText("CPU % (post-CM)", left + 180, top + 14);
+      hostCtx.fillStyle = "#f59e0b";
+      hostCtx.fillText("RAM %", left + 330, top + 14);
+
+      hostLegend.textContent =
+        `Samples=${series.length} | CPU=${Number(last.cpu_percent || 0).toFixed(1)}% | RAM=${Number(last.memory_percent || 0).toFixed(1)}%`
+        + (cm_ts ? ` | Countermeasure applied at ${fmtTs(cm_ts)}` : "");
+    }
+    function renderFalcoChart(payload) {
+      const series = (payload && payload.series) || [];
+      if (!series.length) {
+        falcoCtx.fillStyle = "#070b1f";
+        falcoCtx.fillRect(0, 0, falcoCanvas.width, falcoCanvas.height);
+        if (falcoSummary) {
+          falcoSummary.innerHTML = [
+            ['Total', '0'],
+            ['Delta', '0'],
+            ['Warnings', '0'],
+            ['Errors', '0'],
+          ].map(([label, value]) => `<div class="falcoMetric"><b>${label}</b><span>${value}</span></div>`).join("");
+        }
+        if (falcoTypes) falcoTypes.innerHTML = "";
+        if (falcoRules) falcoRules.textContent = "";
+        falcoLegend.textContent = "Waiting for victim Falco signals.";
+        return;
+      }
+      const w = falcoCanvas.width, h = falcoCanvas.height;
+      const left = 46, right = 16, top = 18, bottom = 32;
+      const minTs = series[0].ts;
+      const maxTs = series[series.length - 1].ts || (minTs + 1);
+      const totalMax = Math.max(...series.map(p => Number(p.falco_signal_total || p.falco_events || 0)), 1);
+      const deltaMax = Math.max(...series.map(p => Number(p.falco_signal_delta || 0)), 1);
+      const warnMax = Math.max(...series.map(p => Number(p.falco_warning_events || 0)), 1);
+      const errMax = Math.max(...series.map(p => Number(p.falco_error_events || 0)), 1);
+      const maxVal = Math.max(totalMax, deltaMax, warnMax, errMax, 3);
+      const x = ts => left + ((ts - minTs) / Math.max(maxTs - minTs, 1)) * (w - left - right);
+      const y = val => h - bottom - ((val / maxVal) * (h - top - bottom));
+
+      // Clear canvas
+      falcoCtx.fillStyle = "#070b1f";
+      falcoCtx.fillRect(0, 0, w, h);
+
+      // Draw grid
+      falcoCtx.strokeStyle = "rgba(130,170,210,.15)";
+      falcoCtx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const gy = top + ((h - top - bottom) / 3) * i;
+        falcoCtx.beginPath();
+        falcoCtx.moveTo(left, gy);
+        falcoCtx.lineTo(w - right, gy);
+        falcoCtx.stroke();
+      }
+
+      // Draw total signals with fill (green)
+      falcoCtx.fillStyle = "rgba(34,197,94,.10)";
+      falcoCtx.beginPath();
+      series.forEach((p, i) => {
+        const px = x(p.ts);
+        const py = y(Number(p.falco_signal_total || p.falco_events || 0));
+        if (i === 0) falcoCtx.moveTo(px, py);
+        else falcoCtx.lineTo(px, py);
+      });
+      falcoCtx.lineTo(x(maxTs), y(0));
+      falcoCtx.lineTo(x(minTs), y(0));
+      falcoCtx.fill();
+
+      // Draw total line (green)
+      falcoCtx.strokeStyle = "#22c55e";
+      falcoCtx.lineWidth = 4;
+      falcoCtx.beginPath();
+      series.forEach((p, i) => {
+        const px = x(p.ts);
+        const py = y(Number(p.falco_signal_total || p.falco_events || 0));
+        if (i === 0) falcoCtx.moveTo(px, py);
+        else falcoCtx.lineTo(px, py);
+      });
+      falcoCtx.stroke();
+
+      // Draw delta line (blue dashed)
+      falcoCtx.strokeStyle = "#38bdf8";
+      falcoCtx.lineWidth = 2;
+      falcoCtx.setLineDash([5, 3]);
+      falcoCtx.beginPath();
+      series.forEach((p, i) => {
+        const px = x(p.ts);
+        const py = y(Number(p.falco_signal_delta || 0));
+        if (i === 0) falcoCtx.moveTo(px, py);
+        else falcoCtx.lineTo(px, py);
+      });
+      falcoCtx.stroke();
+
+      // Draw warnings line (orange dashed)
+      falcoCtx.strokeStyle = "#f59e0b";
+      falcoCtx.lineWidth = 2;
+      falcoCtx.setLineDash([3, 3]);
+      falcoCtx.beginPath();
+      series.forEach((p, i) => {
+        const px = x(p.ts);
+        const py = y(Number(p.falco_warning_events || 0));
+        if (i === 0) falcoCtx.moveTo(px, py);
+        else falcoCtx.lineTo(px, py);
+      });
+      falcoCtx.stroke();
+
+      // Draw errors line (red dashed)
+      falcoCtx.strokeStyle = "#ef4444";
+      falcoCtx.lineWidth = 2;
+      falcoCtx.setLineDash([4, 3]);
+      falcoCtx.beginPath();
+      series.forEach((p, i) => {
+        const px = x(p.ts);
+        const py = y(Number(p.falco_error_events || 0));
+        if (i === 0) falcoCtx.moveTo(px, py);
+        else falcoCtx.lineTo(px, py);
+      });
+      falcoCtx.stroke();
+      falcoCtx.setLineDash([]);
+
+      // Draw last point
+      const last = series[series.length - 1];
+      falcoCtx.fillStyle = "#22c55e";
+      falcoCtx.beginPath();
+      falcoCtx.arc(x(last.ts), y(Number(last.falco_signal_total || last.falco_events || 0)), 5, 0, 2 * Math.PI);
+      falcoCtx.fill();
+
+      // Draw Y-axis labels — Falco signal counts, always whole numbers.
+      falcoCtx.fillStyle = "#9dc0de";
+      falcoCtx.font = "10px sans-serif";
+      const yTicks = [0, maxVal * 0.5, maxVal];
+      yTicks.forEach((val) => {
+        const yy = y(val);
+        falcoCtx.fillText(`${Number(val).toFixed(0)}`, 6, yy + 4);
+      });
+
+      // Draw X-axis labels
+      falcoCtx.fillText(fmtTs(minTs), left, h - 8);
+      falcoCtx.fillText(fmtTs(maxTs), w - right - 70, h - 8);
+      falcoCtx.fillText("Falco runtime signals", left, top - 4);
+
+      // Draw legend
+      falcoCtx.fillStyle = "#22c55e";
+      falcoCtx.fillText("Signals total", left + 10, top + 14);
+      falcoCtx.fillStyle = "#38bdf8";
+      falcoCtx.fillText("Signals / sample", left + 110, top + 14);
+      falcoCtx.fillStyle = "#f59e0b";
+      falcoCtx.fillText("Warnings", left + 230, top + 14);
+      falcoCtx.fillStyle = "#ef4444";
+      falcoCtx.fillText("Errors", left + 300, top + 14);
+
+      // Update summary boxes
+      if (falcoSummary) {
+        falcoSummary.innerHTML = [
+          ["Total", Number(last.falco_signal_total || last.falco_events || 0).toFixed(0)],
+          ["Delta/sample", Number(last.falco_signal_delta || 0).toFixed(0)],
+          ["Warnings", Number(last.falco_warning_events || 0).toFixed(0)],
+          ["Errors", Number(last.falco_error_events || 0).toFixed(0)],
+        ].map(([label, value]) => `<div class="falcoMetric"><b>${label}</b><span>${value}</span></div>`).join("");
+      }
+
+      const falcoTypesData = last.falco_signal_types || {};
+      if (falcoTypes) {
+        const items = [
+          ["Critical", falcoTypesData.critical ?? Number(last.falco_critical_events || 0)],
+          ["Error", falcoTypesData.error ?? Number(last.falco_error_events || 0)],
+          ["Warning", falcoTypesData.warning ?? Number(last.falco_warning_events || 0)],
+          ["Notice", falcoTypesData.notice ?? Number(last.falco_notice_events || 0)],
+          ["Info", falcoTypesData.info ?? Number(last.falco_info_events || 0)],
+          ["Debug", falcoTypesData.debug ?? Number(last.falco_debug_events || 0)],
+        ];
+        falcoTypes.innerHTML = items
+          .map(([label, value]) => `<div class="falcoType"><b>${esc(label)}</b> ${Number(value || 0).toFixed(0)}</div>`)
+          .join("");
+      }
+
+      const topRules = Array.isArray(last.falco_top_rules) ? last.falco_top_rules : [];
+      if (falcoRules) {
+        falcoRules.textContent = topRules.length
+          ? "Top Falco rules: " + topRules.map((r) => `${r.rule || "-"} (${Number(r.count || 0).toFixed(0)})`).join(", ")
+          : "Top Falco rules: -";
+      }
+      falcoLegend.textContent =
+        `Samples=${series.length} | Run window signals=${Number(last.falco_signal_total || last.falco_events || 0).toFixed(0)} | Delta/sample=${Number(last.falco_signal_delta || 0).toFixed(0)} | Warnings=${Number(last.falco_warning_events || 0).toFixed(0)} | Errors=${Number(last.falco_error_events || 0).toFixed(0)} | Scale=0..${maxVal.toFixed(maxVal >= 100 ? 0 : 1)}`;
+    }
+    async function pollTraffic() {
+      if (detachedFromRun) return;
+      if (snapshotLocked && lockedRunId === String(liveRunId || "") && lockedState && lockedState.running === false) return;
+      if (!liveRunId || trafficBusy) return;
+      // Same launch-suppression window as poll(): don't fetch/merge traffic
+      // samples into history while still in the extended "Launching..." period,
+      // so no early/transient sample ever gets baked into trafficSeriesHistory.
+      if (Date.now() < launchSuppressUntil) return;
+      trafficBusy = true;
+      try {
+        const payload = await fetchJsonSafe("http://localhost:18082/api/traffic?run_id=" + encodeURIComponent(liveRunId), 1800);
+        if (!payload || payload.ok === false) return;
+        mergeTrafficHistory(payload);
+        const nextSeries = pickTrafficSeries(payload);
+        if (!nextSeries.length && latestTrafficPayload) {
+          latestTrafficPayload = {
+            ...latestTrafficPayload,
+            series: trafficSeriesHistory,
+            markers: {
+              ...((latestTrafficPayload && latestTrafficPayload.markers) || {}),
+              ...((payload && payload.markers) || {}),
+            },
+            countermeasure_drop: payload.countermeasure_drop || latestTrafficPayload.countermeasure_drop,
+            phase_packet_counts: payload.phase_packet_counts || latestTrafficPayload.phase_packet_counts,
+          };
+        } else {
+          latestTrafficPayload = {
+            ...payload,
+            series: trafficSeriesHistory,
+          };
+        }
+        renderTrafficChart(latestTrafficPayload, canShowCountermeasure(), latestFullState);
+        renderHostChart(latestTrafficPayload);
+        renderFalcoChart(latestTrafficPayload);
+        if ((payload.series || []).length > 0) {
+          latestStageStates[0] = true;
+          paint(latestStageStates);
+        }
+      } catch (e) {
+      } finally {
+        trafficBusy = false;
+      }
+    }
+    function renderGraph(s) {
+      return;
+    }
+
+    async function run(force = false) {
+      if (!force) return;
+      liveRunId = "";
+      resetLiveRunState("Launching experiment...");
+      const res = await fetch("http://localhost:18082/api/run", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(currentScenarioId ? { experiment, scenario_id: currentScenarioId } : { experiment })
+      });
+      const data = await res.json();
+      if (data && data.run_id) {
+        currentScenarioId = String(data.scenario_id || currentScenarioId || "").trim();
+        setLiveRunId(data.run_id);
+        launchSuppressUntil = Date.now() + LAUNCH_SCREEN_EXTRA_SECONDS * 1000;
       }
       if (!res.ok) {
         out.textContent = "Run error: " + (data.error || "unknown");
       }
     }
 
-    async function poll() {
+    async function stopCurrentRun() {
+      if (!liveRunId) return;
+      if (!confirm("Stop this experiment run? The selected scenario will remain running.")) return;
+      
+      out.textContent = "Stopping run...";
+      sub.textContent = "Stopping";
+      stopBtn.disabled = true;
+      
       try {
-        const [s,p,r] = await Promise.all([
-          fetch("http://localhost:18082/api/state" + (liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "")).then(x=>x.json()),
-          fetch("http://localhost:18082/api/progress" + (liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "")).then(x=>x.json()),
-          fetch("http://localhost:18082/api/report/latest" + (liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "")).then(x=>x.json()).catch(()=>null)
-        ]);
-        let maxDone = -1;
-        (p.stages || []).forEach((st, i) => { if (st.done) maxDone = i; });
-        if (maxDone > maxDoneSeen) maxDoneSeen = maxDone;
-        paint(maxDoneSeen);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
+        
+        const res = await fetch(`http://localhost:18082/api/run/${encodeURIComponent(liveRunId)}/stop`, { 
+          method: "POST",
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          out.textContent = `Stop failed: ${data.error || "unknown error"}`;
+          sub.textContent = "Error";
+          stopBtn.disabled = false;
+          return;
+        }
+        
+        sub.textContent = "Idle";
+        out.textContent = "✓ Run stopped. Scenario remains available for new experiment runs. Now you can DELETE the run or REMOVE the scenario.";
+        deleteBtn.disabled = false;
+        removeScenarioBtn.disabled = false;
+      } catch (e) {
+        console.error("stopCurrentRun error:", e);
+        const status = await waitForRunStatus(liveRunId, ({ state }) => state && state.running === false, 12000, 1500);
+        if (status.ok) {
+          sub.textContent = "Idle";
+          out.textContent = "✓ Run stopped after delayed API response. Scenario remains available for new experiment runs.";
+          deleteBtn.disabled = false;
+          removeScenarioBtn.disabled = false;
+          return;
+        }
+        if (e && e.name === "AbortError") {
+          out.textContent = "Stop request is still being processed by the API. Wait a few seconds and retry only if the run still shows as running.";
+        } else {
+          out.textContent = `Stop error: ${e.message || "timeout or network error"}`;
+        }
+        sub.textContent = "Error";
+        stopBtn.disabled = false;
+      }
+    }
+
+    async function deleteCurrentRun() {
+      if (!liveRunId) return;
+      if (!confirm("Delete this experiment run? This removes its containers, logs and report artifacts.")) return;
+      
+      out.textContent = "Deleting run...";
+      sub.textContent = "Deleting";
+      deleteBtn.disabled = true;
+      
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 45000);
+        
+        const res = await fetch(`http://localhost:18082/api/run/${encodeURIComponent(liveRunId)}`, { 
+          method: "DELETE",
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          out.textContent = `Delete failed: ${data.error || "unknown error"}`;
+          sub.textContent = "Error";
+          deleteBtn.disabled = false;
+          return;
+        }
+        
+        setLiveRunId("");
+        latestReportId = "";
+        latestReportUrl = "";
+        latestTrafficPayload = null;
+        resetLiveRunState("✓ Run deleted. Waiting for a selected run...");
+        out.textContent = "✓ Run deleted and its artifacts were removed.";
+        sub.textContent = "Idle";
+      } catch (e) {
+        console.error("deleteCurrentRun error:", e);
+        const status = await waitForRunStatus(liveRunId, ({ state, history }) => {
+          if (state && state.__notFound) return true;
+          const runs = Array.isArray(history && history.runs) ? history.runs : [];
+          return !runs.some(r => r && String(r.run_id || "") === String(liveRunId));
+        }, 12000, 1500);
+        if (status.ok) {
+          setLiveRunId("");
+          latestReportId = "";
+          latestReportUrl = "";
+          latestTrafficPayload = null;
+          resetLiveRunState("✓ Run deleted. Waiting for a selected run...");
+          out.textContent = "✓ Run deleted after delayed API response.";
+          sub.textContent = "Idle";
+          return;
+        }
+        if (e && e.name === "AbortError") {
+          out.textContent = "Delete request timed out (it may still be processing). Retry in a few seconds.";
+        } else {
+          out.textContent = `Delete error: ${e.message || "timeout or network error"}`;
+        }
+        sub.textContent = "Error";
+        deleteBtn.disabled = false;
+      }
+    }
+
+    async function removeCurrentScenario() {
+      if (!currentScenarioId) {
+        out.textContent = "No persistent scenario linked to this run.";
+        return;
+      }
+      if (!confirm(`Remove scenario ${currentScenarioId}? This will remove containers and artifacts.`)) return;
+
+      const scenarioIdToDelete = String(currentScenarioId || "");
+      detachedFromRun = true;
+      if (pollTimerId) { clearInterval(pollTimerId); pollTimerId = null; }
+      if (trafficTimerId) { clearInterval(trafficTimerId); trafficTimerId = null; }
+      pollBusy = false;
+      trafficBusy = false;
+
+      out.textContent = "Removing scenario and run...";
+      sub.textContent = "Removing";
+      removeScenarioBtn.disabled = true;
+      if (stopBtn) stopBtn.disabled = true;
+      if (deleteBtn) deleteBtn.disabled = true;
+      
+      try {
+        // The scenario-delete endpoint already stops and cleans up every run
+        // bound to this scenario server-side (see delete_scenario's
+        // related_runs loop) — separately calling /api/run/.../stop and
+        // DELETE /api/run/... first was redundant and added up to ~42s of
+        // sequential timeout budget before the actual scenario deletion even
+        // started, which is most of what made this button feel slow.
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+        const res = await fetch(`http://localhost:18082/api/scenarios/${encodeURIComponent(scenarioIdToDelete)}`, {
+          method: "DELETE",
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          out.textContent = `Removal failed: ${data.error || "unknown error"}`;
+          sub.textContent = "Error";
+          removeScenarioBtn.disabled = false;
+          return;
+        }
+        
+        setLiveRunId("");
+        latestReportId = "";
+        latestReportUrl = "";
+        currentScenarioId = "";
+        sessionStorage.removeItem(sessionKey);
+        try { localStorage.removeItem(persistentRunKey); } catch (e) {}
+        resetLiveRunState("✓ Scenario removed. Returning to console...");
+        out.textContent = "✓ Scenario removed. Cleanup continues in the background.";
+        // The backend now responds as soon as the scenario is logically
+        // removed (catalog/history), before the slow Docker/Kafka/MISP/Neo4j
+        // cleanup runs in its own background thread — so there is no need to
+        // wait here beyond letting the DOM paint the confirmation message.
+        setTimeout(() => {
+          // This view is normally opened as a popup from experiments.html
+          // (window.opener set). Close the popup so focus returns to the
+          // console tab that is already open, instead of navigating this
+          // window in place. Fall back to same-tab navigation only if there
+          // is no opener (e.g. the user landed here directly / via bookmark).
+          if (window.opener && !window.opener.closed) {
+            try { window.opener.focus(); } catch (e) {}
+            window.close();
+            // Some browsers silently refuse window.close() on windows not
+            // scripted by the page itself; if we're still here shortly after,
+            // fall back to in-place navigation.
+            setTimeout(() => { window.location.replace("experiments.html"); }, 200);
+          } else {
+            window.location.replace("experiments.html");
+          }
+        }, 120);
+      } catch (e) {
+        console.error("removeCurrentScenario error:", e);
+        if (e && e.name === "AbortError") {
+          out.textContent = "Removal request timed out. Retry remove in a few seconds.";
+        } else {
+          out.textContent = `Removal error: ${e.message || "timeout or network error"}`;
+        }
+        sub.textContent = "Error";
+        detachedFromRun = false;
+        removeScenarioBtn.disabled = false;
+      }
+    }
+
+    async function waitForRunStatus(runId, predicate, timeoutMs = 10000, intervalMs = 1200) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        let state = null;
+        let history = null;
+        try {
+          state = await fetchJsonSafe("http://localhost:18082/api/state?run_id=" + encodeURIComponent(runId), 2500);
+        } catch (e) {}
+        try {
+          history = await fetchJsonSafe("http://localhost:18082/api/history", 2500);
+        } catch (e) {}
+        try {
+          if (predicate({ state, history })) {
+            return { ok: true, state, history };
+          }
+        } catch (e) {}
+        await sleep(intervalMs);
+      }
+      return { ok: false };
+    }
+
+    async function launchAnotherExperiment(nextExperiment) {
+      if (!currentScenarioId) {
+        out.textContent = "Select a persistent scenario first.";
+        return;
+      }
+      if (liveRunId && !confirm(`Launch ${nextExperiment.toUpperCase()} on scenario ${currentScenarioId}?`)) return;
+      try {
+        const res = await fetch("http://localhost:18082/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ experiment: nextExperiment, scenario_id: currentScenarioId })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          out.textContent = data.error || `Could not launch ${nextExperiment}.`;
+          return;
+        }
+        if (data.run_id) {
+          setLiveRunId(data.run_id);
+          launchSuppressUntil = Date.now() + LAUNCH_SCREEN_EXTRA_SECONDS * 1000;
+        }
+        latestReportId = "";
+        latestReportUrl = "";
+        latestTrafficPayload = null;
+        resetLiveRunState(`Launching ${nextExperiment.toUpperCase()} in scenario ${currentScenarioId}...`);
+      } catch (e) {
+        out.textContent = `Could not launch ${nextExperiment}.`;
+      }
+    }
+
+    async function poll(forceFull = false) {
+      if (detachedFromRun) return;
+      if (snapshotLocked && lockedRunId === String(liveRunId || "") && lockedState && lockedState.running === false) return;
+      if (pollBusy) return;
+      // Keep the "Launching..." screen up for a few extra seconds after launch,
+      // instead of fetching/rendering real state right away. The backend is
+      // still mid-setup then (container sync, benign-noise settle, stability
+      // gate), so the first real samples can look transient/wrong — this just
+      // avoids showing that in-between window at all.
+      if (Date.now() < launchSuppressUntil) return;
+      pollBusy = true;
+      try {
+        if (!liveRunId) {
+          const attached = await attachToCurrentRun();
+          if (!attached) {
+            out.textContent = "Waiting for a selected run...";
+            sub.textContent = "Idle";
+            return;
+          }
+        }
+        pollTick += 1;
+        const doFull = forceFull || (pollTick % FULL_STATE_EVERY === 0);
+        const query = liveRunId ? ("?run_id=" + encodeURIComponent(liveRunId)) : "";
+        const stateUrl = "http://localhost:18082/api/state" + query + (doFull ? "" : (query ? "&lite=1" : "?lite=1"));
+        let s = null;
+        let p = { stages: [] };
+        let r = null;
+        if (doFull) {
+          const [sRes,rRes] = await Promise.allSettled([
+            fetchJsonSafe(stateUrl),
+            fetchJsonSafe("http://localhost:18082/api/report/latest" + query)
+          ]);
+          s = sRes.status === "fulfilled" ? sRes.value : null;
+          p = { stages: [] };
+          r = rRes.status === "fulfilled" ? rRes.value : null;
+        } else {
+          const [sRes] = await Promise.allSettled([
+            fetchJsonSafe(stateUrl)
+          ]);
+          s = sRes.status === "fulfilled" ? sRes.value : null;
+          p = { stages: [] };
+        }
+        if (!s || s.__notFound) {
+          pollNotFoundStreak += 1;
+          // Only attach automatically when there is no selected run yet.
+          if (!liveRunId) {
+            const reattached = await attachToCurrentRun();
+            if (reattached) { pollNotFoundStreak = 0; return; }
+          }
+          // Tolerate transient failures (slow Docker, Neo4j locks, log reads) without spamming UI.
+          // Never auto-clear the run_id during execution; user must explicitly stop.
+          if (pollNotFoundStreak < RECONNECT_TOLERANCE) {
+            // Show reconnect message only after 3+ failures, update every 2-3 attempts
+            if (pollNotFoundStreak > 2 && (pollNotFoundStreak % 3) === 0) {
+              sub.textContent = `Reconnecting... (attempt ${pollNotFoundStreak}/${RECONNECT_TOLERANCE})`;
+            }
+            return;
+          }
+          // Only clear if user explicitly stopped or if the run never existed
+          if (!liveRunId) {
+            resetLiveRunState("Waiting for a selected run...");
+            return;
+          }
+          // Still have a run ID but cannot reach it after 10 attempts
+          // Show error but keep the run ID visible (user can manually clear if needed)
+          out.textContent = "Lost connection to run " + liveRunId + ". Check if API/Docker is still responsive.";
+          sub.textContent = "Connection lost";
+          return;
+        }
+        // Successful state read – reset the failure streak.
+        pollNotFoundStreak = 0;
+        if (doFull && s && s.report_panel && Object.keys(s.report_panel).length) {
+          latestFullState = s;
+        } else if ((!s.report_panel || !Object.keys(s.report_panel).length) && latestFullState) {
+          s = {
+            ...latestFullState,
+            ...s,
+            summary: s.summary || latestFullState.summary,
+            report_panel: latestFullState.report_panel || {},
+            scenario: s.scenario || latestFullState.scenario,
+            traffic_panel: latestFullState.traffic_panel || s.traffic_panel,
+          };
+        }
+        const runCompletedWithReport = Boolean(s.last_report_id || (r && r.ok));
+        const allowStagePromotion = Boolean(s.running || runCompletedWithReport);
+        if (Array.isArray(p.stages) && p.stages.length) {
+          // Prevent false green flood after manual stop: if run is stopped and there is
+          // no final report yet, keep the last known stage snapshot and do not promote.
+          if (allowStagePromotion) {
+            latestStageStates = p.stages.map(st => Boolean(st && st.done));
+          }
+        }
+        while (latestStageStates.length < stages.length) latestStageStates.push(false);
+        const livePanel = s.report_panel || {};
+        const liveTapcd = livePanel.tapcd || {};
+        const liveMisp = livePanel.misp || {};
+        const liveCm = livePanel.countermeasure || {};
+        const liveMarkers = (latestTrafficPayload && latestTrafficPayload.markers) || ((s.traffic_panel || {}).markers || {});
+        const summaryDetect = String((s.summary && s.summary.detection_method) || "").trim().toLowerCase();
+        const summaryDetectReady = Boolean(summaryDetect && summaryDetect !== "-" && !summaryDetect.includes("pending"));
+        if (liveMarkers.detection_at || summaryDetectReady) {
+          latestStageStates[1] = true;
+        }
+        if (allowStagePromotion) {
+          if (latestStageStates[1] && (Number(liveTapcd.actor_profile_count || liveTapcd.profile_details_extracted || 0) > 0 || liveTapcd.native_profile_ready)) {
+            latestStageStates[2] = true;
+          }
+          if (latestStageStates[2] && ((liveMisp.event_ids_detected_in_logs || []).length > 0 || Number(liveMisp.event_details_extracted || 0) > 0)) {
+            latestStageStates[3] = true;
+          }
+          const cmSelectedNow = String(liveCm.selected || "").trim();
+          const soarcaExcerptNow = String(liveCm.soarca_excerpt || "");
+          const decideEvidence = ["d3fend", "selected", "countermeasure", "playbook"].some(k => normalizeText(soarcaExcerptNow).includes(k));
+          if (latestStageStates[3] && cmSelectedNow && !["-", "Pending / no decision yet"].includes(cmSelectedNow) && decideEvidence) {
+            latestStageStates[4] = true;
+          }
+          if (
+            latestStageStates[4] &&
+            (
+              (latestTrafficPayload && latestTrafficPayload.markers && latestTrafficPayload.markers.countermeasure_at) ||
+              hasExecutionEvidence(soarcaExcerptNow)
+            )
+          ) {
+            latestStageStates[5] = true;
+          }
+        }
+        paint(latestStageStates);
+        const liveCountermeasureReady = Boolean(
+          s.report_panel &&
+          s.report_panel.countermeasure &&
+          String(s.report_panel.countermeasure.selected || "").trim() &&
+          !["-", "Pending / no decision yet"].includes(String(s.report_panel.countermeasure.selected || "").trim())
+        );
+        latestCountermeasureEvidence = hasExecutionEvidence(String(liveCm.soarca_excerpt || "")) || Boolean(liveMarkers.countermeasure_at);
+        const countermeasureVisible = hasConcreteCountermeasure(s) || liveCountermeasureReady || latestCountermeasureEvidence || Boolean(latestStageStates[5]);
+        latestCountermeasureVisible = countermeasureVisible;
+        const reportReady = Boolean(s.last_report_id || latestReportId || (r && r.ok) || liveCountermeasureReady);
+        if (stopBtn) stopBtn.disabled = !Boolean(liveRunId && s.running);
+        if (deleteBtn) deleteBtn.disabled = !Boolean(liveRunId);
+        currentScenarioId = String((s.scenario && s.scenario.scenario_id) || currentScenarioId || "").trim();
+        if (removeScenarioBtn) removeScenarioBtn.disabled = !Boolean(currentScenarioId);
+        if (runExp1Btn) runExp1Btn.disabled = !Boolean(currentScenarioId);
+        if (runExp2Btn) runExp2Btn.disabled = !Boolean(currentScenarioId);
+        if (runExp3Btn) runExp3Btn.disabled = !Boolean(currentScenarioId);
+        if (reportBtn) reportBtn.disabled = !reportReady;
         sub.textContent = s.running ? "Running..." : "Idle";
+        if (s.last_started_at && Number(s.last_started_at) !== Number(lastKnownStartedAt || 0)) {
+          lastKnownStartedAt = Number(s.last_started_at);
+          setGrafanaFrames(lastKnownStartedAt);
+        }
         const lines = [
           "Experiment: " + (s.last_experiment || "-"),
           "Running: " + (s.running ? "yes" : "no"),
           "Return code: " + (s.last_return_code ?? "-"),
           ""
         ];
+        const stageLabels = ["Observe", "Detect", "Profile", "Enrich", "Decide", "Act"];
+        lines.push("Stage completion:");
+        stageLabels.forEach((label, idx) => {
+          lines.push(`  ${label}: ${latestStageStates[idx] ? "done" : "pending"}`);
+        });
+        lines.push("");
+        // Phase timings — only once the full OODA cycle has completed (all six
+        // stages done), so this never shows partial/misleading durations for a
+        // run still in progress.
+        const cycleComplete = latestStageStates.every(Boolean);
+        if (cycleComplete) {
+          const pm = (latestTrafficPayload && latestTrafficPayload.markers) || {};
+          // Durations in MILLISECONDS. Timestamps (pm.*) are epoch seconds, so
+          // multiply the second-difference by 1000.
+          const fmtMs = (fromTs, toTs) => {
+            if (!fromTs || !toTs || toTs < fromTs) return "-";
+            return `${Math.round((toTs - fromTs) * 1000)} ms`;
+          };
+          // Sorted by actual timestamp, not a fixed conceptual OODA order —
+          // SOARCA does not always run Enrich strictly before Decide (e.g.
+          // MISP enrichment can complete slightly after the isolation
+          // playbook fires), so assuming a fixed sequence produced a
+          // nonsensical negative step for whichever phase actually landed out
+          // of the assumed order.
+          const phaseSeq = [
+            ["Observe", pm.observe_at],
+            ["Detect", pm.detection_at],
+            ["Profile", pm.profile_at],
+            ["Enrich", pm.enrich_at],
+            ["Decide", pm.decide_at],
+            ["Act", pm.countermeasure_at],
+          ]
+            .filter(([, ts]) => Boolean(ts))
+            .sort((a, b) => a[1] - b[1]);
+          lines.push("Phase timings:");
+          // Every phase is measured FROM ATTACK START. The "(+…)" is the step
+          // from the previous phase (also in ms).
+          const cycleAnchor = pm.attack_started_at || pm.started_at || null;
+          let prevTs = cycleAnchor;
+          phaseSeq.forEach(([label, ts]) => {
+            const stepDur = fmtMs(prevTs, ts);
+            lines.push(`  ${label}: ${fmtMs(cycleAnchor, ts)} after attack start (+${stepDur})`);
+            prevTs = ts;
+          });
+          const cycleEnd = pm.countermeasure_at || pm.finished_at || null;
+          const cycleStart = pm.attack_started_at || pm.started_at || null;
+          lines.push("  Full cycle (attack → countermeasure): " + fmtMs(cycleStart, cycleEnd));
+          lines.push("");
+        }
         if (s.summary) {
-          lines.push("Observation scope: " + (s.summary.observation_scope || "-"));
-          lines.push("Detection method: " + (s.summary.detection_method || "-"));
-          lines.push("Generated profile: " + (s.summary.tapcd_profile || "-"));
-          lines.push("Applied countermeasure: " + (s.summary.countermeasure || "-"));
+          const observationScope = s.summary.observation_scope || "-";
+          const attackHasStarted = Boolean(
+            (latestTrafficPayload && latestTrafficPayload.markers && latestTrafficPayload.markers.attack_started_at) ||
+            s.last_attack_started_at
+          );
+          const summaryDetection = s.summary.detection_method || "";
+          const summaryProfile = s.summary.tapcd_profile || "";
+          const summaryCountermeasure = s.summary.countermeasure || "";
+          if (!latchedNarrative.detectionMethod && attackHasStarted && latestStageStates[1]) {
+            latchedNarrative.detectionMethod = isPendingLabel(summaryDetection)
+              ? "Evidence-based detection confirmed"
+              : summaryDetection;
+          }
+          if (!latchedNarrative.generatedProfile && latestStageStates[2]) {
+            latchedNarrative.generatedProfile = isPendingLabel(summaryProfile)
+              ? "TAPCD profile evidence confirmed"
+              : summaryProfile;
+          }
+          if (!latchedNarrative.appliedCountermeasure && latestStageStates[5]) {
+            latchedNarrative.appliedCountermeasure = isPendingLabel(summaryCountermeasure)
+              ? (String(liveCm.selected || "").trim() || "Countermeasure execution evidence confirmed")
+              : summaryCountermeasure;
+          }
+          const detectionMethod = latchedNarrative.detectionMethod || "Pending / no clear detector evidence yet";
+          const generatedProfile = latchedNarrative.generatedProfile || "Pending / no native TAPCD profile evidence yet";
+          const appliedCountermeasure = latchedNarrative.appliedCountermeasure || "Pending / no decision yet";
+          lines.push("Observation scope: " + observationScope);
+          lines.push("Detection method: " + detectionMethod);
+          lines.push("Generated profile: " + generatedProfile);
+          lines.push("Applied countermeasure: " + appliedCountermeasure);
+          lines.push("");
+        }
+        if (s.scenario) {
+          const scenarioVictim = s.scenario.victim_container_name || "-";
+          const scenarioAttacker = s.scenario.attacker_container_name || "-";
+          const scenarioNetwork = s.scenario.network || "-";
+          lines.push("Scenario containers:");
+          lines.push("  Victim: " + scenarioVictim);
+          lines.push("  Attacker: " + scenarioAttacker);
+          lines.push("  Network: " + scenarioNetwork);
           lines.push("");
         }
         if (s.report_panel) {
           const m = s.report_panel.misp || {};
           const t = s.report_panel.tapcd || {};
-          const mispIds = (m.event_ids_detected_in_logs || []).join(", ") || "none";
-          lines.push("## MISP");
-          lines.push("- Event IDs detected in logs: `" + mispIds + "`");
-          lines.push("- Event signal count: `" + (m.event_signal_count ?? 0) + "`");
-          lines.push("- Event details extracted: `" + (m.event_details_extracted ?? 0) + "`");
-          lines.push("## TAPCD");
-          lines.push("- Profile mentions: `" + (t.profile_mentions ?? 0) + "`");
-          lines.push("- Attacker mentions: `" + (t.attacker_mentions ?? 0) + "`");
-          lines.push("- Incident mentions: `" + (t.incident_mentions ?? 0) + "`");
-          lines.push("- Profile details extracted: `" + (t.profile_details_extracted ?? 0) + "`");
-          lines.push("- Actor profiles from Neo4j: `" + (t.actor_profile_count ?? 0) + "`");
-          lines.push("");
-          lines.push("## MISP Object (full)");
-          lines.push("```json");
-          lines.push(JSON.stringify(m.event_object || {}, null, 2));
-          lines.push("```");
-          lines.push("");
-          lines.push("## TAPCD Profile Object (full)");
-          lines.push("```json");
-          lines.push(JSON.stringify(t.profile_object || { actors: t.actor_profiles || [] }, null, 2));
-          lines.push("```");
-          lines.push("");
+          const actorCount = Number(t.actor_profile_count || (t.actor_profiles || []).length || 0);
+          const profileEvidenceCount = Number((t.profile_detail_lines || []).length || 0);
+          const tapActors = (t.actor_profiles || (t.profile_object || {}).actors || []);
+          const leadActor = tapActors.length ? tapActors[0] : {};
+          const mispEvent = (m.event_object || {}).event || {};
+          const mispAttrs = (m.event_object || {}).attributes || [];
+          if (latestStageStates[2] && (actorCount > 0 || profileEvidenceCount > 0 || t.native_profile_ready)) {
+            lines.push("TAPCD profile summary:");
+            lines.push("  Actors linked: " + actorCount);
+            lines.push("  Native profile ready: " + (t.native_profile_ready ? "yes" : "no"));
+            if (leadActor && Object.keys(leadActor).length) {
+              const _la = (k) => leadActor[k] && String(leadActor[k]).trim() && String(leadActor[k]).trim() !== "-" ? String(leadActor[k]).trim() : null;
+              const _push = (label, val) => { if (val) lines.push("  " + label + ": " + val); };
+              _push("Primary profile",  _la("profile"));
+              _push("Motivation",       _la("motivation"));
+              _push("Knowledge",        _la("knowledge"));
+              _push("Skills",           _la("skills"));
+              _push("Attitude",         _la("attitude"));
+              _push("Affiliation",      _la("affiliation"));
+              _push("Risk level",       _la("riskLevel"));
+              _push("Automation level", _la("automationLevel"));
+              _push("Source IPs",       (leadActor.source_ips || []).join(", ") || null);
+              _push("Target",           _la("target") || _la("preferred_target"));
+              _push("Country",          _la("country"));
+              _push("Threat group",     _la("threat_group"));
+              _push("Kill chain",       _la("killChainPhase"));
+              const _techs = Array.isArray(leadActor.techniques) ? leadActor.techniques.join("; ") : _la("techniques");
+              _push("TTPs",             _techs);
+              _push("Tools",            _la("tools"));
+              _push("Evasion",          _la("evasion"));
+              _push("Detection attack", _la("detection_attack"));
+              _push("Detection stage",  _la("detection_stage"));
+              _push("First seen",       _la("firstSeen"));
+              _push("Last activity",    _la("lastActivity"));
+            }
+            lines.push("");
+          }
+          if (latestStageStates[3] && Object.keys(m.event_object || {}).length) {
+            lines.push("MISP event summary:");
+            lines.push("  Event ID: " + (mispEvent.id || "-"));
+            lines.push("  Date: " + (mispEvent.date || "-"));
+            lines.push("  Attributes: " + (Array.isArray(mispAttrs) ? mispAttrs.length : 0));
+            const info = String(mispEvent.info || "-");
+            lines.push("  Info: " + (info.length > 180 ? (info.slice(0, 177) + "...") : info));
+            lines.push("");
+            lines.push("Tip: use MISP/TAPCD log buttons for full raw objects.");
+            lines.push("");
+          }
         }
         lines.push(s.last_output || "");
-        out.textContent = lines.join("\n");
-        renderGraph(s);
+        const nextOut = lines.join("\n");
+        if (nextOut !== lastOutText) {
+          out.textContent = nextOut;
+          lastOutText = nextOut;
+        }
+        renderIntelSummary(s);
+        // Never go backwards: only replace latestTrafficPayload with s.traffic_panel
+        // if the state payload has strictly MORE series points (e.g. an on-demand sample
+        // fired during the state fetch). Otherwise keep the freshest data from pollTraffic().
+        const stateSeriesLen = ((s.traffic_panel || {}).series || []).length;
+        const liveSeriesLen = ((latestTrafficPayload || {}).series || []).length;
+        if (stateSeriesLen > liveSeriesLen) {
+          latestTrafficPayload = s.traffic_panel;
+        }
+        const trafficPayload = latestTrafficPayload;
+        if (trafficPayload) {
+          renderTrafficChart(trafficPayload, canShowCountermeasure(), s);
+          renderHostChart(trafficPayload);
+          renderFalcoChart(trafficPayload);
+          if ((trafficPayload.series || []).length > 0) {
+            if (allowStagePromotion || latestStageStates[0]) latestStageStates[0] = true;
+            paint(latestStageStates);
+            if (!s.last_experiment || s.last_experiment === "-") {
+              sub.textContent = "Running...";
+            }
+          }
+        }
+        if (!snapshotLocked && shouldLockSnapshot(s, latestStageStates, trafficPayload)) {
+          lockSnapshot(s, trafficPayload);
+        }
         if (r && r.ok) {
           latestReportId = r.report_id || "";
           latestReportUrl = "http://localhost:18082" + r.download_url;
@@ -200,37 +2191,65 @@
           latestReportId = s.last_report_id || "";
           latestReportUrl = latestReportId ? `http://localhost:18082/api/report/download/${encodeURIComponent(latestReportId)}` : "";
         }
-      } catch (e) {}
+        const finalReady = Boolean(latestReportUrl && latestReportId) || countermeasureVisible || reportReady;
+        if (reportBtn) reportBtn.disabled = !finalReady;
+      } catch (e) {
+      } finally {
+        pollBusy = false;
+      }
     }
 
     reportBtn.addEventListener("click", () => {
-      if (!latestReportUrl) {
-        out.textContent = "Report not available yet. Run an experiment and wait until it finishes.";
-        return;
-      }
-      window.open(latestReportUrl, "_blank", "noopener,noreferrer");
+      fetch(`http://localhost:18082/api/report/latest?run_id=${encodeURIComponent(liveRunId || "")}`, { cache: "no-store" })
+        .then(res => res.json())
+        .then(data => {
+          if (data && data.ok && data.download_url) {
+            latestReportId = data.report_id || latestReportId;
+            latestReportUrl = `http://localhost:18082${data.download_url}`;
+            if (reportBtn) reportBtn.disabled = false;
+            window.open(latestReportUrl, "_blank", "noopener,noreferrer");
+          } else if (latestReportUrl) {
+            window.open(latestReportUrl, "_blank", "noopener,noreferrer");
+          } else {
+            out.textContent = "Report not available yet. Wait until the countermeasure is executed.";
+          }
+        })
+        .catch(() => {
+          if (latestReportUrl) {
+            window.open(latestReportUrl, "_blank", "noopener,noreferrer");
+          } else {
+            out.textContent = "Report not available yet. Wait until the countermeasure is executed.";
+          }
+        });
     });
+    if (stopBtn) stopBtn.addEventListener("click", stopCurrentRun);
+    if (deleteBtn) deleteBtn.addEventListener("click", deleteCurrentRun);
+    if (removeScenarioBtn) removeScenarioBtn.addEventListener("click", removeCurrentScenario);
+    if (runExp1Btn) runExp1Btn.addEventListener("click", () => launchAnotherExperiment("exp1"));
+    if (runExp2Btn) runExp2Btn.addEventListener("click", () => launchAnotherExperiment("exp2"));
+    if (runExp3Btn) runExp3Btn.addEventListener("click", () => launchAnotherExperiment("exp3"));
 
-    mispLogBtn.addEventListener("click", () => {
-      if (!latestReportId) {
-        out.textContent = "MISP log not available yet. Wait for report generation.";
-        return;
-      }
-      window.open(`http://localhost:18082/api/report/log/${encodeURIComponent(latestReportId)}/misp_full.log`, "_blank", "noopener,noreferrer");
-    });
+    function startLiveLoops() {
+      poll(true);
+      pollTraffic();
+      if (lastKnownStartedAt) setGrafanaFrames(lastKnownStartedAt);
+      if (!pollTimerId) pollTimerId = setInterval(() => poll(false), POLL_INTERVAL_MS);
+      if (!trafficTimerId) trafficTimerId = setInterval(pollTraffic, TRAFFIC_INTERVAL_MS);
+    }
 
-    tapcdLogBtn.addEventListener("click", () => {
-      if (!latestReportId) {
-        out.textContent = "TAPCD log not available yet. Wait for report generation.";
-        return;
-      }
-      window.open(`http://localhost:18082/api/report/log/${encodeURIComponent(latestReportId)}/tapcd_full.log`, "_blank", "noopener,noreferrer");
-    });
-
-    run().then(() => {
-      poll();
-      setInterval(poll, 2500);
-    });
+    if (liveRunId) {
+      startLiveLoops();
+    } else if (start) {
+      out.textContent = "Launching experiment...";
+      sub.textContent = "Starting...";
+      run(true).then(() => {
+        startLiveLoops();
+      });
+    } else {
+      out.textContent = "Waiting for a selected run...";
+      sub.textContent = "Idle";
+      startLiveLoops();
+    }
   </script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 1s
+  evaluation_interval: 1s
 
 scrape_configs:
 
@@ -9,24 +9,64 @@ scrape_configs:
     metrics_path: /metrics
     http_sd_configs:
       - url: http://discovery-agent:8000/sd  #Endpoint to discover the IPs that exoses their metrics using an endpoint with device_info container
-        refresh_interval: 30s
+        refresh_interval: 1s
+
+  # NOVADEF live experiment exporter — GUI/Grafana consume the same run-scoped metrics
+  - job_name: 'novadef_live'
+    metrics_path: /metrics
+    scrape_interval: 1s
+    scrape_timeout: 1s
+    static_configs:
+      - targets: ['novadef-experiments-api:18082']
+        labels:
+          module: 'novadef_live'
 
   # Telegraf — métricas de host en tiempo real (CPU, RAM, disco, internet)
   # Expone prometheus_client en puerto 9273
   - job_name: 'telegraf'
     metrics_path: /metrics
-    scrape_interval: 15s
+    scrape_interval: 5s
+    scrape_timeout: 5s
     static_configs:
       - targets: ['telegraf_novadef:9273']
         labels:
           module: 'telegraf'
 
+  # Scenario Telegraf endpoints — one job per container.
+  # Each container runs Telegraf with [[inputs.cgroup]] and a unique machine_id
+  # global tag. Differentiate in Grafana with: {machine_id="scenario_victim"} etc.
+  # To add a benign container, copy the victim block and change container_name and
+  # machine_id to match the new container's telegraf.conf.
+  - job_name: 'scenario_victim_telegraf'
+    metrics_path: /metrics
+    scrape_interval: 1s
+    scrape_timeout: 1s
+    static_configs:
+      - targets: ['scenario_victim:9274']
+        labels:
+          module: 'scenario_victim_telegraf'
+          machine_id: 'scenario_victim'
+
+  # Benign host template — uncomment and duplicate for each benign container.
+  # The container must have Telegraf running with machine_id = "<name>" and
+  # the same [[inputs.cgroup]] config as the victim.
+  #
+  # - job_name: 'scenario_benign1_telegraf'
+  #   metrics_path: /metrics
+  #   scrape_interval: 1s
+  #   scrape_timeout: 1s
+  #   static_configs:
+  #     - targets: ['scenario_benign1:9274']
+  #       labels:
+  #         module: 'scenario_benign1_telegraf'
+  #         machine_id: 'scenario_benign1'
+
   # Fluentd — métricas de recolección de logs
   - job_name: 'fluentd'
     metrics_path: /metrics
-    scrape_interval: 30s
+    scrape_interval: 5s
+    scrape_timeout: 5s
     static_configs:
       - targets: ['fluentd_novadef:24231']
         labels:
           module: 'fluentd'
-

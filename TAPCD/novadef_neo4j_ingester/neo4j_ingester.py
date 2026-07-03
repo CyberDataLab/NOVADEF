@@ -20,6 +20,19 @@ import argparse, csv, io, logging, re, signal, sys, time
 import os
 from typing import Dict, List, Optional
 
+_ACTIVE_SCENARIO_FILE = "/app/state/active_scenario.txt"
+
+
+def _read_active_scenario() -> str:
+    """Return active scenario_id from state file or env var fallback."""
+    try:
+        val = open(_ACTIVE_SCENARIO_FILE).read().strip()
+        if val:
+            return val
+    except Exception:
+        pass
+    return os.getenv("NOVADEF_SCENARIO_ID", "default")
+
 from kafka import KafkaConsumer
 from neo4j import GraphDatabase
 
@@ -129,18 +142,20 @@ def apply_schema_if_needed(driver, schema_path: str, force: bool = False):
 # ─────────── Upsert en Neo4j para cada fila de profiles_out ───────────
 CYPHER_UPSERT = """
 MERGE (a:Actor {id: $Id})
-SET a.firstSeen = $FirstSeen,
+SET a.firstSeen    = coalesce(a.firstSeen, $FirstSeen),
     a.lastActivity = $LastActivity,
-    a.country = $Country,
-    a.automationLevel = $AutomationLevel,
-    a.riskLevel = $RiskLevel,
-    a.profile = $Profile,
-    a.motivation = $Motivation,
-    a.knowledge = $Knowledge,
-    a.attitude = $Attitude,
-    a.affiliation = $Affiliation,
-    a.skills = $Skills,
-    a.comments = $Comments
+    a.scenarioId   = $ScenarioId,
+    a.campaignId   = coalesce(a.campaignId, $CampaignId),
+    a.country      = coalesce(a.country, $Country),
+    a.automationLevel = coalesce(a.automationLevel, $AutomationLevel),
+    a.riskLevel    = CASE WHEN (a.riskLevel IS NULL OR a.riskLevel = '') AND ($RiskLevel IS NOT NULL AND $RiskLevel <> '') THEN $RiskLevel ELSE coalesce(a.riskLevel, $RiskLevel) END,
+    a.profile      = CASE WHEN (a.profile IS NULL OR a.profile = '') AND ($Profile IS NOT NULL AND $Profile <> '') THEN $Profile ELSE coalesce(a.profile, $Profile) END,
+    a.motivation   = CASE WHEN (a.motivation IS NULL OR a.motivation = '') AND ($Motivation IS NOT NULL AND $Motivation <> '') THEN $Motivation ELSE coalesce(a.motivation, $Motivation) END,
+    a.knowledge    = CASE WHEN (a.knowledge IS NULL OR a.knowledge = '') AND ($Knowledge IS NOT NULL AND $Knowledge <> '') THEN $Knowledge ELSE coalesce(a.knowledge, $Knowledge) END,
+    a.attitude     = CASE WHEN (a.attitude IS NULL OR a.attitude = '') AND ($Attitude IS NOT NULL AND $Attitude <> '') THEN $Attitude ELSE coalesce(a.attitude, $Attitude) END,
+    a.affiliation  = CASE WHEN (a.affiliation IS NULL OR a.affiliation = '') AND ($Affiliation IS NOT NULL AND $Affiliation <> '') THEN $Affiliation ELSE coalesce(a.affiliation, $Affiliation) END,
+    a.skills       = CASE WHEN (a.skills IS NULL OR a.skills = '') AND ($Skills IS NOT NULL AND $Skills <> '') THEN $Skills ELSE coalesce(a.skills, $Skills) END,
+    a.comments     = coalesce(a.comments, $Comments)
 WITH a, $Target AS target, $PreferredTarget AS preferred,
      $TTPs AS ttps, $Evasions AS evasions, $Phases AS phases,
      $IPs AS src_ips, $SourceIdentity AS src_identity
@@ -174,10 +189,12 @@ FOREACH (ph IN phases |
 )
 """
 
-def build_params(row: Dict[str, str]) -> Dict[str, object]:
+def build_params(row: Dict[str, str], scenario_id: str = "default") -> Dict[str, object]:
     """Mapea campos CSV a parámetros para Cypher; listas normalizadas."""
     return {
         "Id": row.get("Id") or row.get("id") or "",
+        "ScenarioId": scenario_id,
+        "CampaignId": row.get("CampaignId") or row.get("campaign_id") or "",
         "FirstSeen": row.get("FirstSeen"),
         "LastActivity": row.get("LastActivity"),
         "Country": row.get("Country"),
@@ -247,12 +264,27 @@ def consume_and_write(bootstrap: str, topic: str, uri: str, user: str, pwd: str,
         driver.close()
         raise
 
+    # Record startup time (ms). Profiles produced before this moment are stale
+    # backlog from a previous run/scenario. Without this guard, after a scenario
+    # delete purges Neo4j, any lingering profile in profiles_out gets re-upserted,
+    # resurrecting old actors. A 10-min grace absorbs clock skew.
+    # Configurable via NEO4J_INGESTER_STARTUP_GRACE_SECS (0 disables the guard).
+    _startup_cutoff_ms = int(time.time() * 1000)
+    _startup_grace_ms = int(float(os.getenv("NEO4J_INGESTER_STARTUP_GRACE_SECS", "600")) * 1000)
+    _msg_cutoff_ms = _startup_cutoff_ms - _startup_grace_ms
+
     try:
         with driver.session() as session:
             for msg in consumer:
                 if STOP:
                     break
                 try:
+                    # Skip Kafka messages produced before this process started.
+                    _msg_ts = getattr(msg, "timestamp", None)
+                    if _startup_grace_ms >= 0 and _msg_ts and _msg_ts < _msg_cutoff_ms:
+                        LOG.info("⏭️ Ignorado (perfil anterior al arranque)")
+                        continue
+
                     raw = robust_decode(msg.value)
 
                     # 📥 recibido + ✉️ mensaje (payload completo)
@@ -265,7 +297,7 @@ def consume_and_write(bootstrap: str, topic: str, uri: str, user: str, pwd: str,
                         continue
                     LOG.info("🧮 Parseado")
 
-                    params = build_params(row)
+                    params = build_params(row, scenario_id=_read_active_scenario())
                     if not params["Id"] or not params["Target"]:
                         LOG.info("⚠️ Ignorado")
                         continue

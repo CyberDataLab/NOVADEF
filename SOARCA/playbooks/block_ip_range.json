@@ -1,0 +1,95 @@
+{
+    "type": "playbook",
+    "spec_version": "cacao-2.0",
+    "id": "playbook--9c7d4e5f-a1b2-4d3c-8e9a-b2c3d4e5f6a7",
+    "name": "Block IP Range via iptables",
+    "description": "Block a range of attacker IPs (e.g., 172.18.0.10-210) detected by PMP on the victim firewall via SSH. Single command blocks all IPs in the range.",
+    "playbook_types": ["mitigation"],
+    "created_by": "identity--1c5995c2-27b8-4371-a69d-6556cd689183",
+    "created": "2026-06-15T00:00:00.000Z",
+    "modified": "2026-06-15T00:00:00.000Z",
+    "valid_from": "2026-06-15T00:00:00.000Z",
+    "valid_until": "2030-06-15T00:00:00.000Z",
+    "revoked": false,
+    "priority": 1,
+    "severity": 90,
+    "impact": 100,
+    "labels": [
+        "mitigation",
+        "firewall",
+        "pmp",
+        "distributed-attack"
+    ],
+    "playbook_variables": {
+        "__ip_range_start__": {
+            "type": "ipv4-addr",
+            "name": "__ip_range_start__",
+            "description": "Start IP of the range to block (e.g., 172.18.0.10).",
+            "value": "172.18.0.10",
+            "constant": false,
+            "external": true
+        },
+        "__ip_range_end__": {
+            "type": "ipv4-addr",
+            "name": "__ip_range_end__",
+            "description": "End IP of the range to block (e.g., 172.18.0.210).",
+            "value": "172.18.0.210",
+            "constant": false,
+            "external": true
+        }
+    },
+    "workflow_start": "start--5fda562d-1df9-4a94-b286-03db80c83af3",
+    "workflow": {
+        "start--5fda562d-1df9-4a94-b286-03db80c83af3": {
+            "type": "start",
+            "name": "Start Playbook",
+            "on_completion": "action--286b9b45-5414-4597-8420-69292364dd5b"
+        },
+        "action--286b9b45-5414-4597-8420-69292364dd5b": {
+            "type": "action",
+            "name": "Block attacker IP range via iptables",
+            "description": "Uses SSH to run iptables on the victim and drop all traffic from the attacker IP range using -m iprange for efficiency.",
+            "commands": [
+                {
+                    "type": "ssh",
+                    "command": "sudo -n sh -lc 'printf \"#!/bin/sh\\nsleep 2\\niptables -C INPUT -m iprange --src-range __ip_range_start__:value-__ip_range_end__:value -j DROP 2>/dev/null || iptables -A INPUT -m iprange --src-range __ip_range_start__:value-__ip_range_end__:value -j DROP\\niptables -C OUTPUT -m iprange --dst-range __ip_range_start__:value-__ip_range_end__:value -j DROP 2>/dev/null || iptables -A OUTPUT -m iprange --dst-range __ip_range_start__:value-__ip_range_end__:value -j DROP\\n\" > /tmp/_block_range.sh && chmod +x /tmp/_block_range.sh && setsid sh /tmp/_block_range.sh </dev/null >/dev/null 2>&1 & echo novadef_countermeasure_applied'"
+                }
+            ],
+            "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",
+            "targets": [
+                "linux--daea220d-6e61-4210-8794-fe3a99fac6b9"
+            ],
+            "on_completion": "end--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"
+        },
+        "end--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78": {
+            "type": "end",
+            "name": "End Playbook"
+        }
+    },
+    "agent_definitions": {
+        "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74": {
+            "type": "soarca",
+            "name": "soarca-ssh"
+        }
+    },
+    "target_definitions": {
+        "linux--daea220d-6e61-4210-8794-fe3a99fac6b9": {
+            "type": "linux",
+            "name": "scenario_victim",
+            "description": "Victim machine where iptables will be applied.",
+            "address": {
+                "ipv4": ["172.18.0.3"]
+            },
+            "port": "2222",
+            "authentication_info": "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"
+        }
+    },
+    "authentication_info_definitions": {
+        "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78": {
+            "type": "user-auth",
+            "name": "victim-ssh-credentials",
+            "username": "novadef",
+            "password": "novadef_password"
+        }
+    }
+}

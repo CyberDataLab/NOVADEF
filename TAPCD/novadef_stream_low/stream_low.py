@@ -45,6 +45,7 @@ LIST_DELIM = ";"
 
 EXPECTED_COLS = [
     "id",
+    "campaign_id",
     "threat_type",
     "threat",
     "attack",
@@ -189,11 +190,19 @@ def sdiv(num, den):
     return res
 
 def parse_alert_timestamp(ts_str: str) -> pd.Timestamp:
-    """Input 'MM/DD-HH:MM:SS.micro' sin año → añade año actual."""
-    ts = datetime.strptime(ts_str, "%m/%d-%H:%M:%S.%f")
-    now = datetime.now()
-    ts = ts.replace(year=now.year)
-    return pd.Timestamp(ts)
+    """Input 'MM/DD-HH:MM:SS.micro' sin año → añade año actual. Fallback a now() si formato incorrecto."""
+    if not ts_str:
+        return pd.Timestamp.now()
+    try:
+        ts = datetime.strptime(ts_str, "%m/%d-%H:%M:%S.%f")
+        now = datetime.now()
+        ts = ts.replace(year=now.year)
+        return pd.Timestamp(ts)
+    except ValueError:
+        try:
+            return pd.Timestamp(ts_str)
+        except Exception:
+            return pd.Timestamp.now()
 
 def parse_attack_from_msg(msg: str) -> Tuple[str, str, str, str]:
     """Deriva attack y threat_type desde msg (heurística simple)."""
@@ -488,12 +497,18 @@ def conditional_grouping(df: pd.DataFrame) -> pd.DataFrame:
     attack_s = df["attack"].astype("string").fillna("")
     src_s = df.get("src_ip", pd.Series([pd.NA] * len(df))).astype("string")
     dst_s = df.get("dst_ip", pd.Series([pd.NA] * len(df))).astype("string")
-    cond_ip = np.where(attack_s.str.contains(r"DoS|DDoS|APT", case=False, regex=True), dst_s, src_s)
+    # Group by victim (dst_ip) for both volumetric and coordinated credential
+    # attacks so all participating source IPs land in a single profile.
+    cond_ip = np.where(
+        attack_s.str.contains(r"DoS|DDoS|APT|Brute Force|Credential|Password", case=False, regex=True),
+        dst_s,
+        src_s,
+    )
 
     df = df.copy()
     df["cond_ip"] = cond_ip
 
-    v = compute_view(df, ["cond_ip", "attack", "threat_type", "threat", "stage"])
+    v = compute_view(df, ["cond_ip", "campaign_id", "attack", "threat_type", "threat", "stage"])
 
     ids = [str(uuid.uuid4()) for _ in range(len(v))]
     if "id" in v.columns:
@@ -600,9 +615,31 @@ class StreamProcessor:
         key = (str(msg), str(src_ip), str(src_port), str(dst_ip), str(dst_port))
         return key, ts_alert
 
-    def _query_flows_for_alert(self, src_ip: str, ts_alert: pd.Timestamp) -> pd.DataFrame:
-        """Consulta flujos previos al timestamp de la alerta para ese src_ip."""
-        query = {"src_ip": src_ip, "timestamp": {"$lt": ts_alert.to_pydatetime()}}
+    # Attack types where multiple source IPs coordinate against a single target.
+    # For these we query by dst_ip + time window to capture all participating
+    # source IPs instead of just the one that triggered the alert.
+    _COORDINATED_ATTACK_TYPES = {"brute force", "credential attack", "password spraying"}
+    # How far back (seconds) to look for coordinated flows. Env-overridable.
+    _COORDINATED_WINDOW_SEC: float = float(os.getenv("COORDINATED_FLOW_WINDOW_SEC", "120"))
+
+    def _is_coordinated_attack(self, attack: str, threat_type: str) -> bool:
+        combined = f"{attack} {threat_type}".lower()
+        return any(k in combined for k in self._COORDINATED_ATTACK_TYPES)
+
+    def _query_flows_for_alert(
+        self,
+        src_ip: str,
+        ts_alert: pd.Timestamp,
+        dst_ip: str = "",
+        coordinated: bool = False,
+    ) -> pd.DataFrame:
+        """Query flows from MongoDB for the alert.
+
+        For coordinated attacks (Brute Force / Credential Attack / Password
+        Spraying) we query by dst_ip over a lookback window so ALL source IPs
+        that participated in the same campaign are included in a single profile.
+        For everything else we query by src_ip as before.
+        """
         projection = {
             "_id": 0,
             "src_ip": 1, "dst_ip": 1, "src_port": 1, "dst_port": 1,
@@ -615,6 +652,17 @@ class StreamProcessor:
             "flow_iat_mean": 1, "flow_iat_std": 1, "flow_iat_max": 1, "flow_iat_min": 1,
             "active_mean": 1, "active_std": 1, "idle_mean": 1, "idle_std": 1,
         }
+        if coordinated and dst_ip:
+            # All flows to this target within the lookback window — captures the
+            # full set of spoofed/distributed source IPs in one query.
+            window_start = (ts_alert - pd.Timedelta(seconds=self._COORDINATED_WINDOW_SEC)).to_pydatetime()
+            query: dict = {
+                "dst_ip": dst_ip,
+                "timestamp": {"$gte": window_start, "$lt": ts_alert.to_pydatetime()},
+            }
+        else:
+            query = {"src_ip": src_ip, "timestamp": {"$lt": ts_alert.to_pydatetime()}}
+
         rows = list(self.coll.find(query, projection))
         if not rows:
             return pd.DataFrame(columns=list(projection.keys()))
@@ -628,14 +676,32 @@ class StreamProcessor:
         attack, threat_type, threat, stage = parse_attack_from_msg(obj.get("msg", ""))
         ts_alert = parse_alert_timestamp(obj.get("timestamp", ""))
         src_ip = (str(obj.get("src_ap", ""))).split(":")[0] if obj.get("src_ap") else str(obj.get("src_ip", ""))
+        dst_ip_alert = (str(obj.get("dst_ap", ""))).split(":")[0] if obj.get("dst_ap") else str(obj.get("dst_ip", ""))
 
-        # Buscar flujos en Mongo
-        df_flows = self._query_flows_for_alert(src_ip, ts_alert)
+        # Buscar flujos en Mongo — si es ataque coordinado, capturar TODOS los
+        # src_ip que apuntaron al mismo destino en la ventana temporal.
+        is_coord = self._is_coordinated_attack(attack, threat_type)
+        if is_coord and dst_ip_alert:
+            self.log.info(
+                "[STREAM-LOW] Coordinated attack detected (%s / %s) — querying all src_ips "
+                "targeting dst_ip=%s in %.0fs window",
+                attack, threat_type, dst_ip_alert, self._COORDINATED_WINDOW_SEC,
+            )
+        df_flows = self._query_flows_for_alert(
+            src_ip, ts_alert, dst_ip=dst_ip_alert, coordinated=is_coord
+        )
 
-        # Si no hay flujos, meter una fila neutra para no romper el pipeline
+        # Si no hay flujos, meter una fila neutra para no romper el pipeline.
+        # Prefer the alert's own src_ips list (if the detector/Alert Manager
+        # sent one) over the single src_ip — the MongoDB coordinated lookup
+        # above is the primary path for reconstructing the full attacker IP
+        # set, but if it found nothing (e.g. Flow Module lag, narrow window)
+        # this keeps the profile from silently degrading to one IP.
         if df_flows.empty:
+            alert_src_ips = [str(ip).strip() for ip in (obj.get("src_ips") or []) if str(ip).strip()]
+            neutral_src_ip = ";".join(alert_src_ips) if alert_src_ips else src_ip
             df_flows = pd.DataFrame([{
-                "src_ip": src_ip, "dst_ip": pd.NA, "src_port": pd.NA, "dst_port": pd.NA,
+                "src_ip": neutral_src_ip, "dst_ip": dst_ip_alert or src_ip, "src_port": pd.NA, "dst_port": pd.NA,
                 "protocol": pd.NA, "timestamp": ts_alert - pd.Timedelta(seconds=1),
                 "flow_duration": 0, "fwd_pkts_s": 0, "bwd_pkts_s": 0,
                 "totlen_fwd_pkts": 0, "totlen_bwd_pkts": 0,
@@ -648,11 +714,13 @@ class StreamProcessor:
                 "bwd_pkt_len_max": 0, "bwd_pkt_len_min": 0, "bwd_pkt_len_mean": 0,
             }])
 
-        # Anotar etiquetas: attack / threat_type / threat / stage
+        # Anotar etiquetas: attack / threat_type / threat / stage / campaign_id
+        campaign_id = str(obj.get("campaign_id", "") or "").strip()
         df_flows["attack"] = attack
         df_flows["threat_type"] = threat_type
         df_flows["threat"] = threat
         df_flows["stage"] = stage
+        df_flows["campaign_id"] = campaign_id
 
         # Normalización previa
         df_flows = normalize_columns(df_flows)

@@ -39,7 +39,7 @@ DEFAULT_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "net-traces-consumer")
 DEFAULT_MESSAGE_FIELD = os.getenv("KAFKA_MESSAGE_FIELD", "_source")
 
 # Consumer behavior
-DEFAULT_AUTO_OFFSET_RESET = os.getenv("KAFKA_AUTO_OFFSET_RESET", "earliest")  # earliest/latest/none
+DEFAULT_AUTO_OFFSET_RESET = os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest")  # earliest/latest/none
 DEFAULT_ENABLE_AUTO_COMMIT = os.getenv("KAFKA_ENABLE_AUTO_COMMIT", "true").lower() == "true"
 DEFAULT_ASSIGNMENT_STRATEGY = os.getenv("KAFKA_PARTITION_ASSIGNMENT_STRATEGY", "cooperative-sticky")
 DEFAULT_ENABLE_PARTITION_EOF = os.getenv("KAFKA_ENABLE_PARTITION_EOF", "true").lower() == "true"

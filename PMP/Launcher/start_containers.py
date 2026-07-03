@@ -5,6 +5,7 @@ import platform
 import sys
 import secrets
 import string
+import os
 from pathlib import Path
 import argparse
 import socket
@@ -31,6 +32,7 @@ class cmd_parser:
     # Dictionary that associates a module with its service.
     MODULE_REGISTRY: Dict[str, List[str]] = {
         "alert_module":         ["alert_module", "network_intrusion_detector"],
+        "alert_manager":        ["alert_manager"],
         "communication_module": ["kafka", "filebeat"],
         "collection_module":    ["fluentd", "telegraf", "tshark", "falco", "info"],
         "flow_module":          ["flow_module"],
@@ -288,6 +290,11 @@ def main():
     # Only activate the info_device microservice if Prometheus is requested
     if "aggregation_module" in compose_profiles_list:
         compose_profiles_list.append("collection_module.info")
+
+    enable_global_tshark = os.environ.get("NOVADEF_ENABLE_GLOBAL_TSHARK", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enable_global_tshark and "collection_module.tshark" in compose_profiles_list:
+        compose_profiles_list = [profile for profile in compose_profiles_list if profile != "collection_module.tshark"]
+        print("[+] Global tshark disabled by default; per-run scenarios will create their own capture path on demand.")
 
     compose_profiles = ",".join(compose_profiles_list)
     print("Selected:", selected)

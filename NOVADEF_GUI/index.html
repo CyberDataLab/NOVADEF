@@ -6,193 +6,344 @@
   <title>NOVADEF OODA Hub</title>
   <style>
     :root {
-      --bg0: #08111b;
-      --bg1: #0f1f2e;
-      --panel: rgba(14, 27, 41, 0.82);
-      --line: rgba(173, 197, 224, 0.24);
-      --text: #e8f0f7;
-      --muted: #9fb3c8;
-      --obs: #34d399;
-      --ori: #60a5fa;
-      --dec: #f59e0b;
-      --act: #ef4444;
-      --accent: #22d3ee;
+      --bg:    #0a0e27;
+      --panel: rgba(15, 19, 48, 0.85);
+      --card:  rgba(17, 24, 52, 0.80);
+      --line:  rgba(255, 255, 255, 0.08);
+      --line2: rgba(6, 182, 212, 0.20);
+      --text:  #f0f4ff;
+      --muted: #8fa3c0;
+      --cyan:  #22d3ee;
+      --obs:   #34d399;
+      --ori:   #60a5fa;
+      --dec:   #fbbf24;
+      --act:   #f87171;
+      --purple: #c084fc;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       color: var(--text);
-      font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
-      background:
-        radial-gradient(900px 520px at -20% -5%, #12385a 0%, transparent 62%),
-        radial-gradient(980px 520px at 120% -10%, #1b496d 0%, transparent 65%),
-        linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       min-height: 100vh;
-      padding: 26px 18px 40px;
+      padding: 0;
+      position: relative;
     }
-    .wrap { max-width: 1200px; margin: 0 auto; }
-    .hero {
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 20px;
-      background: linear-gradient(180deg, rgba(16, 32, 50, 0.9), rgba(8, 18, 30, 0.9));
-      box-shadow: 0 18px 35px rgba(0, 0, 0, 0.35);
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      z-index: -2;
     }
-    h1 {
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 6, 20, 0.82);
+      z-index: -1;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    .topbar {
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      overflow: hidden;
+    }
+    .topbar::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(4,6,22,0.62);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      z-index: 0;
+    }
+    .topbar > * { position: relative; z-index: 1; }
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .topbar-logo {
+      width: 36px;
+      height: 36px;
+      flex-shrink: 0;
+      filter: drop-shadow(0 0 6px rgba(34,211,238,0.5));
+    }
+    .topbar h1 {
       margin: 0;
-      font-size: clamp(1.4rem, 2.5vw, 2.1rem);
-      letter-spacing: 0.2px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: 0.01em;
     }
-    .subtitle {
-      margin: 8px 0 0;
-      color: var(--muted);
-      font-size: 0.97rem;
+    .topbar-sub { font-size: 0.72rem; color: rgba(200,220,255,0.7); margin-top: 1px; }
+
+    /* ── Layout ─────────────────────────────────────────────────────────── */
+    .page-layout {
+      display: flex;
+      min-height: calc(100vh - 64px);
     }
+
+    /* ── Sidebar ────────────────────────────────────────────────────────── */
+    .sidebar {
+      width: 184px;
+      flex-shrink: 0;
+      border-right: 1px solid rgba(255,255,255,0.10);
+      background-image: url('header-bg.jpg');
+      background-size: cover;
+      background-position: center;
+      background-attachment: fixed;
+      position: relative;
+      padding: 20px 12px;
+    }
+    .sidebar::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(4,6,20,0.72);
+      z-index: 0;
+    }
+    .sidebar > * { position: relative; z-index: 1; }
+    .sidebar-label {
+      font-size: 0.62rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: rgba(200,220,255,0.45);
+      padding: 0 4px;
+      margin: 0 0 8px;
+    }
+    .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      border: none;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+      padding: 8px 10px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      text-decoration: none;
+      transition: background 150ms;
+    }
+    .nav-item:hover { background: rgba(255,255,255,0.16); }
+    .nav-item svg { flex-shrink: 0; opacity: 0.8; }
+
+    .wrap { flex: 1; padding: 24px 24px 48px; min-width: 0; }
+
+    /* ── Badge ─────────────────────────────────────────────────────────── */
     .badge {
       display: inline-flex;
       align-items: center;
-      margin-top: 12px;
-      border: 1px solid rgba(34, 211, 238, 0.5);
-      color: #c7f7ff;
-      background: rgba(34, 211, 238, 0.1);
+      gap: 6px;
+      border: 1px solid rgba(6,182,212,0.35);
+      color: #a5f3fc;
+      background: rgba(6,182,212,0.08);
       border-radius: 999px;
-      padding: 7px 11px;
-      font-size: 0.84rem;
+      padding: 5px 12px;
+      font-size: 0.75rem;
       font-weight: 600;
+      letter-spacing: 0.03em;
+      margin-bottom: 20px;
     }
+
+    /* ── Section label ──────────────────────────────────────────────────── */
+    .section-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--muted);
+      margin: 0 0 10px;
+    }
+
+    /* ── Quick-access row ───────────────────────────────────────────────── */
+    .quick-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+
+    /* ── Board ─────────────────────────────────────────────────────────── */
     .board {
-      margin-top: 16px;
       border: 1px solid var(--line);
       border-radius: 16px;
       background: var(--panel);
-      padding: 14px;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      padding: 16px;
       overflow-x: auto;
+      margin-bottom: 16px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.4);
     }
-    .data-row {
-      min-width: 980px;
-      margin-bottom: 10px;
-    }
-    .data-lane h2 { color: var(--accent); }
+    .data-row { min-width: 980px; margin-bottom: 12px; }
+    .data-lane h2 { color: var(--cyan); }
     .data-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(220px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(4, minmax(200px, 1fr));
+      gap: 8px;
     }
     .ooda {
       min-width: 980px;
       display: grid;
-      grid-template-columns: repeat(4, minmax(220px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(4, minmax(200px, 1fr));
+      gap: 8px;
     }
+
+    /* ── OODA lanes ─────────────────────────────────────────────────────── */
     .lane {
       border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 10px;
-      background: rgba(8, 17, 28, 0.7);
+      border-radius: 12px;
+      padding: 12px;
+      background: var(--card);
     }
     .lane h2 {
-      margin: 0 0 9px;
-      font-size: 0.95rem;
+      margin: 0 0 10px;
+      font-size: 0.7rem;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.6px;
+      letter-spacing: 0.15em;
     }
     .observe h2 { color: var(--obs); }
-    .orient h2 { color: var(--ori); }
-    .decide h2 { color: var(--dec); }
-    .act h2 { color: var(--act); }
+    .orient  h2 { color: var(--ori); }
+    .decide  h2 { color: var(--dec); }
+    .act     h2 { color: var(--act); }
+    .data-lane h2 { color: var(--cyan); }
+
+    /* ── Nodes ──────────────────────────────────────────────────────────── */
     .node {
       width: 100%;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
       text-align: left;
-      border: 1px solid rgba(160, 184, 209, 0.3);
-      border-radius: 11px;
-      background: rgba(22, 38, 57, 0.88);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 10px;
+      background: rgba(10,14,39,0.7);
       color: var(--text);
-      padding: 10px 10px 9px;
+      padding: 10px 11px 9px;
       cursor: pointer;
-      transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+      transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
     }
     .node:hover {
       transform: translateY(-2px);
-      border-color: rgba(110, 220, 255, 0.65);
-      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+      border-color: rgba(6,182,212,0.45);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3), 0 0 0 1px rgba(6,182,212,0.15);
     }
     .node .t {
       display: block;
-      font-size: 0.93rem;
-      font-weight: 700;
+      font-size: 0.88rem;
+      font-weight: 600;
       margin-bottom: 3px;
+      color: #e2eeff;
     }
     .node .d {
       display: block;
-      font-size: 0.81rem;
+      font-size: 0.76rem;
       color: var(--muted);
     }
+
+    /* ── Status pills ───────────────────────────────────────────────────── */
     .status {
       display: inline-flex;
-      margin-top: 7px;
+      align-items: center;
+      gap: 4px;
+      margin-top: 6px;
       border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 0.72rem;
+      padding: 2px 9px;
+      font-size: 0.68rem;
       font-weight: 700;
-      letter-spacing: 0.2px;
-      border: 1px solid rgba(160, 184, 209, 0.3);
-      color: #cfe0f0;
-      background: rgba(17, 32, 50, 0.7);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--muted);
+      background: rgba(255,255,255,0.04);
     }
     .status.up {
-      border-color: rgba(52, 211, 153, 0.55);
-      color: #bdfbe7;
-      background: rgba(52, 211, 153, 0.12);
+      border-color: rgba(52,211,153,0.4);
+      color: #6ee7b7;
+      background: rgba(52,211,153,0.08);
     }
     .status.down {
-      border-color: rgba(239, 68, 68, 0.55);
-      color: #fecaca;
-      background: rgba(239, 68, 68, 0.11);
+      border-color: rgba(239,68,68,0.4);
+      color: #fca5a5;
+      background: rgba(239,68,68,0.08);
     }
-    .flow {
+
+    /* ── Flow caption ───────────────────────────────────────────────────── */
+    .flow-caption {
       margin-top: 10px;
       color: var(--muted);
-      font-size: 0.83rem;
+      font-size: 0.75rem;
       text-align: center;
+      letter-spacing: 0.04em;
     }
+
+    /* ── Legend pills ───────────────────────────────────────────────────── */
     .legend {
-      margin-top: 12px;
+      margin-top: 14px;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 9px;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px;
     }
+    .pill {
+      border: 1px solid rgba(6,182,212,0.15);
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 0.76rem;
+      color: #a5c8e8;
+      background: rgba(6,182,212,0.05);
+    }
+
+    /* ── Scenario section ───────────────────────────────────────────────── */
     .scenario {
-      margin-top: 10px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 10px;
-      background: rgba(8, 17, 28, 0.7);
+      margin-top: 12px;
+      border: 1px solid rgba(192,132,252,0.22);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(139,92,246,0.05);
     }
     .scenario h2 {
-      margin: 0 0 9px;
-      font-size: 0.95rem;
+      margin: 0 0 10px;
+      font-size: 0.7rem;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.6px;
-      color: #c084fc;
+      letter-spacing: 0.15em;
+      color: var(--purple);
     }
     .scenario-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(220px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(2, minmax(200px, 1fr));
+      gap: 8px;
     }
-    .pill {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 8px 10px;
-      font-size: 0.82rem;
-      color: #d8e3ef;
-      background: rgba(9, 18, 30, 0.72);
-    }
+
+    /* ── Modal ──────────────────────────────────────────────────────────── */
     .modal {
       position: fixed;
       inset: 0;
-      background: rgba(2, 8, 14, 0.72);
+      background: rgba(2,4,20,0.78);
+      backdrop-filter: blur(4px);
       display: none;
       align-items: center;
       justify-content: center;
@@ -201,65 +352,103 @@
     }
     .modal.show { display: flex; }
     .sheet {
-      width: min(760px, 100%);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #0c1725;
-      padding: 14px;
-      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+      width: min(720px, 100%);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      background: rgba(10,14,39,0.96);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      padding: 20px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(6,182,212,0.12);
     }
-    .sheet h3 {
-      margin: 0 0 8px;
-      font-size: 1rem;
-    }
-    .sheet p {
-      margin: 0 0 10px;
-      color: var(--muted);
-      font-size: 0.89rem;
-    }
+    .sheet h3 { margin: 0 0 8px; font-size: 1rem; font-weight: 700; color: var(--text); }
+    .sheet p  { margin: 0 0 12px; color: var(--muted); font-size: 0.85rem; }
     pre {
-      margin: 0 0 10px;
-      padding: 10px;
-      border: 1px solid rgba(166, 189, 212, 0.35);
+      margin: 0 0 12px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
       border-radius: 10px;
-      background: #09111d;
-      color: #c5f6ff;
+      background: rgba(5,8,26,0.9);
+      color: #a5f3fc;
       overflow-x: auto;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
+      font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
     }
-    .actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* ── Buttons ────────────────────────────────────────────────────────── */
     .btn {
-      border: 1px solid rgba(160, 184, 209, 0.35);
-      background: rgba(23, 40, 60, 0.9);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.06);
       color: var(--text);
-      border-radius: 9px;
-      padding: 8px 11px;
-      font-size: 0.84rem;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 0.82rem;
+      font-weight: 500;
       cursor: pointer;
+      transition: border-color 150ms ease, background 150ms ease;
     }
-    .btn:hover { border-color: rgba(115, 222, 255, 0.6); }
+    .btn:hover {
+      border-color: rgba(6,182,212,0.5);
+      background: rgba(6,182,212,0.08);
+    }
+    .btn.primary {
+      border-color: rgba(6,182,212,0.6);
+      background: rgba(6,182,212,0.12);
+      color: #a5f3fc;
+    }
+    .btn.primary:hover { background: rgba(6,182,212,0.2); }
   </style>
+  <script>
+    (function(){
+      var tok = localStorage.getItem('novadef_token');
+      if (!tok) { window.location.replace('login.html'); }
+    })();
+  </script>
 </head>
 <body>
-  <main class="wrap">
-    <section class="hero">
-      <h1>NOVADEF Architecture Hub (OODA)</h1>
-      <p class="subtitle">Click any module to open its web UI. CLI-only components open the Docker Log Hub automatically.</p>
-      <span class="badge">Lab mode · End-to-end flow: Monitor -> Detect -> Profile -> MISP -> D3FEND -> SOARCA -> Report</span>
-      <div style="margin-top:10px;">
-        <button class="node" data-url="http://localhost:18080/experiments.html" style="max-width:360px;">
-          <span class="t">Open Experiments Console</span>
-          <span class="d">Launch exp1/exp2 guide and follow incident progression</span>
-        </button>
-        <button class="node" data-url="http://localhost:18082/health" style="max-width:360px;">
-          <span class="t">Experiments API Health</span>
-          <span class="d">Backend endpoint used to launch experiments from web</span>
-        </button>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img class="topbar-logo" src="novadef-logo.png" alt="NOVADEF">
+      <div>
+        <h1>NOVADEF</h1>
+        <div class="topbar-sub">Architecture Hub · OODA Loop</div>
       </div>
+    </div>
+  </header>
+
+  <div class="page-layout">
+    <aside class="sidebar">
+      <div class="sidebar-label">Navigation</div>
+      <nav class="sidebar-nav">
+        <button class="nav-item" onclick="window.open('http://localhost:18082/experiments.html','_blank','noopener,noreferrer')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3l14 9-14 9V3z"/></svg>
+          Experiments Console
+        </button>
+        <button class="nav-item" onclick="window.open('http://localhost:18082/health','_blank','noopener,noreferrer')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          API Health
+        </button>
+        <button class="nav-item" onclick="window.open('http://localhost:3000','_blank','noopener,noreferrer')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          Grafana
+        </button>
+        <button class="nav-item" onclick="window.open('http://localhost:9090','_blank','noopener,noreferrer')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Prometheus
+        </button>
+        <button class="nav-item" onclick="window.open('http://localhost:7474','_blank','noopener,noreferrer')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg>
+          Neo4j
+        </button>
+      </nav>
+    </aside>
+
+  <main class="wrap">
+    <span class="badge">Lab mode · Monitor → Detect → Profile → MISP → D3FEND → SOARCA → Report</span>
 
       <div class="board">
         <div class="ooda">
@@ -378,7 +567,7 @@
             </button>
           </div>
         </div>
-        <div class="flow">Data layer over OODA: Observe -> Orient -> Decide -> Act</div>
+        <div class="flow-caption">Data layer over OODA: Observe → Orient → Decide → Act</div>
       </div>
 
       <div class="scenario">
@@ -402,8 +591,8 @@
         <div class="pill">CLI modules open Docker Log Hub and also provide a terminal command.</div>
         <div class="pill">If a URL does not respond, wait until full startup finishes.</div>
       </div>
-    </section>
   </main>
+  </div><!-- end .page-layout -->
 
   <div id="cmdModal" class="modal" aria-hidden="true">
     <div class="sheet">

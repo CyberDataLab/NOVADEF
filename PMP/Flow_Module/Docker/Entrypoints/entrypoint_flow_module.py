@@ -26,9 +26,23 @@ J2P_PATH = str(FFD / "Scripts" / "Parsing" / "JSON2PCAP" / "json2pcap.py")
 # === ROTATION ===
 PCAP_ROTATE_SIZE_MB = 100 * 1024     # 100 KB
 CIC_ROTATE_SIZE_MB = 50 * 1024           # 50 KB
-ROTATE_TIME_SEC = 0.5
+# 0.5s produced near-empty pcaps too small for CICFlowMeter to derive any
+# flow (a TCP flow needs more than a handful of packets in the window), so it
+# silently emitted an empty CSV every rotation. 3s gives each pcap enough
+# wall-clock time to contain a meaningful traffic window while keeping
+# rotation latency low enough for near-real-time detection. (_new_file() now
+# finalizes/analyzes the old file on a background thread — see below — so
+# this interval no longer blocks packet writing to the new file.)
+ROTATE_TIME_SEC = 3.0
 # === WRITER CONTROL ===
-PACKET_QUEUE_MAX = 100000
+# Each queued item is a full tshark packet dict WITH hex dump (-x), which can
+# be several KB each. 100000 of those is 1-2GB+ in the worst case — exactly
+# what OOM-killed the container when a Kafka consumer-group backlog (e.g. from
+# a previous test run never fully drained) gets replayed at ingest speed on
+# startup, far faster than json2pcap/CICFlowMeter can drain the queue. 5000 is
+# enough buffer for normal bursts while capping worst-case memory in the tens
+# of MB range instead of GB.
+PACKET_QUEUE_MAX = 5000
 WRITER_FLUSH_EVERY = 100                 # flush cada N
 WATCHDOG_STALL_SECS = 120                # watchdog de inactividad
 
@@ -333,13 +347,32 @@ class PacketWriter:
 
     def _new_file(self):
         """
-        Creates the JSON2PCAP stream, as well as a new PCAP file. 
-        If one is already open, it closes it and launches Snort on it using new threads.
+        Creates the JSON2PCAP stream, as well as a new PCAP file.
+        If one is already open, it closes it and launches CICFlowMeter on it
+        using a background thread.
         """
         if self.j2p_worker:
-            old_trace = self.j2p_worker.trace_path
-            threading.Thread(target=self.j2p_worker.close, daemon=True).start()
-            threading.Thread(target=self._run_cic_and_delete, args=(old_trace,), daemon=True).start()
+            old_worker = self.j2p_worker
+            old_trace = old_worker.trace_path
+            # close() (flush + wait for json2pcap to finish writing the pcapng)
+            # and the CICFlowMeter analysis both need to happen BEFORE the file
+            # is deleted, and close() must finish before CICFlowMeter reads the
+            # file — otherwise CICFlowMeter reads a truncated pcapng (missing
+            # json2pcap's closing "]") and silently emits an empty CSV, starving
+            # the network detector of that traffic window.
+            #
+            # But neither step may run on the writer thread itself: close()
+            # calls proc.wait() which can take real wall-clock time, and during
+            # that time _writer_loop must keep draining self.q (100k slots) or
+            # the queue fills with buffered packets faster than Kafka intake can
+            # be throttled — that queue backlog is what was OOM-killing the
+            # container. So both close() and the CIC analysis run together,
+            # strictly sequential, in a single background thread — never
+            # blocking the writer loop that owns the NEW json2pcap process.
+            def _finalize_and_analyze():
+                old_worker.close()
+                self._run_cic_and_delete(old_trace)
+            threading.Thread(target=_finalize_and_analyze, daemon=True).start()
 
         trace_path = os.path.join(self.output_dir, f"trace_{self.file_index:02d}.pcapng")
         print(f"📂 New file opened: {trace_path}")
@@ -349,7 +382,7 @@ class PacketWriter:
             self.file_index += 1
         else:
             self.file_index = 0
-        
+
         self._last_file_ts = time.time()
 
     def write_packet(self, packet_dict):

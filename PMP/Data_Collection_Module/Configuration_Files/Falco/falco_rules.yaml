@@ -3,7 +3,7 @@
   condition: evt.type in (execve, execveat) and proc.cmdline contains "akira_lab_emulation.sh"
   output: >
     NOVADEF lab ransomware emulation started
-    (user=%user.name command=%proc.cmdline container=%container.name)
+    (user=%user.name command=%proc.cmdline container=%container.name container_id=%container.id campaign_id=%proc.env[CAMPAIGN_ID])
   priority: WARNING
   tags: [novadef, ransomware, lab, execution]
 
@@ -12,7 +12,7 @@
   condition: evt.type in (open, openat, openat2, creat, rename, renameat, renameat2) and fd.name startswith "/tmp/novadef_ransomware_lab"
   output: >
     NOVADEF lab ransomware file activity
-    (user=%user.name command=%proc.cmdline file=%fd.name evt=%evt.type container=%container.name)
+    (user=%user.name command=%proc.cmdline file=%fd.name evt=%evt.type container=%container.name container_id=%container.id)
   priority: WARNING
   tags: [novadef, ransomware, lab, impact, file]
 
@@ -21,7 +21,7 @@
   condition: evt.type in (open, openat, openat2, creat) and fd.name="/tmp/novadef_ransomware_lab/!!_READ_ME_!!.txt"
   output: >
     NOVADEF ransom note created
-    (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name)
+    (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name container_id=%container.id)
   priority: ERROR
   tags: [novadef, ransomware, lab, ransom-note]
 
@@ -30,6 +30,6 @@
   condition: evt.type in (open, openat, openat2, rename, renameat, renameat2) and fd.name startswith "/tmp/novadef_ransomware_lab/.canaries/"
   output: >
     NOVADEF canary file touched
-    (user=%user.name command=%proc.cmdline file=%fd.name evt=%evt.type container=%container.name)
+    (user=%user.name command=%proc.cmdline file=%fd.name evt=%evt.type container=%container.name container_id=%container.id)
   priority: ERROR
   tags: [novadef, ransomware, lab, canary]

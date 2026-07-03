@@ -96,7 +96,7 @@ def wait_for_service(label: str, factory, validator=None, timeout_sec: Optional[
 
 # ───────────────────── Input header ─────────────────────
 EXPECTED_HEADER = [
-    "id","threat_type","threat","attack","stage",
+    "id","campaign_id","threat_type","threat","attack","stage",
     "ips_src","ips_dst","ports_src","ports_dst",
     "total_flows","total_packets_sent","total_packets_received",
     "total_bytes_sent","total_bytes_received",
@@ -345,10 +345,11 @@ def parse_csv_message(raw_text: str) -> Dict[str, Any]:
 
 # ───────────────────── HL schema / rules ───────────────
 PROFILE_COLUMNS = [
-    "Id","IPs","Target","PreferredTarget","FirstSeen","LastActivity",
+    "Id","CampaignId","IPs","Target","PreferredTarget","FirstSeen","LastActivity",
     "Country","AutomationLevel","Evasion","TTPs","KillChainPhase",
     "RiskLevel","Tools","Skills",
     "Profile",
+    "DetectionAlert","DetectionType","DetectionAttack","DetectionStage","DetectionTs",
     "Motivation","Knowledge","Attitude","Affiliation",
     "ThreatGroup","Campaigns","Comments",
 ]
@@ -594,7 +595,7 @@ def predict_with_pipeline(pipe, X_df: pd.DataFrame):
 # ───────────────────── HL assembly per row ──────────────
 def coerce_raw_df_types(df: pd.DataFrame) -> pd.DataFrame:
     keep_str = {
-        "id","threat_type","threat","attack","stage","ips_src","ips_dst",
+        "id","campaign_id","threat_type","threat","attack","stage","ips_src","ips_dst",
         "ports_src","ports_dst","protocol_distribution","first_seen","last_activity",
     }
     out = df.copy()
@@ -793,17 +794,33 @@ def build_hl_record(df_raw_row: pd.DataFrame,
     ips  = split_ips(row.get("ips_src",""))
     dst  = str(row.get("ips_dst", ""))
 
+    # For ransomware flows the dst is the C2/CDN server (public IP). The host
+    # that actually needs isolation is the compromised lab machine (src).
+    # If dst is public and we have an internal src IP, use that as target.
+    _lab_ip_re = re.compile(r"^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)")
+    _attack_label = str(df_raw_row.iloc[0].get("attack", "") if hasattr(df_raw_row, "iloc") else "").lower()
+    if "ransomware" in _attack_label and not _lab_ip_re.match(dst):
+        _internal_srcs = [ip for ip in ips if _lab_ip_re.match(ip)]
+        if _internal_srcs:
+            dst = _internal_srcs[0]
+
     tset, evset = ttp_sets[flows.index[0]], ev_sets[flows.index[0]]
     phase = phases_from_ttps(tset, kc_lookup)
 
     bytes_sent = float(df_raw_row.iloc[0].get("total_bytes_sent", 0.0) or 0.0)
-    actor_id = f"profile_{df_raw_row.iloc[0].get('id')}"
+    _campaign = str(df_raw_row.iloc[0].get("campaign_id", "") or "").strip()
+    if _campaign:
+        # All phases of the same campaign (network + host) merge into ONE actor node.
+        actor_id = f"campaign_{_campaign}_{dst}"
+    else:
+        actor_id = f"profile_{df_raw_row.iloc[0].get('id')}"
     pref_targets_str = update_preferred_targets(actor_id, dst, bytes_sent, str(df_raw_row.iloc[0].get("first_seen","")), pt_store)
 
     country_list = countries_from_ips(ips)
 
     rec = {
         "Id": actor_id,
+        "CampaignId": _campaign,
         "IPs": ";".join(ips),
         "Target": dst,
         "PreferredTarget": pref_targets_str or dst,
@@ -817,13 +834,23 @@ def build_hl_record(df_raw_row: pd.DataFrame,
         "Tools": tool,
         "Skills": ml_preds.get("Skills"),
         "Profile": ml_preds.get("Profile"),
+        "DetectionAlert": str(df_raw_row.iloc[0].get("threat", "") or "").strip(),
+        "DetectionType": str(df_raw_row.iloc[0].get("threat_type", "") or "").strip(),
+        "DetectionAttack": str(df_raw_row.iloc[0].get("attack", "") or "").strip(),
+        "DetectionStage": str(df_raw_row.iloc[0].get("stage", "") or "").strip(),
+        "DetectionTs": df_raw_row.iloc[0].get("first_seen"),
         "Motivation": ml_preds.get("Motivation"),
         "Knowledge": ml_preds.get("Knowledge"),
         "Attitude": ml_preds.get("Attitude"),
         "Affiliation": ml_preds.get("Affiliation"),
         "ThreatGroup": None,
         "Campaigns": None,
-        "Comments": "",
+        "Comments": (
+            f"tapcd_detection_alert={str(df_raw_row.iloc[0].get('threat', '') or '').strip()};"
+            f" type={str(df_raw_row.iloc[0].get('threat_type', '') or '').strip()};"
+            f" attack={str(df_raw_row.iloc[0].get('attack', '') or '').strip()};"
+            f" stage={str(df_raw_row.iloc[0].get('stage', '') or '').strip()}"
+        ),
         "AutomationLevel": ml_preds.get("AutomationLevel"),
     }
     return {k: rec.get(k, None) for k in PROFILE_COLUMNS}
@@ -928,10 +955,27 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
+    # Record startup time (ms). Messages produced before this moment are stale
+    # backlog from a previous experiment run (this service consumes with
+    # --from-beginning, so on restart it would otherwise replay historical flows
+    # — e.g. a flow whose first_seen is from a previous day — and emit a stale
+    # actor profile). A 10-min grace absorbs minor clock skew. Configurable via
+    # PREP_PRED_STARTUP_GRACE_SECS (set 0 to disable the guard).
+    _startup_cutoff_ms = int(time.time() * 1000)
+    _startup_grace_ms = int(float(os.getenv("PREP_PRED_STARTUP_GRACE_SECS", "600")) * 1000)
+    _msg_cutoff_ms = _startup_cutoff_ms - _startup_grace_ms
+
     for msg in consumer:
         if stop["flag"]:
             break
         try:
+            # Skip Kafka messages produced before this process started (stale
+            # backlog from a prior run). msg.timestamp is epoch-ms.
+            _msg_ts = getattr(msg, "timestamp", None)
+            if _startup_grace_ms >= 0 and _msg_ts and _msg_ts < _msg_cutoff_ms:
+                LOG.info("⏭️ Ignorado (mensaje anterior al arranque)")
+                continue
+
             LOG.info("📥 Recibido")
 
             raw_txt = robust_decode(msg.value)
@@ -950,6 +994,21 @@ def main():
             if not rec:
                 LOG.info("⚠️ Ignorado"); continue
 
+            # Drop ransomware profiles whose Target is a public IP — these are
+            # Isolation Forest false positives on outbound traffic (e.g. apk/apt
+            # downloads) where no lab-internal source IP is present.  Ransomware
+            # activity is always internal: compromised host (172.18.x / 10.x /
+            # 192.168.x) talks to other internal hosts, not to the internet.
+            _is_ransomware_rec = "ransomware" in str(rec.get("DetectionAttack", "")).lower()
+            _src_ips_rec = [s.strip() for s in str(rec.get("IPs", "")).split(";") if s.strip()]
+            _lab_re = re.compile(r"^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)")
+            if _is_ransomware_rec and not any(_lab_re.match(ip) for ip in _src_ips_rec):
+                LOG.info(
+                    "⏭️ Perfil ransomware descartado (IPs fuente públicas: %s) — falso positivo de tráfico saliente.",
+                    _src_ips_rec,
+                )
+                continue
+
             out_csv = rows_to_csv([rec], PROFILE_COLUMNS)
             try:
                 fut = producer.send(args.topic_out, out_csv)
@@ -958,7 +1017,12 @@ def main():
                 except Exception:
                     pass
                 producer.flush(5)
-                LOG.info("📤 Enviado")
+                LOG.info(
+                    "📤 Enviado actor_id=%s profile=%s attack=%s",
+                    rec.get("Id", "?"),
+                    rec.get("Profile", "?"),
+                    rec.get("DetectionAttack", "?"),
+                )
             except Exception:
                 LOG.info("⚠️ Ignorado"); continue
 

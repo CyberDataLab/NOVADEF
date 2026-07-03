@@ -507,7 +507,7 @@ done
 # ----------------------------------------------------------------
 # Reiniciar integrador con la API key recién configurada
 # ----------------------------------------------------------------
-docker compose restart misp-integrator 2>/dev/null || true
+docker compose up -d --build misp-integrator 2>/dev/null || true
 
 # ----------------------------------------------------------------
 # Smoke test funcional de API: validar que /events/add responde bien.

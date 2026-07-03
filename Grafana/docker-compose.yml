@@ -20,8 +20,10 @@ services:
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
       - GF_SERVER_ROOT_URL=http://localhost:3000
       - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_SECURITY_ALLOW_EMBEDDING=true
       # Desactivar verificación TLS interna para MISP (cert autofirmado)
-      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
       - ./provisioning:/etc/grafana/provisioning:ro
       - ./dashboards:/var/lib/grafana/dashboards:ro

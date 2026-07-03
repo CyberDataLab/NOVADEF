@@ -5,12 +5,13 @@ services:
     image: apache/kafka:3.9.0
     container_name: kafka_novadef
     profiles: ["communication_module.kafka"]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/29092'"]
       interval: 5s
-      retries: 15
-      start_period: 10s
-      timeout: 3s
+      retries: 120
+      start_period: 300s
+      timeout: 5s
     environment:
       - TZ=UTC
       - KAFKA_PROCESS_ROLES=broker,controller
@@ -26,6 +27,7 @@ services:
       - KAFKA_INTER_BROKER_LISTENER_NAME=BROKER
       - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
       - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_HEAP_OPTS=-Xms256m -Xmx512m
       - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
       - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
       - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
@@ -57,6 +59,7 @@ services:
       - ${PFD}/Results/fluentd_logs:/fluentd/log:ro
       - ${PFD}/Results/tshark/traces:/tshark/traces:ro
       - ${PFD}/Results/falco/logs:/falco/logs:ro
+      - ${PFD}/../.novadef_runtime/scenarios:/scenario-runtime:ro
       - ${PFD}/../Scenario/shared-logs:/scenario/logs:ro
     command: 
       - "--strict.perms=false" # Manual change of owner was avoided by using this flag in Filebeat.

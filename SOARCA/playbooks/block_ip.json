@@ -69,7 +69,7 @@
             "name": "scenario_victim",
             "description": "Victim machine where iptables will be applied.",
             "address": {
-                "ipv4": ["172.18.0.10"]
+                "ipv4": ["172.18.0.3"]
             },
             "port": "2222",
             "authentication_info": "user-auth--21d3b5e4-cabe-44aa-a2c0-38a84ef6dd78"

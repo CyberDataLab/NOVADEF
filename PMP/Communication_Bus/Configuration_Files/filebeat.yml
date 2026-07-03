@@ -1,4 +1,14 @@
 ---
+filebeat.config.inputs:
+  enabled: true
+  path: ${path.config}/inputs.d/*.yml
+
+# Ultra-fast file scanning to detect log updates within 100ms
+# This is critical for detection latency SLA (~1s from attack start to alert)
+filebeat.prospector.scanner:
+  include_files: ['.json$', '.jsonl$', '.log$']
+  scan_frequency: 100ms
+
 filebeat.inputs:
   - type: filestream # log is deprecated from version 7.16
     id: syslog_logs
@@ -10,6 +20,7 @@ filebeat.inputs:
     fields:
       kafka_topic: "syslog_logs"
     fields_under_root: true
+    scan_frequency: 100ms
 
   - type: filestream #log
     id: systemd_logs
@@ -21,6 +32,7 @@ filebeat.inputs:
     fields:
       kafka_topic: "systemd_logs"
     fields_under_root: true
+    scan_frequency: 100ms
 
   - type: filestream #log
     id: tshark_ndjson_traces
@@ -31,6 +43,7 @@ filebeat.inputs:
     fields:
       kafka_topic: "tshark_traces"
     fields_under_root: true
+    scan_frequency: 100ms
     parsers:
       - ndjson:
           target: ""           # Leave the flat JSON at the root of the network event
@@ -48,16 +61,19 @@ filebeat.inputs:
     fields:
       kafka_topic: "falco_events"
     fields_under_root: true
+    scan_frequency: 100ms
 
   - type: filestream
     id: network_auth_events
     enable: true
     paths:
+      - "/scenario-runtime/*/artifacts/logs/password_spraying_attempts.jsonl"
       - "/scenario/logs/password_spraying_attempts.jsonl"
     tags: ["network_auth_events"]
     fields:
       kafka_topic: "network_auth_events"
     fields_under_root: true
+    scan_frequency: 100ms
     parsers:
       - ndjson:
           target: ""

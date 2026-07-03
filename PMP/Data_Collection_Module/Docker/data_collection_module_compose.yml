@@ -58,7 +58,7 @@ services:
       - kafka_novadef
     environment:
       - TZ=UTC
-    # Share network namespace with the victim: tshark sees all attacker→victim traffic
+    # Share network namespace with the victim scenario container used by the launcher.
     network_mode: "container:scenario_victim"
     cap_add:
       # https://man7.org/linux/man-pages/man7/capabilities.7.html
@@ -135,4 +135,3 @@ services:
     ports:
       - "9999:9999"
     restart: unless-stopped
-
