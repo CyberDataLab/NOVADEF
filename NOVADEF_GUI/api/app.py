@@ -1286,9 +1286,9 @@ def _falco_log_candidates() -> list[Path]:
             Path("/falco/logs/falco_events.json"),
             PROJECT_ROOT / "PMP" / "Results" / "falco" / "logs" / "falco_events.json",
             PROJECT_ROOT / "Results" / "falco" / "logs" / "falco_events.json",
-            Path("/Users/pedrobeltranlopez/Desktop/NOVADEF/PMP/Results/falco/logs/falco_events.json"),
         ]
     )
+    candidates.append(HOST_REPO_ROOT / "PMP" / "Results" / "falco" / "logs" / "falco_events.json")
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -2323,7 +2323,7 @@ def _ensure_container_on_network(container_name: str, network_name: str, alias: 
 
 TSHARK_TRACES_HOST_DIR = os.getenv(
     "TSHARK_TRACES_HOST_DIR",
-    "/Users/pedrobeltranlopez/Desktop/NOVADEF/PMP/Results/tshark/traces",
+    str(HOST_REPO_ROOT / "PMP" / "Results" / "tshark" / "traces"),
 )
 
 

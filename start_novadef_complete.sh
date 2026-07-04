@@ -7,7 +7,7 @@
 
 set -e
 
-NOVADEF_ROOT="/Users/pedrobeltranlopez/Desktop/NOVADEF"
+NOVADEF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$NOVADEF_ROOT"
 
 export PFD="$NOVADEF_ROOT/PMP"
@@ -243,6 +243,17 @@ echo "✅ Scenario configurado para creación bajo demanda"
 echo ""
 echo "🔧 FASE 3: Iniciando PMP (Monitoring Platform)..."
 ensure_launcher_network
+# Keep PMP/Launcher/.env's PFD in sync with this checkout's actual location —
+# it's a static file (nothing else rewrites it), so on a fresh clone/move to a
+# different path/machine it would otherwise still point at wherever it was
+# first generated and silently break docker-compose's volume mounts.
+if [ -f "$PFD/Launcher/.env" ]; then
+    if grep -q '^PFD=' "$PFD/Launcher/.env"; then
+        sed -i.bak "s|^PFD=.*|PFD=$PFD|" "$PFD/Launcher/.env" && rm -f "$PFD/Launcher/.env.bak"
+    else
+        echo "PFD=$PFD" >> "$PFD/Launcher/.env"
+    fi
+fi
 cd "$PFD/Launcher"
 
 echo "  Esperando 5 segundos antes de lanzar PMP..."
