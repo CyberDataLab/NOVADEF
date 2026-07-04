@@ -254,10 +254,17 @@ def main():
         mid_py = LFD / "machine_id" / "machine_id.py"
         mid = subprocess.check_output(
             [sys.executable, str(mid_py)],
-            text=True
+            text=True,
+            stderr=subprocess.STDOUT,
         ).strip()
     except subprocess.CalledProcessError as e:
+        # e.output has machine_id.py's own error message (why it exited
+        # non-zero) — without stderr=STDOUT above and printing e.output here,
+        # this only ever showed the generic "returned non-zero exit status 1"
+        # with no indication of the actual cause (e.g. the mid binary losing
+        # its executable bit during a copy/clone to another machine).
         print(f"Error executing machine_id.py: {e}")
+        print(f"Output:\n{e.output}")
         return
 
     network_mode = detect_os()

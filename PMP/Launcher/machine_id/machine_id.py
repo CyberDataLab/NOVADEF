@@ -28,10 +28,18 @@ def get_device_id():
         else:
             raise e
     except FileNotFoundError:
-        print(f"Binary not found '{mid_binary}'.")
+        print(f"Binary not found '{mid_binary}'.", file=sys.stderr)
+        sys.exit(1)
+    except PermissionError:
+        print(
+            f"Permission denied executing '{mid_binary}'. "
+            f"The file likely lost its executable bit during copy/clone/unzip — "
+            f"run: chmod +x '{mid_binary}'",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except subprocess.CalledProcessError as e:
-        print(f"Error while executing '{mid_binary}': {e.output.decode('utf-8')}")
+        print(f"Error while executing '{mid_binary}': {e.output.decode('utf-8')}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
