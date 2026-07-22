@@ -52,7 +52,7 @@
             "commands": [
                 {
                     "type": "ssh",
-                    "command": "sudo -n sh -lc 'printf \"#!/bin/sh\\nsleep 2\\niptables -C INPUT -m iprange --src-range __ip_range_start__:value-__ip_range_end__:value -j DROP 2>/dev/null || iptables -A INPUT -m iprange --src-range __ip_range_start__:value-__ip_range_end__:value -j DROP\\niptables -C OUTPUT -m iprange --dst-range __ip_range_start__:value-__ip_range_end__:value -j DROP 2>/dev/null || iptables -A OUTPUT -m iprange --dst-range __ip_range_start__:value-__ip_range_end__:value -j DROP\\n\" > /tmp/_block_range.sh && chmod +x /tmp/_block_range.sh && setsid sh /tmp/_block_range.sh </dev/null >/dev/null 2>&1 & echo novadef_countermeasure_applied'"
+                    "command": "sudo -n sh -lc 'printf \"#!/bin/sh\\nsleep 0\\niptables -C INPUT -m iprange --src-range __ip_range_start__:value-__ip_range_end__:value -j DROP 2>/dev/null || iptables -A INPUT -m iprange --src-range __ip_range_start__:value-__ip_range_end__:value -j DROP\\niptables -C OUTPUT -m iprange --dst-range __ip_range_start__:value-__ip_range_end__:value -j DROP 2>/dev/null || iptables -A OUTPUT -m iprange --dst-range __ip_range_start__:value-__ip_range_end__:value -j DROP\\n\" > /tmp/_block_range.sh && chmod +x /tmp/_block_range.sh && setsid sh /tmp/_block_range.sh </dev/null >/dev/null 2>&1 & echo novadef_countermeasure_applied'"
                 }
             ],
             "agent": "soarca--b4122e67-ccb7-4117-92e3-c5060897ff74",

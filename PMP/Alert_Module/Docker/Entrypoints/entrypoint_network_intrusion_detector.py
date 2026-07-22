@@ -48,6 +48,47 @@ IMMEDIATE_AUTH_CAMPAIGN_ALERT = os.getenv("DETECTOR_IMMEDIATE_AUTH_CAMPAIGN_ALER
 CAMPAIGN_DEDUP_TTL_SECONDS = int(os.getenv("DETECTOR_CAMPAIGN_DEDUP_TTL_SECONDS", "1800"))
 ALLOWED_REMOTE_PORTS = {22, 2222, 3389, 443, 1194}
 
+# ── Fast fan-in detector ─────────────────────────────────────────────────────
+# A packet-rate detector that runs alongside the Isolation Forest and fires in
+# 1-2s instead of waiting ~40-60s for CICFlowMeter to characterise mature flows.
+# It counts, per (dst_ip, dst_port), how many DISTINCT source IPs open a new
+# connection (TCP SYN) within a sliding window. A distributed password-spraying
+# / flooding attack is exactly this shape — many attacker IPs hitting one
+# service port at once — whereas benign traffic (Prometheus scraping, a single
+# SSH client) has a fan-in of 1. The Isolation Forest still runs and enriches
+# the profile afterwards; this only shortcuts the DETECTION latency.
+FAST_FANIN_ENABLED = os.getenv("DETECTOR_FAST_FANIN_ENABLED", "true").lower() in {"1", "true", "yes"}
+# When the fast fan-in detector is the primary detector, the Isolation Forest
+# path is redundant for DETECTION: it only added an anomaly_score, while the
+# actual attacker profile (flow statistics, coordination, timing) is rebuilt
+# independently by TAPCD from MongoDB the moment it receives the alert. Running
+# both produced two alerts for the same attack and made detection latency the
+# slow path's (~40-60s). So by default, when fan-in is on, the Isolation Forest
+# is off — one fast detector emits one alert, TAPCD does the profiling. Set
+# DETECTOR_ISOLATION_FOREST_ENABLED=true to run it alongside (legacy behaviour).
+ISOLATION_FOREST_ENABLED = os.getenv(
+    "DETECTOR_ISOLATION_FOREST_ENABLED",
+    "false" if FAST_FANIN_ENABLED else "true",
+).lower() in {"1", "true", "yes"}
+FAST_FANIN_WINDOW_SECONDS = float(os.getenv("DETECTOR_FAST_FANIN_WINDOW_SECONDS", "2.0"))
+# Distinct source IPs to the same (dst_ip, dst_port) within the window that
+# together constitute a distributed attack. The spraying attack sweeps IPs
+# 172.18.0.160-175 (16 sources); benign traffic never fans in like this.
+FAST_FANIN_MIN_UNIQUE_IPS = int(os.getenv("DETECTOR_FAST_FANIN_MIN_UNIQUE_IPS", "4"))
+# Total new-connection (SYN) packets within the window. Guards against a couple
+# of stray SYNs from unrelated hosts tripping the fan-in on their own.
+FAST_FANIN_MIN_SYN_PACKETS = int(os.getenv("DETECTOR_FAST_FANIN_MIN_SYN_PACKETS", "8"))
+# One fast alert per (dst_ip, dst_port) per attack; after that, SOARCA's own
+# dedup (LAST_NETWORK_CM_BY_VICTIM) already prevents a second countermeasure,
+# so this only gates re-triggering the ACTION, not re-observing the campaign.
+FAST_FANIN_DEDUP_SECONDS = float(os.getenv("DETECTOR_FAST_FANIN_DEDUP_SECONDS", "1800"))
+# After the first (action-triggering) alert, keep emitting lightweight
+# enrichment-only alerts on this cadence (carrying the full campaign-lifetime
+# accumulated src_ips, not just the last window) so the actor profile keeps
+# growing with new attacker IPs even after the countermeasure already fired —
+# without waiting out the full FAST_FANIN_DEDUP_SECONDS to see them.
+FAST_FANIN_ENRICH_INTERVAL_SECONDS = float(os.getenv("DETECTOR_FAST_FANIN_ENRICH_INTERVAL_SECONDS", "5.0"))
+
 # PMP infrastructure IPs that must never be classified as attackers or
 # victims. These are stable container HOSTNAMES (SOARCA executor, trigger,
 # integrators, Kafka, MISP, the experiments API…) that connect to the victim
@@ -123,6 +164,11 @@ def _kafka_consumer() -> Consumer:
             "auto.offset.reset": "latest",
             "enable.auto.commit": True,
             "allow.auto.create.topics": True,
+            # Default (300000ms) gets exceeded under the packet volume an
+            # experiment attack generates, dropping the consumer from its
+            # group; on reconnect it replays the backlog and attributes old
+            # traffic's alerts to whatever run is current at that moment.
+            "max.poll.interval.ms": 900000,
         }
     )
 
@@ -734,6 +780,15 @@ def _to_tapcd_compat_snort_event(alert: dict[str, Any]) -> dict[str, Any]:
         # flow data is incomplete.
         "src_ips": src_ips,
         "dst_ip": dst_ip,
+        # ISO-formatted first_seen (this attack's own real start, from the
+        # accumulated alert window — NOT a fixed lookback) so stream_low.py's
+        # MongoDB coordinated-flow query can use it to tighten its lookback
+        # window's floor. Without this, that query's blind fixed-size window
+        # can reach back into a PREVIOUS run's leftover flows to the same
+        # reused victim IP when two runs on the same scenario are less than
+        # that window's length apart — see stream_low.py's own comment on
+        # _query_flows_for_alert for the real incident this caused.
+        "first_seen": str(alert.get("first_seen", alert.get("timestamp", "")) or ""),
     }
 
 
@@ -1027,16 +1082,180 @@ def _process_event(
     return False
 
 
+class FastFanInDetector:
+    """Sliding-window fan-in detector. Fires an alert the moment enough
+    distinct source IPs send traffic to the same (dst_ip, dst_port) inside the
+    window — orders of magnitude faster than the flow-statistics path.
+
+    It consumes the SAME normalized events the Isolation Forest path already
+    parses from the tshark NDJSON (src_ip / dst_ip / dst_port / timestamp), so
+    it needs no extra file read and no raw-flag parsing: a distributed spraying
+    attack is defined by its shape (many attacker IPs → one auth port at once),
+    which the fan-in captures directly regardless of individual TCP flags."""
+
+    def __init__(self) -> None:
+        # (dst_ip, dst_port) -> deque[(ts, src_ip)]
+        self._windows: dict[tuple[str, int], deque[tuple[float, str]]] = {}
+        self._last_alert: dict[tuple[str, int], float] = {}
+        # Campaign-lifetime accumulator of every distinct src_ip ever seen for
+        # this (dst_ip, dst_port), separate from `_windows` (which only keeps
+        # the last FAST_FANIN_WINDOW_SECONDS for the initial fan-in trigger
+        # condition). The FIRST alert fires fast off the 2s window so SOARCA
+        # can act immediately; every alert AFTER that reports this full
+        # accumulated set instead, so the actor profile keeps growing with
+        # every new attacker IP that joins the campaign even once the
+        # countermeasure is already applied — without needing the fan-in
+        # window itself to stay artificially wide.
+        self._all_ips_seen: dict[tuple[str, int], set[str]] = {}
+        self._last_enrich_alert: dict[tuple[str, int], float] = {}
+        # Last IP set actually reported in an enrichment alert, so we don't
+        # re-send an identical set every FAST_FANIN_ENRICH_INTERVAL_SECONDS
+        # when nothing new has joined the campaign.
+        self._last_enrich_ips: dict[tuple[str, int], set[str]] = {}
+
+    def reset(self) -> None:
+        self._windows.clear()
+        self._last_alert.clear()
+        self._all_ips_seen.clear()
+        self._last_enrich_alert.clear()
+        self._last_enrich_ips.clear()
+
+    def observe(self, event: dict[str, Any], producer: Producer) -> bool:
+        src_ip = str(event.get("src_ip", "") or "").strip()
+        dst_ip = str(event.get("dst_ip", "") or "").strip()
+        try:
+            dst_port = int(event.get("dst_port", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if not src_ip or not dst_ip or not dst_port:
+            return False
+        try:
+            ts_epoch = float(event.get("timestamp") or time.time())
+        except (TypeError, ValueError):
+            ts_epoch = time.time()
+
+        # Only remote-access service ports on lab-internal victims, and never
+        # count infrastructure or the victim's own replies as attackers.
+        if dst_port not in ALLOWED_REMOTE_PORTS:
+            return False
+        if not _is_private_lab_ip(dst_ip):
+            return False
+        if _is_infra_src(src_ip) or src_ip == dst_ip:
+            return False
+        key = (dst_ip, dst_port)
+        win = self._windows.setdefault(key, deque())
+        win.append((ts_epoch, src_ip))
+        # Evict entries older than the window.
+        cutoff = ts_epoch - FAST_FANIN_WINDOW_SECONDS
+        while win and win[0][0] < cutoff:
+            win.popleft()
+
+        syn_like = [entry for entry in win]  # all packets in window
+        unique_ips = {entry[1] for entry in syn_like}
+        if len(unique_ips) < FAST_FANIN_MIN_UNIQUE_IPS:
+            return False
+        if len(syn_like) < FAST_FANIN_MIN_SYN_PACKETS:
+            return False
+
+        # Accumulate every distinct attacker IP ever seen for this campaign,
+        # regardless of dedup state below — this is what lets later alerts
+        # (post-countermeasure) report the FULL set instead of just whatever
+        # is in the last 2s window.
+        seen = self._all_ips_seen.setdefault(key, set())
+        seen.update(unique_ips)
+
+        now = time.time()
+        is_first_alert = (now - self._last_alert.get(key, 0.0)) >= FAST_FANIN_DEDUP_SECONDS
+        if is_first_alert:
+            self._last_alert[key] = now
+            self._last_enrich_alert[key] = now
+        else:
+            # Not the first alert for this campaign — SOARCA has almost
+            # certainly already acted (its own dedup, LAST_NETWORK_CM_BY_
+            # VICTIM, prevents a second countermeasure regardless). Only emit
+            # an ENRICHMENT alert here, on a short cadence, so the actor
+            # profile keeps growing with new attacker IPs without re-spamming
+            # Kafka/MISP every single observe() call.
+            if (now - self._last_enrich_alert.get(key, 0.0)) < FAST_FANIN_ENRICH_INTERVAL_SECONDS:
+                return False
+            # Nothing new to report since the last enrichment alert — no
+            # point re-sending the same IP set again.
+            if seen <= set(self._last_enrich_ips.get(key, set())):
+                return False
+            self._last_enrich_alert[key] = now
+
+        self._last_enrich_ips[key] = set(seen)
+        src_ips_sorted = sorted(seen)
+        wall_now = now
+        alert = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(wall_now)),
+            "detector": "network_intrusion_detector",
+            "correlation_id": f"nid-fastfanin-{dst_ip}-{dst_port}-{int(wall_now // 1800)}",
+            "campaign_id": "",
+            "alert_type": "distributed_password_spraying",
+            "title": f"Distributed Password Spraying against {dst_ip}:{dst_port}",
+            "src_ips": src_ips_sorted,
+            "dst_ip": dst_ip,
+            "dst_port": dst_port,
+            "usernames": [],
+            "failed_attempts": len(syn_like),
+            "host_signal_seen": False,
+            "window_seconds": FAST_FANIN_WINDOW_SECONDS,
+            "requests_per_minute": round(len(syn_like) / max(FAST_FANIN_WINDOW_SECONDS, 0.001) * 60.0, 1),
+            "anomaly_score": 0.0,
+            "model_anomaly": True,
+            "detection_path": "fast_fanin" if is_first_alert else "fast_fanin_enrich",
+            "features": {
+                "unique_source_ips": len(seen),
+                "syn_packets_in_window": len(syn_like),
+            },
+            "mitre_attack": ["T1110", "T1110.003", "T1133"],
+            "d3fend_candidates": [
+                "Network Traffic Filtering",
+                "Inbound Traffic Filtering",
+                "Account Locking",
+                "Connected Honeynet",
+                "Session Termination",
+            ],
+            "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(min(e[0] for e in syn_like))),
+            "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(max(e[0] for e in syn_like))),
+        }
+        try:
+            append_alert(alert)
+            producer.produce(KAFKA_TOPIC_OUT, value=json.dumps(alert).encode("utf-8"))
+            tapcd_compat_event = _to_tapcd_compat_snort_event(alert)
+            producer.produce(KAFKA_TOPIC_TAPCD_COMPAT, value=json.dumps(tapcd_compat_event).encode("utf-8"))
+            producer.poll(0)
+            logger.info(
+                "⚡ FAST fan-in %s: %s:%s uniq_src=%d syn_pkts=%d (window=%ss)",
+                "alert" if is_first_alert else "enrichment",
+                dst_ip, dst_port, len(seen), len(syn_like), FAST_FANIN_WINDOW_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("Fast fan-in alert publish failed: %s", exc)
+            return False
+        return True
+
+
 def main() -> None:
     model = SprayingAnomalyModel()
-    model.train()
+    # Only train the Isolation Forest baseline when it will actually be used —
+    # when the fast fan-in detector is primary, this ~500-batch synthetic
+    # training is dead weight that just slows startup.
+    if ISOLATION_FOREST_ENABLED:
+        model.train()
 
     _ensure_kafka_topics([KAFKA_TOPIC_IN, KAFKA_TOPIC_FLOW_IN, KAFKA_TOPIC_OUT, KAFKA_TOPIC_TAPCD_COMPAT])
     consumer = _kafka_consumer()
     producer = _kafka_producer()
-    # Solo observación pasiva de red: tshark (paquetes) y CICFlowMeter (flujos).
-    # NO se consume network_auth_events: el atacante no alimenta al defensor.
-    consumer.subscribe([KAFKA_TOPIC_IN, KAFKA_TOPIC_FLOW_IN])
+    # Solo observación pasiva de red: tshark (paquetes) y, cuando el Isolation
+    # Forest está activo, también CICFlowMeter (flujos). El fan-in solo necesita
+    # los paquetes tshark; los flujos cic_flow solo alimentaban al IF, y TAPCD
+    # reconstruye las estadísticas de flujo desde MongoDB por su cuenta.
+    subscribe_topics = [KAFKA_TOPIC_IN]
+    if ISOLATION_FOREST_ENABLED:
+        subscribe_topics.append(KAFKA_TOPIC_FLOW_IN)
+    consumer.subscribe(subscribe_topics)
 
     recent_events: deque[dict[str, Any]] = deque(maxlen=WINDOW_PACKETS if WINDOW_PACKETS > 0 else None)
     last_alert_by_target: dict[str, float] = {}
@@ -1052,7 +1271,21 @@ def main() -> None:
     tshark_offset = _load_trace_offset(TSHARK_TRACE_PATH)
     runtime_log_offsets = _load_runtime_offsets()
 
+    # Fast fan-in detector: runs on the same normalized packet events as the
+    # Isolation Forest, but fires in ~1-2s on the distributed-spraying shape
+    # (many source IPs → one auth port) instead of waiting for flow stats.
+    fast_detector = FastFanInDetector() if FAST_FANIN_ENABLED else None
+
     logger.info("Escuchando %s y publicando alertas en %s", KAFKA_TOPIC_IN, KAFKA_TOPIC_OUT)
+    if fast_detector is not None:
+        logger.info(
+            "⚡ Fast fan-in detector ACTIVO (PRIMARIO, window=%ss min_uniq_ips=%d min_pkts=%d)",
+            FAST_FANIN_WINDOW_SECONDS, FAST_FANIN_MIN_UNIQUE_IPS, FAST_FANIN_MIN_SYN_PACKETS,
+        )
+    logger.info(
+        "Isolation Forest %s",
+        "ACTIVO (enriquecimiento en paralelo)" if ISOLATION_FOREST_ENABLED else "DESACTIVADO (detección la lleva el fan-in; el perfilado lo hace TAPCD)",
+    )
 
     while True:
         # DETECCIÓN 100% PASIVA: el detector NO lee el fichero de evidencia del
@@ -1062,20 +1295,23 @@ def main() -> None:
         # (flujos), consumidos vía archivo de traza y vía Kafka más abajo.
         file_events, tshark_offset = _read_tshark_events_since(TSHARK_TRACE_PATH, tshark_offset)
         for file_event in file_events:
-            _process_event(
-                file_event,
-                time.time(),
-                model,
-                producer,
-                recent_events,
-                last_alert_by_target,
-                target_last_seen_ts,
-                alerted_active_targets,
-                alerted_campaign_state,
-                recent_campaign_by_target,
-                recent_campaign_by_target_port,
-                alerted_ips_by_target,
-            )
+            if fast_detector is not None:
+                fast_detector.observe(file_event, producer)
+            if ISOLATION_FOREST_ENABLED:
+                _process_event(
+                    file_event,
+                    time.time(),
+                    model,
+                    producer,
+                    recent_events,
+                    last_alert_by_target,
+                    target_last_seen_ts,
+                    alerted_active_targets,
+                    alerted_campaign_state,
+                    recent_campaign_by_target,
+                    recent_campaign_by_target_port,
+                    alerted_ips_by_target,
+                )
 
         msg = consumer.poll(POLL_TIMEOUT_SECONDS)
         if msg is None:
@@ -1096,20 +1332,26 @@ def main() -> None:
         if event is None:
             continue
 
-        _process_event(
-            event,
-            time.time(),
-            model,
-            producer,
-            recent_events,
-            last_alert_by_target,
-            target_last_seen_ts,
-            alerted_active_targets,
-            alerted_campaign_state,
-            recent_campaign_by_target,
-            recent_campaign_by_target_port,
-            alerted_ips_by_target,
-        )
+        # Only feed tshark packet events to the fast fan-in detector; cic_flow
+        # events are aggregated flows, not per-packet, so their src/dst pairs
+        # would double-count against the sliding window.
+        if fast_detector is not None and msg.topic() == KAFKA_TOPIC_IN:
+            fast_detector.observe(event, producer)
+        if ISOLATION_FOREST_ENABLED:
+            _process_event(
+                event,
+                time.time(),
+                model,
+                producer,
+                recent_events,
+                last_alert_by_target,
+                target_last_seen_ts,
+                alerted_active_targets,
+                alerted_campaign_state,
+                recent_campaign_by_target,
+                recent_campaign_by_target_port,
+                alerted_ips_by_target,
+            )
 
 
 if __name__ == "__main__":

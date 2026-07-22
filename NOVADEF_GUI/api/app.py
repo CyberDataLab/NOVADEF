@@ -8,12 +8,15 @@ import statistics
 import shutil
 import re
 import subprocess
+import tarfile
 import threading
 import time
 import zipfile
 import os
 import base64
+import hashlib
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,8 +27,27 @@ import bcrypt
 import jwt as pyjwt
 import psycopg2
 import psycopg2.extras
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    Image,
+    NextPageTemplate,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.charts.legends import Legend
 
 
 app = Flask(__name__, static_folder=None)
@@ -230,8 +252,23 @@ TRAFFIC_SERIES: dict[str, list[dict[str, float]]] = {}
 TRAFFIC_BASELINES: dict[str, float] = {}
 FALCO_SAMPLES: dict[str, dict[str, float]] = {}
 HOST_METRICS_LAST: dict[str, dict[str, float]] = {}
+# Last known-good (net_in, dropped) pair per run, keyed the same way as
+# HOST_METRICS_LAST — see its use in _read_network() below for why this
+# exists: a transient iptables-save failure used to fall through to the L2
+# NIC counter fallback, which counts broadcast/ARP/other-container traffic on
+# the shared Docker bridge and reports totals orders of magnitude larger than
+# real victim-directed traffic (measured: a single sample spiking to 500k+
+# packets against a ~300-packet baseline). Reusing the last valid netfilter
+# reading for that one tick is consistent with the surface, unlike the L2
+# fallback, and only papers over an isolated read failure, not a real gap.
+NET_METRICS_LAST: dict[str, dict[str, float]] = {}
 TRAFFIC_LAST_PERSIST_AT: dict[str, float] = {}
 TRAFFIC_MARKERS_CACHE: dict[str, dict[str, float | None]] = {}
+# Per-run cooldown for the network_detect_at/host_detect_at log-tailing probe
+# in _traffic_payload_for_run -- deliberately separate from
+# TRAFFIC_MARKERS_CACHE, which any caller (including the /metrics Prometheus
+# scrape) refreshes and so cannot double as this block's own throttle.
+DETECT_MARKERS_PROBE_CACHE: dict[str, float] = {}
 TRAFFIC_ONDEMAND_SAMPLE_AT: dict[str, float] = {}
 FAST_COUNTERMEASURE_TS: dict[str, float] = {}
 FAST_COUNTERMEASURE_REQUESTED_TS: dict[str, float] = {}
@@ -241,16 +278,47 @@ FAST_COUNTERMEASURE_REQUESTED_TS: dict[str, float] = {}
 _ISOLATION_NOISE_STOPPED: set[str] = set()
 # Previous cgroup counter samples for CPU-rate computation in _read_scenario_telegraf_metrics
 _CGROUP_PREV_SAMPLES: dict[str, dict] = {}
+# Shared pool for _container_observe_stats' 3 independent docker-exec reads
+# (network, cgroup/telegraf, falco) — running them concurrently instead of
+# sequentially is what gets the sampler close to its ~0.1s target interval;
+# each read is its own docker-exec (~60-100ms) so 3 sequential calls cost
+# ~200-300ms, while in parallel the wall-clock cost is close to the slowest
+# single one. A module-level pool avoids the overhead of spinning up a new
+# thread pool on every sample (the sampler calls this several times/sec).
+_OBSERVE_STATS_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="observe-stats")
 # Live state cache: cache /api/state lite results to avoid redundant deep log reads (~800ms TTL)
 LIVE_STATE_CACHE: dict[str, dict[str, Any]] = {}
 LIVE_STATE_CACHE_TTL: dict[str, float] = {}
 LOCK = threading.RLock()
+# Guards against generating two report_ids for the same run_id: the
+# background auto-generation in _run_background and the on-demand
+# /api/report/latest endpoint both check the same "ready" evidence, so
+# without this a race between them produced two independent report
+# directories for one run, leaving one orphaned in RUN_HISTORY.
+REPORT_GENERATION_LOCK = threading.Lock()
+_REPORTS_IN_PROGRESS: set[str] = set()
 MAX_LOG_CHARS = 60000
 DOCKER_CLIENT = docker.from_env()
-REPORTS_DIR = Path("/tmp/novadef_reports")
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 RUNTIME_STATE_FILE = Path(os.getenv("NOVADEF_GUI_RUNTIME_STATE_FILE", "/tmp/novadef_gui_runtime_state.json"))
 RUNTIME_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+# Must live under the same mounted /runtime volume as RUNTIME_STATE_FILE (see
+# SCENARIO_ROOT/LOCAL_RUNTIME_ROOT below for the same reasoning), NOT /tmp:
+# incident reports are the only source _report_ids_and_actor_ids_for_run()
+# reads to find which MISP event_id/actor_id to purge when a scenario is
+# deleted. A /tmp path is wiped on every container recreate, silently
+# breaking that purge for any run whose report predates the recreate (its
+# report_id stays in the persisted history, but the JSON it points to is
+# gone) — MISP events then linger and get "reused" by the next experiment
+# against the same victim instead of ever being cleaned up.
+REPORTS_DIR = Path(os.getenv("NOVADEF_REPORTS_DIR", str(RUNTIME_STATE_FILE.parent / "reports")))
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+_GUI_DIR = Path(os.getenv("NOVADEF_GUI_DIR", "/gui"))
+# SOARCA/playbooks/ is reachable here via the same host-repo bind mount the
+# rest of this container already relies on (-v $NOVADEF_HOST_ROOT:/novadef),
+# NOT via HOST_REPO_ROOT (that's the HOST-side path, used only when this
+# process itself launches docker containers with volume mounts — it isn't
+# necessarily where THIS container's own filesystem has the repo).
+SOARCA_PLAYBOOKS_DIR = Path(os.getenv("NOVADEF_SOARCA_PLAYBOOKS_DIR", "/novadef/SOARCA/playbooks"))
 TS_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,(\d+))?")
 ISO_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
 def _resolve_repo_root() -> Path:
@@ -300,6 +368,14 @@ def _sanitize_scenario_id(raw: str | None) -> str:
     if not token:
         token = f"scenario-{uuid.uuid4().hex[:8]}"
     return token
+
+
+def _clamp_int(raw: Any, *, lo: int, hi: int, default: int) -> int:
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, val))
 
 
 def _load_scenario_catalog() -> dict[str, dict[str, Any]]:
@@ -367,6 +443,7 @@ def _ensure_persistent_scenario(
 ) -> dict[str, Any]:
     seed_run_id = _scenario_seed_run_id(scenario_id)
     scenario = _ensure_scenario_for_run(seed_run_id)
+    scenario["scenario_id"] = scenario_id
     _sync_pmp_observation_with_scenario(scenario)
     _upsert_scenario_catalog_entry(scenario_id, scenario, display_name=display_name, template=template)
     return scenario
@@ -465,7 +542,12 @@ def _scenario_catalog_entry_is_orphan(entry: dict[str, Any]) -> bool:
     runtime_root_exists = False
     try:
         seed_run_id = _scenario_seed_run_id(sid)
-        runtime_root_exists = _scenario_runtime_root(seed_run_id).exists()
+        # LOCAL_RUNTIME_ROOT (this process's real /runtime mount), not
+        # SCENARIO_ROOT (a host-path string only meaningful to the Docker
+        # API) — checking the latter directly here reflected whether Flask's
+        # own mkdir() calls happened to create the phantom dir, not whether
+        # the scenario's real data still exists.
+        runtime_root_exists = _scenario_local_runtime_root(seed_run_id).exists()
     except Exception:
         runtime_root_exists = False
 
@@ -496,6 +578,7 @@ def _runtime_state_snapshot() -> dict[str, Any]:
             "TRAFFIC_BASELINES": dict(TRAFFIC_BASELINES),
             "FALCO_SAMPLES": {k: dict(v) for k, v in FALCO_SAMPLES.items()},
             "HOST_METRICS_LAST": {k: dict(v) for k, v in HOST_METRICS_LAST.items()},
+            "NET_METRICS_LAST": {k: dict(v) for k, v in NET_METRICS_LAST.items()},
         }
 
 
@@ -540,6 +623,10 @@ def _restore_runtime_state() -> None:
             for run_id, value in (payload.get("HOST_METRICS_LAST") or {}).items():
                 if isinstance(value, dict):
                     HOST_METRICS_LAST[str(run_id)] = dict(value)
+            NET_METRICS_LAST.clear()
+            for run_id, value in (payload.get("NET_METRICS_LAST") or {}).items():
+                if isinstance(value, dict):
+                    NET_METRICS_LAST[str(run_id)] = dict(value)
     except Exception as e:
         print(f"[state-debug] Failed to restore runtime state: {e}", flush=True)
 
@@ -558,6 +645,22 @@ def _scenario_project_name(run_id: str) -> str:
 
 def _scenario_runtime_root(run_id: str) -> Path:
     return SCENARIO_ROOT / _scenario_project_name(run_id)
+
+
+def _scenario_local_runtime_root(run_id: str) -> Path:
+    """
+    Same layout as _scenario_runtime_root, but rooted at LOCAL_RUNTIME_ROOT
+    (the actual /runtime mount inside this Flask container) instead of
+    SCENARIO_ROOT (a host path string meant for the Docker API, not for this
+    process's own filesystem access — see the module-level comment above
+    HOST_RUNTIME_ROOT/SCENARIO_ROOT).
+
+    Use this whenever THIS process needs to write/read run artifacts
+    directly (not as a bind-mount target for another container) — e.g.
+    _persist_run_artifacts' telemetry/report/log snapshots, which used to
+    write under SCENARIO_ROOT and silently never persisted anywhere real.
+    """
+    return LOCAL_RUNTIME_ROOT / "scenarios" / _scenario_project_name(run_id)
 
 
 def _scenario_log_dir(run_id: str) -> Path:
@@ -648,13 +751,22 @@ def _artifact_roots_for_run(run_id: str) -> list[Path]:
     - Always keep run-local artifacts at .novadef_runtime/scenarios/novadef-<run_id>
     - If the run belongs to a persistent scenario, also mirror under that
       scenario folder: .../scenario-<id>/artifacts/runs/<run_id>
+
+    Rooted at _scenario_local_runtime_root (LOCAL_RUNTIME_ROOT), not
+    _scenario_runtime_root (SCENARIO_ROOT) — every caller of this function
+    (_persist_run_artifacts, delete_run) does DIRECT filesystem access from
+    this Flask process itself, never a Docker-API bind mount, so it needs
+    the path that's actually mounted here. Using SCENARIO_ROOT silently wrote
+    telemetry/report/log snapshots into a phantom directory that doesn't
+    survive a container restart (delete_run's cleanup still worked despite
+    this, since _force_remove_tree already tries both roots as candidates).
     """
-    roots: list[Path] = [_scenario_runtime_root(run_id)]
+    roots: list[Path] = [_scenario_local_runtime_root(run_id)]
     run_item = _history_item(run_id) or {}
     if bool(run_item.get("scenario_shared")):
         scenario_id = str(run_item.get("scenario_id") or "").strip()
         if scenario_id:
-            scenario_root = _scenario_runtime_root(_scenario_seed_run_id(scenario_id))
+            scenario_root = _scenario_local_runtime_root(_scenario_seed_run_id(scenario_id))
             roots.append(scenario_root / "artifacts" / "runs" / _sanitize_run_token(run_id))
             exp_token = _sanitize_run_token(str(run_item.get("experiment") or "experiment"))
             roots.append(
@@ -892,6 +1004,43 @@ def _tail_logs(container: str, lines: int = 300, since_ts: int | None = None) ->
                     continue
         return ""
     return out[-MAX_LOG_CHARS:]
+
+
+def _tail_logs_since_filtered(container: str, lines: int, since_ts: int | None) -> str:
+    """Like _tail_logs, but drops lines whose own embedded timestamp
+    (leading "YYYY-MM-DD HH:MM:SS") predates since_ts BEFORE truncating to
+    MAX_LOG_CHARS, instead of truncating the raw blob to its last N
+    characters. On long-running, high-volume, cross-run-shared containers
+    (e.g. pmp-misp-soarca-trigger, whose TAPCD_PROFILE_READY lines can each
+    run >2000 chars once explainability_fields is included), a plain
+    character truncation of `tail` lines can push this run's own profile
+    line out of the window entirely -- leaving only the short "Enviado"
+    summary line (from a different, lighter container) as the sole profile
+    evidence, and silently degrading actor_profiles to a stub with every ML
+    field blank (Motivation/Attitude/Affiliation/Skills). Filtering by the
+    line's own timestamp keeps only what is actually relevant to this run's
+    time window, so the per-run TAPCD_PROFILE_READY line is not lost to an
+    unrelated run's chatter sharing the same container."""
+    raw = _tail_logs(container, lines=lines, since_ts=since_ts)
+    if not since_ts or not raw:
+        return raw
+    cutoff = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+    kept: list[str] = []
+    for line in raw.splitlines():
+        m = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+        if not m:
+            # Lines without a leading timestamp (continuations, non-log
+            # output) are kept alongside whatever line preceded them.
+            kept.append(line)
+            continue
+        try:
+            ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            kept.append(line)
+            continue
+        if ts >= cutoff:
+            kept.append(line)
+    return "\n".join(kept)[-MAX_LOG_CHARS:]
 
 
 def _parse_prometheus_metric(blob: str, metric_names: list[str]) -> float | None:
@@ -1133,8 +1282,18 @@ def _read_victim_netfilter_input(container_name: str = "scenario_victim") -> tup
             # The INPUT jump rule into the counting chain = total network traffic.
             if chain == "INPUT" and "-j NOVADEF_NET_IN" in rest:
                 net_in = pkts
-            # Explicit DROP rules anywhere relevant (isolation/exp1 block rules).
-            if " -j DROP" in rest:
+            # Explicit DROP rules — INPUT chain only. The isolation
+            # countermeasure (exp1/exp3) also installs a matching OUTPUT DROP
+            # rule (blocking the victim's own replies back to the attacker
+            # range), which used to get summed in here too since this only
+            # checked for "-j DROP" anywhere in the filter table regardless
+            # of chain. OUTPUT packets never passed through NOVADEF_NET_IN
+            # (that jump is INPUT-only), so adding OUTPUT's drop count on top
+            # of net_in's INPUT-only total made `dropped` exceed `net_in` —
+            # effective = max(net_in - dropped, 0) then permanently pinned to
+            # 0 post-countermeasure, hiding the real benign-noise traffic
+            # that keeps flowing in from non-attacker IPs.
+            if chain == "INPUT" and " -j DROP" in rest:
                 rule_drop += pkts
 
         if net_in is None:
@@ -1334,6 +1493,7 @@ def _read_falco_host_metrics(sample_key: str = "falco_novadef", since_ts: float 
         debug_hits = 0.0
         rule_hits: dict[str, float] = {}
         container_hits: dict[str, float] = {}
+        tag_hits: set[str] = set()
         since_epoch_ns = int(float(since_ts) * 1_000_000_000) if since_ts and since_ts > 0 else None
         for ln in lines[-3000:]:
             low = ln.lower()
@@ -1358,6 +1518,8 @@ def _read_falco_host_metrics(sample_key: str = "falco_novadef", since_ts: float 
                 rule_name = str(output_fields.get("rule") or output_fields.get("falco.rule") or output_fields.get("rule_name") or "").strip()
             if rule_name:
                 rule_hits[rule_name] = rule_hits.get(rule_name, 0.0) + 1.0
+            for tag in item.get("tags") or []:
+                tag_hits.add(str(tag).strip().lower())
             # container.id is populated by Falco even when container.name is null.
             # Use it to attribute events to specific containers.
             cid = str(output_fields.get("container.id") or "host").strip() or "host"
@@ -1380,6 +1542,17 @@ def _read_falco_host_metrics(sample_key: str = "falco_novadef", since_ts: float 
             elif "debug" in priority:
                 debug_hits += 1.0
         delta_events = max(total_events - float(prev.get("total_events", 0.0)), 0.0)
+        # Real events-per-second rate, normalized by the ACTUAL elapsed time
+        # since the previous sample (not an assumed fixed interval) -- the
+        # sampler's target cadence is ~0.35s but real-world scheduling jitter
+        # means the true gap between samples varies, so dividing delta_events
+        # by a hardcoded interval would misrepresent the rate whenever a
+        # sample is late. Falls back to delta_events itself (rate over an
+        # implicit ~1s) only on the very first sample, when there is no
+        # previous timestamp to compute a real elapsed time from.
+        prev_ts = prev.get("ts")
+        elapsed = max(now - float(prev_ts), 0.05) if prev_ts else 1.0
+        signal_rate_per_sec = delta_events / elapsed
         top_rules = [
             {"rule": rule, "count": int(count)}
             for rule, count in sorted(rule_hits.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
@@ -1388,6 +1561,7 @@ def _read_falco_host_metrics(sample_key: str = "falco_novadef", since_ts: float 
         return {
             "falco_signal_total": round(total_events, 3),
             "falco_signal_delta": round(delta_events, 3),
+            "falco_signal_rate_per_sec": round(signal_rate_per_sec, 3),
             "falco_warning_events": round(warning_hits, 3),
             "falco_error_events": round(error_hits, 3),
             "falco_critical_events": round(critical_hits, 3),
@@ -1406,6 +1580,11 @@ def _read_falco_host_metrics(sample_key: str = "falco_novadef", since_ts: float 
             # Per-container event counts keyed by container.id.
             # "host" means the event had no container context (kernel-level).
             "falco_by_container": {cid: int(cnt) for cid, cnt in container_hits.items()},
+            # Falco's own rule tags (e.g. "file", "execution", "process",
+            # "impact") straight from falco_events.json — real evidence of
+            # what a rule actually observed, independent of any specific
+            # rule's literal name/wording.
+            "falco_tags": sorted(tag_hits),
             # Backward-compatible aliases for callers that still expect the
             # previous field names.
             "cpu_percent": round(total_events, 3),
@@ -1482,8 +1661,16 @@ def _read_scenario_telegraf_metrics(
         if not seen_label:
             return None
 
-        # CPU% from cgroup counter delta.  Expressed as fraction of ONE CPU core
-        # so it can exceed 100% when multiple cores are active (e.g. 8 workers → ~800%).
+        # CPU% from cgroup counter delta, normalized to the host's total core
+        # count so 100% means "using the whole machine", the reading most
+        # dashboards (and the operator) expect — NOVADEF_HOST_CPU_COUNT lets
+        # this be overridden for a container actually capped to fewer cores
+        # (e.g. via --cpus); otherwise it defaults to the host's real core
+        # count. Un-normalized, this used to read as fraction of a SINGLE
+        # core (e.g. 8 active workers on an 8-core host → ~800%), which was
+        # a genuine, correctly-computed number but read as a bug to anyone
+        # expecting "CPU%" to mean "% of the whole machine".
+        _cpu_core_count = max(int(os.getenv("NOVADEF_HOST_CPU_COUNT", "0") or 0), 0) or (os.cpu_count() or 1)
         cpu_percent = 0.0
         now = time.time()
         cache_key = f"{container_name}:{label_token}"
@@ -1495,7 +1682,7 @@ def _read_scenario_telegraf_metrics(
             dt = now - prev_ts
             d_usec = cpu_usec_v2 - prev_usec
             if prev_ts > 0 and dt > 0.05 and d_usec >= 0:
-                cpu_percent = (d_usec / (dt * 1_000_000)) * 100.0
+                cpu_percent = (d_usec / (dt * 1_000_000)) * 100.0 / _cpu_core_count
             _CGROUP_PREV_SAMPLES[cache_key] = {"ts": now, "cpu_usec_v2": cpu_usec_v2}
 
         elif cpu_ns_v1 is not None:
@@ -1504,7 +1691,7 @@ def _read_scenario_telegraf_metrics(
             dt = now - prev_ts
             d_ns = cpu_ns_v1 - prev_ns
             if prev_ts > 0 and dt > 0.05 and d_ns >= 0:
-                cpu_percent = (d_ns / (dt * 1_000_000_000)) * 100.0
+                cpu_percent = (d_ns / (dt * 1_000_000_000)) * 100.0 / _cpu_core_count
             _CGROUP_PREV_SAMPLES[cache_key] = {"ts": now, "cpu_ns_v1": cpu_ns_v1}
 
         # Memory%: container bytes / cgroup limit.
@@ -1549,6 +1736,7 @@ def _container_observe_stats(container_name: str) -> dict[str, float] | None:
                 "falco_events": 0.0,
                 "falco_signal_total": 0.0,
                 "falco_signal_delta": 0.0,
+                "falco_signal_rate_per_sec": 0.0,
                 "falco_warning_events": 0.0,
                 "falco_error_events": 0.0,
                 "falco_critical_events": 0.0,
@@ -1557,6 +1745,7 @@ def _container_observe_stats(container_name: str) -> dict[str, float] | None:
                 "falco_debug_events": 0.0,
                 "falco_top_rules": [],
                 "falco_signal_types": {},
+                "falco_tags": [],
                 "packet_source": "stopped",
             }
 
@@ -1566,32 +1755,56 @@ def _container_observe_stats(container_name: str) -> dict[str, float] | None:
         # never reach the INPUT chain and are never dropped — so the curve never
         # reached 0 after isolation. netfilter INPUT counters only see traffic
         # destined to the victim and reflect the DROP policy directly.
-        packet_source = "netfilter_input"
-        packet_count = 0.0
-        dropped_packets = 0.0
-        effective_packets = 0.0
-
-        nf = _read_victim_netfilter_input(container_name)
-        if nf is not None:
-            total_network_in, dropped_packets = nf
-            packet_count = float(total_network_in)
-            effective_packets = max(float(total_network_in) - float(dropped_packets), 0.0)
-        else:
-            # Fallback chain: NIC counter, then tshark.
-            packet_source = "victim_proc"
-            packet_count = _read_victim_rx_packets(container_name)
-            if packet_count is None or packet_count == 0.0:
-                print(f"[traffic-debug] netfilter+victim_proc unavailable for {container_name}, trying tshark", flush=True)
-                packet_count = _read_tshark_packet_count(container_name)
-                if packet_count is not None and packet_count > 0:
-                    packet_source = "tshark_inbound"
-                    effective_packets = float(packet_count or 0.0)
-                else:
-                    packet_count = 0.0
-                    effective_packets = 0.0
+        def _read_network() -> tuple[str, float, float, float]:
+            packet_source = "netfilter_input"
+            packet_count = 0.0
+            dropped_packets = 0.0
+            effective_packets = 0.0
+            nf = _read_victim_netfilter_input(container_name)
+            if nf is not None:
+                total_network_in, dropped_packets = nf
+                packet_count = float(total_network_in)
+                effective_packets = max(float(total_network_in) - float(dropped_packets), 0.0)
+                if current_run_id:
+                    NET_METRICS_LAST[current_run_id] = {
+                        "net_in": packet_count,
+                        "dropped": dropped_packets,
+                    }
             else:
-                dropped_packets = _read_victim_drop_packets(container_name)
-                effective_packets = max(float(packet_count or 0.0) - float(dropped_packets or 0.0), 0.0)
+                # netfilter_input read failed for this one tick (transient
+                # docker-exec contention, often from SOARCA's own exec_run
+                # applying the countermeasure at the same moment). Reuse the
+                # last known-good (net_in, dropped) rather than falling
+                # through to the L2 NIC counter below — that fallback counts
+                # broadcast/ARP/other-container traffic on the shared Docker
+                # bridge and reports totals orders of magnitude larger than
+                # real victim-directed traffic (measured: a single sample
+                # spiking to 500k+ packets against a ~300-packet baseline,
+                # OFF by three orders of magnitude and useless for the chart).
+                _prev_net = NET_METRICS_LAST.get(current_run_id or "") if current_run_id else None
+                if _prev_net is not None:
+                    packet_source = "netfilter_input_stale"
+                    packet_count = float(_prev_net.get("net_in", 0.0))
+                    dropped_packets = float(_prev_net.get("dropped", 0.0))
+                    effective_packets = max(packet_count - dropped_packets, 0.0)
+                else:
+                    # No prior good reading this run (e.g. very first sample) —
+                    # only now is the L2 fallback chain worth trying.
+                    packet_source = "victim_proc"
+                    packet_count = _read_victim_rx_packets(container_name)
+                    if packet_count is None or packet_count == 0.0:
+                        print(f"[traffic-debug] netfilter+victim_proc unavailable for {container_name}, trying tshark", flush=True)
+                        packet_count = _read_tshark_packet_count(container_name)
+                        if packet_count is not None and packet_count > 0:
+                            packet_source = "tshark_inbound"
+                            effective_packets = float(packet_count or 0.0)
+                        else:
+                            packet_count = 0.0
+                            effective_packets = 0.0
+                    else:
+                        dropped_packets = _read_victim_drop_packets(container_name)
+                        effective_packets = max(float(packet_count or 0.0) - float(dropped_packets or 0.0), 0.0)
+            return packet_source, packet_count, dropped_packets, effective_packets
 
         # NOTE: all three experiments now measure inbound victim traffic the same
         # way — via the NOVADEF_NET_IN counting chain (net_in) minus everything
@@ -1602,14 +1815,54 @@ def _container_observe_stats(container_name: str) -> dict[str, float] | None:
 
         run_started_at = float((run_item or {}).get("started_at") or 0.0) or None
         attack_started_at = float((run_item or {}).get("attack_started_at") or 0.0) or None
-        victim_stats = _read_scenario_telegraf_metrics(container_name) or {}
-        # Telegraf endpoint is not exposed inside victim container — fall back to
-        # Docker daemon stats which always reflect real container CPU/RAM usage.
-        if not victim_stats:
+
+        def _read_host_stats() -> dict[str, float]:
+            # host_source mirrors packet_source's role for the network side:
+            # the frontend's launch-screen watcher (armLaunchSuppression)
+            # needs to know when the sampler has reached the FAST host-stats
+            # path (cgroup, ~60-100ms/sample) rather than still falling back
+            # to the slow one (_docker_runtime_stats' container.stats() call,
+            # ~1-1.7s/sample) that used to silently cap the whole sampler to
+            # ~1 sample/2s regardless of EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_
+            # SECONDS. Without this field there was no way to tell the two
+            # apart from the API response alone.
+            victim_stats = _read_scenario_telegraf_metrics(container_name) or {}
+            if victim_stats:
+                victim_stats["host_source"] = "telegraf"
+                return victim_stats
+            # Telegraf endpoint is not exposed inside ephemeral scenario victim
+            # containers, so that call always returns None here — fall back to a
+            # direct cgroup read (~60-100ms, see _read_victim_cgroup_stats) rather
+            # than straight to Docker daemon stats, which blocks for ~1-1.7s per
+            # call and was silently capping the whole sampler to ~1 sample/2s no
+            # matter how low EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_SECONDS was set.
+            victim_stats = _read_victim_cgroup_stats(container_name) or {}
+            if victim_stats:
+                victim_stats["host_source"] = "cgroup"
+                return victim_stats
+            # Last-resort fallback for any container without cgroup v2 files
+            # exposed for some reason — keeps the old behavior as a safety net.
             _docker_st = _docker_runtime_stats([container_name])
             victim_stats = _docker_st.get(container_name, {})
+            if victim_stats:
+                victim_stats["host_source"] = "docker_stats"
+            return victim_stats
+
         falco_since_ts = attack_started_at or run_started_at
-        falco_stats = _read_falco_host_metrics(sample_key=current_run_id or container_name, since_ts=falco_since_ts) or {}
+
+        # These 3 reads are each their own docker-exec (~60-100ms) and don't
+        # depend on one another, so running them concurrently (instead of the
+        # ~200-300ms a sequential chain costs) is what gets the sampler close
+        # to its ~0.1s target interval — wall-clock cost becomes close to the
+        # single slowest one rather than their sum.
+        _net_future = _OBSERVE_STATS_POOL.submit(_read_network)
+        _host_future = _OBSERVE_STATS_POOL.submit(_read_host_stats)
+        _falco_future = _OBSERVE_STATS_POOL.submit(
+            _read_falco_host_metrics, sample_key=current_run_id or container_name, since_ts=falco_since_ts
+        )
+        packet_source, packet_count, dropped_packets, effective_packets = _net_future.result()
+        victim_stats = _host_future.result()
+        falco_stats = _falco_future.result() or {}
         prev_host = HOST_METRICS_LAST.get(current_run_id) or {}
         cpu_percent = float(victim_stats.get("cpu_percent", prev_host.get("cpu_percent", 0.0)))
         mem_usage = float(victim_stats.get("memory_bytes", prev_host.get("memory_bytes", 0.0)))
@@ -1639,6 +1892,7 @@ def _container_observe_stats(container_name: str) -> dict[str, float] | None:
             "falco_events": falco_events,
             "falco_signal_total": falco_events,
             "falco_signal_delta": float(falco_stats.get("falco_signal_delta", 0.0)),
+            "falco_signal_rate_per_sec": float(falco_stats.get("falco_signal_rate_per_sec", 0.0)),
             "falco_warning_events": float(falco_stats.get("falco_warning_events", 0.0)),
             "falco_error_events": float(falco_stats.get("falco_error_events", 0.0)),
             "falco_critical_events": float(falco_stats.get("falco_critical_events", 0.0)),
@@ -1647,7 +1901,9 @@ def _container_observe_stats(container_name: str) -> dict[str, float] | None:
             "falco_debug_events": float(falco_stats.get("falco_debug_events", 0.0)),
             "falco_top_rules": falco_stats.get("falco_top_rules", []),
             "falco_signal_types": falco_stats.get("falco_signal_types", {}),
+            "falco_tags": falco_stats.get("falco_tags", []),
             "packet_source": packet_source,
+            "host_source": victim_stats.get("host_source", ""),
         }
         print(
             f"[traffic-debug] Sampled victim telemetry for {container_name}: source={packet_source} packets_raw={packet_count or 0.0} blocked={dropped_packets:.0f} effective={effective_packets:.0f} "
@@ -1673,8 +1929,12 @@ def _append_traffic_sample(run_id: str, container_name: str = "scenario_victim")
             now = float(series[-1]["ts"]) + 0.001
         series.append({"ts": now, **sample})
         print(f"[traffic-debug] Appended sample to {run_id}: series length now={len(series)}", flush=True)
-        if len(series) > 1800:
-            del series[: len(series) - 1800]
+        # Cap raised from 1800 to 12000 to keep roughly the same in-memory time
+        # window (~21 min) now that the sampler targets ~0.1s cadence instead
+        # of the previous 0.7s — 1800 samples at the new rate would only cover
+        # ~3 minutes, well under exp1/exp3's max attack duration (3600s).
+        if len(series) > 12000:
+            del series[: len(series) - 12000]
         for item in RUN_HISTORY:
             if str(item.get("run_id")) == str(run_id):
                 item["traffic_sample_count"] = int(item.get("traffic_sample_count") or 0) + 1
@@ -1705,6 +1965,7 @@ def _append_stopped_run_sample(run_id: str, container_name: str = "scenario_vict
         "falco_events": 0.0,
         "falco_signal_total": 0.0,
         "falco_signal_delta": 0.0,
+        "falco_signal_rate_per_sec": 0.0,
         "falco_warning_events": 0.0,
         "falco_error_events": 0.0,
         "falco_critical_events": 0.0,
@@ -1727,6 +1988,7 @@ def _append_stopped_run_sample(run_id: str, container_name: str = "scenario_vict
             "memory_bytes": 0.0,
             "memory_percent": 0.0,
         }
+        NET_METRICS_LAST[run_id] = {"net_in": 0.0, "dropped": 0.0}
     _persist_runtime_state()
 
 
@@ -1766,15 +2028,22 @@ def _effective_countermeasure_timestamp(
 
     baseline_level = statistics.median(baseline_window) if baseline_window else 0.0
     low_threshold = max(2.0, baseline_level * 2.0, attack_peak * 0.15)
-    sustained = 0
+    # Require the drop to hold for a real ~3s stretch rather than a fixed
+    # sample COUNT — the sampler cadence is now a target (~0.1s) capped by
+    # docker-exec cost, not a fixed interval, so "4 samples" no longer means
+    # a consistent duration the way it did at the old ~0.7-2s cadence.
+    SUSTAINED_DROP_SECONDS = 3.0
+    sustained_since_ts: float | None = None
     for p in post_points:
         delta = float(p.get("delta_packets", 0.0) or 0.0)
+        p_ts = float(p.get("ts", 0.0) or 0.0)
         if delta <= low_threshold:
-            sustained += 1
-            if sustained >= 4:
+            if sustained_since_ts is None:
+                sustained_since_ts = p_ts
+            if p_ts - sustained_since_ts >= SUSTAINED_DROP_SECONDS:
                 return float(p.get("ts", candidate_ts) or candidate_ts)
         else:
-            sustained = 0
+            sustained_since_ts = None
     return candidate_ts
 
 
@@ -1786,7 +2055,19 @@ def _start_traffic_sampler(run_id: str, container_name: str = "scenario_victim")
         # Keep a generous post-run grace period so the chart can still show the
         # countermeasure tail and the victim traffic slope after the attack ends.
         grace_period = 180.0
-        sample_interval = float(os.getenv("EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_SECONDS", "0.7"))
+        # Was pushed to 0.1s (targeting ~10 samples/sec) but that made the
+        # background sampler compete constantly for the GIL against incoming
+        # HTTP requests — Python only runs one thread's bytecode at a time,
+        # so a sampler iteration running back-to-back left /api/traffic
+        # requests waiting their turn, which is what made reads feel slow
+        # despite the endpoint's own work being cheap (~90ms measured in
+        # isolation vs. ~250ms observed end-to-end under real sampler load).
+        # 0.35s is a middle ground: still ~2x the previous 0.7s cadence, but
+        # leaves the GIL free often enough for /api/traffic to respond
+        # promptly. sleep(sample_interval) runs AFTER _append_traffic_sample
+        # completes, so real cadence is this value PLUS that call's own cost
+        # (~50-300ms depending on load), not a lower bound violated by it.
+        sample_interval = float(os.getenv("EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_SECONDS", "0.35"))
         first_non_running_ts = None
         
         while True:
@@ -1964,6 +2245,26 @@ def _write_active_scenario_to_containers(scenario_id: str) -> None:
             pass
 
 
+def _write_experiment_floor_to_trigger(floor_epoch: float) -> None:
+    """Publish the current experiment's start time (unix epoch seconds) to the
+    SOARCA trigger so it can reject stale profiles from a previous run.
+
+    The victim IP is identical across every experiment in a reused scenario,
+    so the trigger cannot otherwise distinguish a live attack from backlog a
+    few minutes old — this floor is the discriminator. Written to the same
+    /app/state volume the trigger already reads active_scenario.txt from, so
+    no restart is needed; the trigger re-reads it on every message."""
+    try:
+        c = DOCKER_CLIENT.containers.get("pmp-misp-soarca-trigger")
+        c.exec_run(
+            ["sh", "-c",
+             f"mkdir -p /app/state && printf '%s' '{floor_epoch:.3f}' > /app/state/experiment_floor_epoch.txt"],
+            stdout=True, stderr=True,
+        )
+    except Exception:
+        pass
+
+
 def _reset_misp_dedup_state(scenario_id: str | None = None) -> None:
     """
     Ensure each experiment run starts with a clean MISP integrator state.
@@ -2011,10 +2312,19 @@ def _reset_misp_dedup_state(scenario_id: str | None = None) -> None:
     # Without this, filebeat may close the reader when the file shrinks between
     # runs and miss the first events of the new run (causing Falco alerts to
     # arrive minutes late or not at all in the TAPCD/MISP pipeline).
-    falco_log = Path(os.getenv("NOVADEF_HOST_ROOT", "/")) / "PMP/Results/falco/logs/falco_events.json"
+    # Truncated via docker exec into falco_novadef itself, where the file
+    # lives natively at /var/log/falco/falco_events.json (same path
+    # _read_falco_host_metrics already reads) — NOVADEF_HOST_ROOT holds the
+    # HOST's own path, which this container's own bind mount does not expose
+    # at that literal location, so `Path(...).exists()` here was always
+    # False and this truncation silently never ran.
     try:
-        if falco_log.exists():
-            falco_log.write_text("")
+        falco_cont = DOCKER_CLIENT.containers.get("falco_novadef")
+        falco_cont.exec_run(
+            ["sh", "-lc", "truncate -s 0 /var/log/falco/falco_events.json 2>/dev/null || true"],
+            stdout=True,
+            stderr=True,
+        )
     except Exception:
         pass
 
@@ -2059,8 +2369,69 @@ def _read_soarca_phase_timing() -> dict[str, float]:
         return {}
 
 
+def _read_soarca_recorded_executions() -> list[dict[str, Any]]:
+    """
+    Reads the SAME state file _read_soarca_phase_timing() reads, but returns
+    the "soarca_executions" list misp_to_soarca.py's _record_soarca_execution()
+    writes there — the real execution_id/playbook_id/victim_ip SOARCA returned
+    from POST /trigger/playbook, which app.py can then look up against
+    soarca-core's own GET /reporter/{execution_id} for the full structured
+    report (steps, real commands, SSH results) instead of grepping logs.
+    """
+    try:
+        trigger = DOCKER_CLIENT.containers.get("pmp-misp-soarca-trigger")
+        res = trigger.exec_run(
+            ["sh", "-lc", "cat /app/state/novadef_phase_timing.json 2>/dev/null || echo '{}'"],
+            stdout=True, stderr=False,
+        )
+        raw = (res.output or b"").decode("utf-8", errors="replace").strip()
+        data = json.loads(raw)
+        executions = data.get("soarca_executions")
+        return executions if isinstance(executions, list) else []
+    except Exception:
+        return []
+
+
+# soarca-core's own reporting API — the real, structured record of what a
+# playbook execution actually did (per-step timestamps, the real command run
+# with variables already substituted, and the real SSH result) — as opposed
+# to the keyword-grep-over-container-logs approach used elsewhere in this
+# file. Same docker network as the rest of the stack, so the internal
+# hostname:port (not the host-mapped 8001) is correct here.
+SOARCA_CORE_API = os.getenv("SOARCA_CORE_API", "http://soarca-core:8080")
+
+
+def _fetch_soarca_execution_report(execution_id: str) -> dict[str, Any] | None:
+    """GET /reporter/{execution_id} on soarca-core. Returns None on any
+    failure (network error, 404 because the execution aged out of SOARCA's
+    own retention, malformed id) — this is always best-effort enrichment,
+    never something the rest of the response depends on."""
+    if not execution_id:
+        return None
+    try:
+        req = urlrequest.Request(f"{SOARCA_CORE_API}/reporter/{execution_id}", method="GET")
+        with urlrequest.urlopen(req, timeout=4) as resp:
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
 def _purge_kafka_topics() -> None:
-    """Purge all detection-relevant Kafka topics to eliminate backlog from prior runs."""
+    """Purge all detection-relevant Kafka topics to eliminate backlog from prior runs.
+
+    Uses port 29092 (the BROKER listener, advertised as kafka_novadef:29092 —
+    resolvable inside the docker network) rather than 9092 (the
+    EXTERNAL_DOCKER listener, advertised as host.docker.internal:9092, which
+    does not resolve from inside kafka_novadef's own container or any other
+    container on this network). Every kafka-*.sh call in this file used to
+    target 9092 and therefore always failed with a AdminClient
+    UnknownHostException/timeout, silently swallowed by `|| true` / the
+    bare except below — the purge/reset/offset-check calls were all no-ops.
+    Found while investigating an unrelated attack→countermeasure latency
+    regression whose root cause turned out to be a consumer-group-readiness
+    check hitting this exact same wrong-port bug."""
     topics = [
         "tshark_traces", "cic_flow", "network_auth_events",
         "network_intrusion_alerts", "snort_alerts", "falco_events",
@@ -2076,7 +2447,7 @@ def _purge_kafka_topics() -> None:
                 [
                     "bash", "-c",
                     f"export PATH=$PATH:/opt/kafka/bin; kafka-get-offsets.sh "
-                    f"--bootstrap-server localhost:9092 --topic {topic} --time latest 2>/dev/null | "
+                    f"--bootstrap-server localhost:29092 --topic {topic} --time latest 2>/dev/null | "
                     f"awk -F: '{{print $NF}}'",
                 ],
                 stdout=True, stderr=False,
@@ -2090,7 +2461,7 @@ def _purge_kafka_topics() -> None:
                     "bash", "-c",
                     f"export PATH=$PATH:/opt/kafka/bin; "
                     f"echo '{json_payload}' > /tmp/_dr.json && "
-                    f"kafka-delete-records.sh --bootstrap-server localhost:9092 "
+                    f"kafka-delete-records.sh --bootstrap-server localhost:29092 "
                     f"--offset-json-file /tmp/_dr.json 2>/dev/null",
                 ],
                 stdout=True, stderr=False,
@@ -2150,6 +2521,9 @@ def _reset_detector_runtime_state(purge_kafka: bool = False) -> None:
     # Clear network detector campaign dedup (file on container volume).
     # This is the main gate: without this, the Isolation Forest won't emit a
     # second alert for the same target+attack family within the 30-min TTL.
+    # Stopped (not restarted) here — it must stay down until the Kafka offset
+    # reset below runs, then it is restarted together with the rest of the
+    # pipeline. See the comment on that reset for why this ordering matters.
     try:
         det = DOCKER_CLIENT.containers.get("network_intrusion_detector_novadef")
         det.exec_run(
@@ -2158,45 +2532,161 @@ def _reset_detector_runtime_state(purge_kafka: bool = False) -> None:
              "/app/results/network_intrusion_alerts.jsonl || true"],
             stdout=True, stderr=True,
         )
-        det.restart(timeout=10)
+        det.stop(timeout=10)
     except Exception:
         pass
 
     # Clear SOARCA trigger dedup and reset its Kafka offset to latest so it
     # only reacts to MISP events created by the new experiment.
+    #
+    # NOTE: this exec_run must happen BEFORE stop() — a stopped container
+    # cannot be exec'd into (the call raises, silently swallowed by the
+    # except below), so the rm -f here was never actually running; the
+    # container's dedup/state files survived every "reset" untouched and
+    # only the later .restart() (below) re-read that same stale state. This
+    # is what let a network-detector/SOARCA dedup window (incident_key,
+    # LAST_NETWORK_CM_BY_VICTIM, profile_recency_hwm.json) "remember" a much
+    # older campaign than intended across supposedly-clean experiment
+    # launches. profile_recency_hwm.json is included here for the same
+    # reason processed_incidents.json is: it must reset to empty on every
+    # NEW experiment (a fresh attack), even though it is deliberately
+    # persisted across a mid-experiment container restart (see its own
+    # comment in misp_to_soarca.py for why that persistence matters).
     try:
         trigger_c = DOCKER_CLIENT.containers.get("pmp-misp-soarca-trigger")
-        trigger_c.stop(timeout=5)
+        # Also clear the previous run's experiment floor: it is (re)written by
+        # _write_experiment_floor_to_trigger() at the very start of
+        # _run_background(), before the run claims/waits on its scenario at
+        # all (moved there after a real incident showed decide_at/act_at
+        # landing ~68s BEFORE attack_started_at — the floor used to only be
+        # written once attack_started_at itself was set, well after the
+        # stability gate and attack-delay waits, leaving a real window where
+        # a stale TAPCD_PROFILE_READY line from the scenario's PREVIOUS
+        # incident could still fire a countermeasure attributed to this run).
+        # A stale floor left over from before that clear must not linger and
+        # wrongly gate live profiles for the new run either.
         trigger_c.exec_run(
             ["sh", "-c",
              "rm -f /app/state/processed_incidents.json "
              "/app/state/processed_events.txt "
-             "/app/state/novadef_phase_timing.json || true"],
+             "/app/state/novadef_phase_timing.json "
+             "/app/state/experiment_floor_epoch.txt "
+             "/app/state/profile_recency_hwm.json || true"],
             stdout=True, stderr=True,
         )
-    except Exception:
-        pass
-    try:
-        kafka_c = DOCKER_CLIENT.containers.get("kafka_novadef")
-        kafka_c.exec_run(
-            ["bash", "-c",
-             "export PATH=$PATH:/opt/kafka/bin; "
-             "kafka-consumer-groups.sh --bootstrap-server localhost:9092 "
-             "--group soarca-tapcd-trigger --topic profiles_out "
-             "--reset-offsets --to-latest --execute 2>/dev/null || true"],
-            stdout=True, stderr=False,
-        )
-        print("[reset] soarca-tapcd-trigger offset reset to latest", flush=True)
+        trigger_c.stop(timeout=5)
     except Exception:
         pass
 
-    # Restart alert_module, alert_manager and flow_module to flush in-memory state,
-    # but do NOT purge their Kafka output — historical messages remain for other consumers.
-    for name in ["alert_module_novadef", "alert_manager_novadef", "flow_module_novadef", "pmp-misp-soarca-trigger"]:
+    # Stop the rest of the pipeline consumers BEFORE resetting offsets below.
+    # Kafka refuses --reset-offsets --execute on a group with live members
+    # ("Assignments can only be reset if the group is inactive, but the
+    # current state is Stable") and fails SILENTLY here because the command
+    # is run with `|| true` — so if any of these containers is still up (or
+    # already restarted) when the reset runs, the offset never actually
+    # moves and the consumer replays its old backlog on reconnect. That
+    # backlog is exactly what caused a stale profile from a PREVIOUS
+    # experiment (already 10+ minutes old) to sail past the recency guard and
+    # fire SOARCA for the wrong attack: the guard only rejects timestamps
+    # older than the last seen one, and a truly fresh restart has no "last
+    # seen" to compare against.
+    # novadef-novadef_prep_pred-1 (Kafka consumer group "profiles_stream",
+    # topic flows_conditional_agg) must be stopped here too — otherwise its
+    # group is still "live" when _reset_all_kafka_offsets_to_latest() below
+    # tries to reset profiles_stream, Kafka silently refuses, and prep_pred
+    # keeps consuming from wherever its own offset already was: any
+    # not-yet-drained flows_conditional_agg backlog from a PREVIOUS scenario
+    # (with that scenario's old victim/dst IP baked into the record) gets
+    # profiled and tagged with the CURRENT scenario_id, producing a profile
+    # whose scenario tag is correct but whose victim_ip/actor_id is stale.
+    for name in ["alert_module_novadef", "alert_manager_novadef", "flow_module_novadef", "pmp-misp-integrator", "novadef-novadef_prep_pred-1"]:
+        try:
+            DOCKER_CLIENT.containers.get(name).stop(timeout=10)
+        except Exception:
+            continue
+
+    # Now that every pipeline consumer is stopped, advance every group's
+    # offset to latest for real (see _KAFKA_PIPELINE_GROUP_TOPICS — covers
+    # cic_flow, network_auth_events, flows_conditional_agg, profiles_out).
+    _reset_all_kafka_offsets_to_latest()
+
+    # Restart everything now that offsets are clean.
+    # novadef-novadef_stream_low-1 is included here so its in-memory _pending
+    # dedup dict (see stream_low.py) starts empty for each new experiment.
+    # It has its own absolute-hold-time fix now (DEDUP_MAX_HOLD_SEC) so a
+    # sustained attack can no longer wedge a key forever, but restarting it
+    # here still matters: without this, a key still mid-flight from the
+    # PREVIOUS experiment (rare, but possible right at a run boundary) could
+    # bleed its dedup state into the new one. MongoDB flow data itself is
+    # never touched — _query_flows_for_alert() is already scoped by a 120s
+    # lookback window + src_ip/dst_ip, so a shared scenario running several
+    # incidents back-to-back still correlates flows within/across those
+    # incidents normally, while a fresh scenario (different IPs, and any
+    # gap over that window) never sees stale flows from an unrelated run.
+    for name in [
+        "network_intrusion_detector_novadef",
+        "alert_module_novadef",
+        "alert_manager_novadef",
+        "flow_module_novadef",
+        "pmp-misp-integrator",
+        "pmp-misp-soarca-trigger",
+        "novadef-novadef_stream_low-1",
+        "novadef-novadef_prep_pred-1",
+    ]:
         try:
             DOCKER_CLIENT.containers.get(name).restart(timeout=10)
         except Exception:
             continue
+
+    # The alert-manager-v1-falco / soarca-tapcd-trigger consumer-group
+    # readiness check used to live here, but this function returns long
+    # before the rest of the launch sequence (scenario cold-start wait,
+    # monitor/noise/attack delays — several more seconds each) — waiting
+    # here just duplicated time already spent later. It's consolidated into
+    # _wait_kafka_consumers_ready(), called right before the attack actually
+    # launches, so the same real wall-clock time that already elapses during
+    # those later stages counts towards this readiness check too instead of
+    # adding a separate wait on top of it.
+
+
+def _wait_for_kafka_consumer_groups_ready(groups: list[str], max_wait_seconds: float = 15.0) -> None:
+    """Poll kafka-consumer-groups.sh --describe until every group in `groups`
+    has at least one member with an assigned partition (STATE=Stable), or
+    max_wait_seconds elapses. Best-effort: any failure just stops waiting."""
+    try:
+        kafka_c = DOCKER_CLIENT.containers.get("kafka_novadef")
+    except Exception:
+        return
+    deadline = time.time() + max_wait_seconds
+    pending = set(groups)
+    while pending and time.time() < deadline:
+        for group in list(pending):
+            try:
+                res = kafka_c.exec_run(
+                    ["bash", "-c",
+                     "export PATH=$PATH:/opt/kafka/bin; "
+                     f"kafka-consumer-groups.sh --bootstrap-server localhost:29092 "
+                     f"--group {group} --describe 2>/dev/null || true"],
+                    stdout=True, stderr=False,
+                )
+                out = (res.output or b"").decode("utf-8", errors="replace")
+                # A ready group has a data row (not just the header) whose
+                # CONSUMER-ID column is an actual client id, not "-" (Kafka's
+                # placeholder for "no member currently owns this partition",
+                # printed while the group is still rebalancing).
+                lines = [ln for ln in out.splitlines() if ln.strip()]
+                if len(lines) >= 2:
+                    cols = lines[1].split()
+                    if len(cols) >= 7 and cols[6] not in ("-", ""):
+                        pending.discard(group)
+            except Exception:
+                pending.discard(group)
+        if pending:
+            time.sleep(0.5)
+    if pending:
+        print(f"[kafka-reset] consumer groups still not ready after {max_wait_seconds}s: {sorted(pending)}", flush=True)
+    else:
+        print("[kafka-reset] falco/soarca-trigger consumer groups ready", flush=True)
 
 
 def _reset_operational_artifacts() -> None:
@@ -2235,10 +2725,38 @@ def _reset_operational_artifacts() -> None:
         pass
 
 
-def _ensure_launcher_network_alias(container_name: str, role: str, alias: str) -> None:
+# Reserved block inside launcher_default's 172.18.0.0/16 for scenario victim/
+# attacker containers on launcher_default. Docker's default sequential IP
+# assignment otherwise hands out the first free address after the ~30 fixed
+# infra containers (kafka, misp, soarca, grafana, ...) — since normally only
+# one scenario is active at a time, every new scenario's victim landed on the
+# SAME address (172.18.0.27) as soon as the previous scenario was deleted.
+# TAPCD/SOARCA correctly scope profiles by scenario_id, but the IP itself was
+# never unique across scenarios, so anything keying off IP alone (dedup
+# guards, "same victim" checks, MISP event correlation) saw what looked like
+# a repeat of the same host. Assigning a stable, scenario-derived static IP
+# here — instead of leaving it to Docker's next-free-address allocator —
+# makes the victim's launcher_default IP a real per-scenario identifier.
+_SCENARIO_STATIC_IP_BASE = "172.18.100."
+_SCENARIO_STATIC_IP_RANGE = 200  # .1-.200; .201+ left free for manual/ad-hoc use
+
+
+def _scenario_static_launcher_ip(scenario_key: str, role: str) -> str:
+    """Deterministic, collision-resistant 172.18.100.x address for this
+    scenario+role, derived from the scenario_id (stable across restarts of
+    the SAME scenario, distinct across DIFFERENT scenarios)."""
+    digest = hashlib.sha256(f"{scenario_key}:{role}".encode("utf-8")).hexdigest()
+    offset = 1 + (int(digest[:8], 16) % _SCENARIO_STATIC_IP_RANGE)
+    return f"{_SCENARIO_STATIC_IP_BASE}{offset}"
+
+
+def _ensure_launcher_network_alias(container_name: str, role: str, alias: str, scenario_key: str = "") -> None:
     """
     Ensure the current scenario container is reachable from launcher_default
-    with a stable alias so static PMP targets remain valid.
+    with a stable alias so static PMP targets remain valid, and with a
+    static, scenario-derived IP (see _scenario_static_launcher_ip) so the
+    address itself is a unique-per-scenario identifier instead of whatever
+    Docker's next-free-address allocator happens to hand out.
     """
     try:
         network = DOCKER_CLIENT.networks.get(LAUNCHER_NETWORK_NAME)
@@ -2249,6 +2767,8 @@ def _ensure_launcher_network_alias(container_name: str, role: str, alias: str) -
         target = DOCKER_CLIENT.containers.get(container_name)
     except Exception:
         return
+
+    static_ip = _scenario_static_launcher_ip(scenario_key or container_name, role)
 
     # Remove potential stale alias holders from previous runs.
     try:
@@ -2274,14 +2794,19 @@ def _ensure_launcher_network_alias(container_name: str, role: str, alias: str) -
         target_networks = ((target.attrs or {}).get("NetworkSettings", {}).get("Networks", {}) or {})
         attached = target_networks.get(LAUNCHER_NETWORK_NAME)
         attached_aliases = set((attached or {}).get("Aliases") or [])
-        if attached and alias in attached_aliases:
+        attached_ip = str((attached or {}).get("IPAMConfig", {}).get("IPv4Address") or (attached or {}).get("IPAddress") or "")
+        if attached and alias in attached_aliases and attached_ip == static_ip:
             return
         if attached:
             try:
                 network.disconnect(target, force=True)
             except Exception:
                 pass
-        network.connect(target, aliases=[alias])
+        try:
+            network.connect(target, aliases=[alias], ipv4_address=static_ip)
+        except Exception as e:
+            print(f"[scenario-sync] Static IP {static_ip} unavailable for {container_name}, falling back to auto-assign: {e}", flush=True)
+            network.connect(target, aliases=[alias])
     except Exception as e:
         print(f"[scenario-sync] Failed to bind alias {alias} for {container_name}: {e}", flush=True)
 
@@ -2386,8 +2911,39 @@ def _rebind_global_tshark(victim_container_name: str) -> None:
         # que hay que redirigir su salida al fichero de trazas que el detector lee
         # (/data/traces/infile.ndjson). Sin esta redirección la captura iría a los
         # logs del contenedor y el detector nunca vería los paquetes.
+        #
+        # -x (full hex+ASCII payload dump per packet) IS required: json2pcap.py
+        # (Flow_Module/Scripts/JSON2PCAP/json2pcap.py) reconstructs a pcap from
+        # this JSON to feed CICFlowMeter, and it reads the raw frame bytes
+        # from tshark's own "frame_raw" field — emitted only when -x is given.
+        # Without it, "frame_raw" is absent, so every reconstructed packet
+        # came out as a bare 14-byte Ethernet header with no payload (MAC
+        # 00:00:00:00:00:00, garbage ethertype) — CICFlowMeter's IP-layer
+        # filter matched zero packets, so no flow was ever written to
+        # MongoDB and TAPCD's actor-profiling model always fell back to its
+        # neutral/no-flow feature row regardless of attack type. This was
+        # believed harmless on the assumption that "nothing downstream reads
+        # raw payload bytes" — true for the anomaly detector and Falco,
+        # false for CICFlowMeter's pcap-reconstruction path. -x does
+        # multiply each packet's JSON size several-fold; that trade-off was
+        # re-evaluated and accepted because a working actor-profiling
+        # pipeline is worth more than the smaller capture footprint. This is
+        # the SAME fix as entrypoint_tshark.py's build_tshark_command — this
+        # function builds its own capture command independently rather than
+        # delegating to that entrypoint, so both needed the change.
+        #
+        # "not port 9274" (BPF capture filter, applied by the kernel before
+        # tshark sees the packet) excludes Telegraf/Prometheus metrics
+        # scraping traffic: Prometheus polls the victim's Telegraf exporter
+        # every 1s (prometheus.yml's scenario_victim_telegraf job), and that
+        # alone was measured to be ~99% of steady-state captured packets —
+        # unrelated to any attack scenario. Excluding it here keeps Grafana's
+        # 1s scrape resolution intact while removing the dominant source of
+        # capture volume/CPU load on tshark (previously load average 9+ on an
+        # 8-core host, contributing to a ~10s Filebeat/Kafka delivery delay
+        # for Falco events during an attack).
         capture_cmd = (
-            f"tshark {iface_args} -T json -x -l --no-duplicate-keys 2>/dev/null "
+            f"tshark {iface_args} -T json -x -l --no-duplicate-keys -f 'not port 9274' 2>/dev/null "
             f"| /usr/local/bin/json_array_to_ndjson.py > /data/traces/infile.ndjson 2>/dev/null"
         )
         DOCKER_CLIENT.containers.run(
@@ -2420,11 +2976,12 @@ def _sync_pmp_observation_with_scenario(scenario: dict[str, Any]) -> None:
     victim = str(scenario.get("victim_container_name") or "").strip()
     attacker = str(scenario.get("attacker_container_name") or "").strip()
     network_name = str(scenario.get("network") or "").strip()
+    scenario_key = str(scenario.get("scenario_id") or scenario.get("project") or network_name or victim).strip()
     if not victim:
         return
-    _ensure_launcher_network_alias(victim, role="victim", alias=PROMETHEUS_SCENARIO_ALIAS)
+    _ensure_launcher_network_alias(victim, role="victim", alias=PROMETHEUS_SCENARIO_ALIAS, scenario_key=scenario_key)
     if attacker:
-        _ensure_launcher_network_alias(attacker, role="attacker", alias=ATTACKER_SCENARIO_ALIAS)
+        _ensure_launcher_network_alias(attacker, role="attacker", alias=ATTACKER_SCENARIO_ALIAS, scenario_key=scenario_key)
     if network_name:
         _ensure_container_on_network("pmp-soarca-core", network_name)
         _ensure_container_on_network("pmp-soarca-executor-ssh", network_name)
@@ -2854,14 +3411,20 @@ def _kill_ransomware_everywhere() -> None:
         print("[ransomware-sweep] truncated Falco log", flush=True)
     except Exception:
         pass
-    # Restart filebeat so its harvester reopens the now-empty log from offset 0
-    # instead of holding the old (larger) read offset and replaying stale events.
-    if _truncated:
-        try:
-            DOCKER_CLIENT.containers.get("filebeat_novadef").restart(timeout=10)
-            print("[ransomware-sweep] restarted filebeat", flush=True)
-        except Exception:
-            pass
+    # Deliberately NOT restarting filebeat_falco_novadef here. filestream
+    # (the dedicated instance that tails falco_events.json — see
+    # filebeat-falco.yml) already detects a truncated file on its own and
+    # reopens the harvester from offset 0 without needing a process restart;
+    # a full container restart was tried instead (on the theory that it
+    # would force a clean re-open faster) but measurement showed the
+    # opposite: a freshly restarted filebeat process starts with NO
+    # harvester open at all (confirmed via its own monitoring snapshots —
+    # harvester.open_files stayed 0 for the entire window up to the next
+    # attack) and only opens one reactively once the scanner notices new
+    # activity, which took just as long or longer than letting the already-
+    # running process's own truncate-detection handle it. Since the harvester
+    # keeps running (never restarted), it notices the truncate and reopens
+    # on its own scan_frequency cadence (100ms) with no cold-start penalty.
 
 
 def _kill_network_attack_everywhere() -> None:
@@ -3181,6 +3744,14 @@ def _detection_evidence_lines(blob: str, experiment: str) -> list[str]:
                     "alerta publicada",
                     "nueva alerta publicada",
                     "alerta rápida publicada",
+                    # Fast fan-in path (entrypoint_network_intrusion_detector.py):
+                    # exp3's network vector is the same SSH password-spraying
+                    # traffic as exp1, detected via the same fast fan-in path —
+                    # missing this here left a correctly-detected-and-countered
+                    # exp3 run showing 0% precision/recall/F1, identical to the
+                    # exp1 bug already fixed above.
+                    "fast fan-in alert",
+                    "fast fan-in enrichment",
                     # Falco/ransomware phase signals (same as exp2)
                     "host ransomware emulation detected",
                     "falco alert",
@@ -3202,6 +3773,15 @@ def _detection_evidence_lines(blob: str, experiment: str) -> list[str]:
                     "alerta publicada",
                     "nueva alerta publicada",
                     "bruteforce password spraying detected",
+                    # Fast fan-in path (entrypoint_network_intrusion_detector.py):
+                    # publishes a real Kafka alert with MITRE/D3FEND metadata
+                    # ahead of the legacy Isolation Forest / CICFlowMeter paths
+                    # above, but logs a different line format that wasn't
+                    # recognized here — making a correctly (and faster)
+                    # detected attack still show 0% precision/recall/F1 on the
+                    # Dashboard because relevant_attack_observed stayed 0.
+                    "fast fan-in alert",
+                    "fast fan-in enrichment",
                 ]
             ):
                 out.append(raw)
@@ -3275,6 +3855,129 @@ def _line_count(blob: str) -> int:
     return len([ln for ln in blob.splitlines() if ln.strip()])
 
 
+def _read_victim_cgroup_stats(container_name: str) -> dict[str, float] | None:
+    """
+    Read CPU/memory directly from the container's own cgroup v2 files via a
+    single fast `docker exec` (~60-100ms, same cost class as
+    _read_victim_netfilter_input), instead of _docker_runtime_stats'
+    `container.stats(stream=False)` call.
+
+    That Docker-daemon stats call is the real bottleneck behind the sampler
+    never going faster than ~1 sample/2s regardless of the configured sleep
+    interval: the daemon itself blocks for ~1-1.7s per call to take two
+    internal cgroup reads spaced ~1s apart so it can compute a CPU delta —
+    this is Docker's own stats() behavior, not something tunable from here.
+    _read_scenario_telegraf_metrics was meant to avoid this (same cgroup-delta
+    math, via Telegraf's Prometheus endpoint), but ephemeral scenario victim
+    containers don't run Telegraf, so that path always returned None and
+    every sample silently fell through to the slow one. Reading the same
+    cgroup counters ourselves, directly inside the container, gets the same
+    data without either dependency.
+    """
+    try:
+        cont = DOCKER_CLIENT.containers.get(container_name)
+        res = cont.exec_run(
+            [
+                "sh", "-lc",
+                "cat /sys/fs/cgroup/cpu.stat 2>/dev/null; echo ---MEM---; "
+                "cat /sys/fs/cgroup/memory.current 2>/dev/null; echo ---MAX---; "
+                "cat /sys/fs/cgroup/memory.max 2>/dev/null; echo ---CPUMAX---; "
+                "cat /sys/fs/cgroup/cpu.max 2>/dev/null",
+            ],
+            stdout=True,
+            stderr=True,
+        )
+        out = (res.output or b"").decode("utf-8", errors="replace")
+        if not out.strip():
+            return None
+        cpu_part, _, rest = out.partition("---MEM---")
+        mem_part, _, rest2 = rest.partition("---MAX---")
+        max_part, _, cpu_max_part = rest2.partition("---CPUMAX---")
+
+        cpu_usec = None
+        for line in cpu_part.splitlines():
+            if line.startswith("usage_usec"):
+                try:
+                    cpu_usec = float(line.split()[1])
+                except Exception:
+                    pass
+                break
+        if cpu_usec is None:
+            return None
+
+        try:
+            mem_bytes = float(mem_part.strip())
+        except Exception:
+            mem_bytes = 0.0
+
+        mem_max_raw = max_part.strip()
+        mem_max = None
+        if mem_max_raw and mem_max_raw != "max":
+            try:
+                mem_max = float(mem_max_raw)
+            except Exception:
+                mem_max = None
+
+        # Normalize by how many cores THIS CONTAINER can actually use, not
+        # the host's total core count. cpu.max's first field is the quota in
+        # microseconds per 100ms period ("max" if uncapped); quota/period
+        # gives the number of cores the container's own cgroup is allowed to
+        # burn. Ephemeral scenario victims are never started with --cpus (no
+        # quota set), so cpu.max reads "max" and this falls back to 1 core —
+        # the same convention `top`/`htop` use per-process (100% = one full
+        # core saturated). Dividing by the HOST's full core count (the
+        # previous approach, kept as a fallback via NOVADEF_HOST_CPU_COUNT
+        # for the rare case a real limit IS set) diluted a real, visible
+        # 15-30% single-core load down to under 1%, which the GUI's
+        # 0-decimal rounding then displayed as a flat, misleading "0% CPU"
+        # for most of a normal run.
+        _cpu_max_raw = cpu_max_part.strip().splitlines()[0] if cpu_max_part.strip() else ""
+        _cpu_core_count = 1.0
+        if _cpu_max_raw and _cpu_max_raw != "max":
+            try:
+                _quota_str, _period_str = _cpu_max_raw.split()
+                _quota = float(_quota_str)
+                _period = float(_period_str)
+                if _quota > 0 and _period > 0:
+                    _cpu_core_count = max(_quota / _period, 0.01)
+            except Exception:
+                _cpu_core_count = 1.0
+        elif int(os.getenv("NOVADEF_HOST_CPU_COUNT", "0") or 0) > 0:
+            _cpu_core_count = float(os.getenv("NOVADEF_HOST_CPU_COUNT"))
+        now = time.time()
+        cache_key = f"cgroup_direct:{container_name}"
+        prev = _CGROUP_PREV_SAMPLES.get(cache_key) or {}
+        cpu_percent = 0.0
+        prev_ts = float(prev.get("ts", 0.0))
+        prev_usec = float(prev.get("cpu_usec", 0.0))
+        dt = now - prev_ts
+        d_usec = cpu_usec - prev_usec
+        if prev_ts > 0 and dt > 0.02 and d_usec >= 0:
+            cpu_percent = (d_usec / (dt * 1_000_000)) * 100.0 / _cpu_core_count
+        _CGROUP_PREV_SAMPLES[cache_key] = {"ts": now, "cpu_usec": cpu_usec}
+
+        effective_max = mem_max
+        if not effective_max or effective_max <= 0:
+            try:
+                with open("/proc/meminfo", "r") as _mf:
+                    for _ml in _mf:
+                        if _ml.startswith("MemTotal:"):
+                            effective_max = float(_ml.split()[1]) * 1024
+                            break
+            except Exception:
+                effective_max = 8 * 1024 * 1024 * 1024
+        mem_percent = (mem_bytes / effective_max) * 100.0 if effective_max else 0.0
+
+        return {
+            "cpu_percent": round(cpu_percent, 3),
+            "memory_bytes": round(mem_bytes, 3),
+            "memory_percent": round(mem_percent, 3),
+        }
+    except Exception as e:
+        print(f"[traffic-debug] Exception in _read_victim_cgroup_stats(): {e}", flush=True)
+        return None
+
+
 def _docker_runtime_stats(containers: list[str]) -> dict[str, dict[str, float]]:
     stats_out: dict[str, dict[str, float]] = {}
     for name in containers:
@@ -3288,7 +3991,13 @@ def _docker_runtime_stats(containers: list[str]) -> dict[str, dict[str, float]]:
             cpus = float(len(st.get("cpu_stats", {}).get("cpu_usage", {}).get("percpu_usage", []) or [1]))
             cpu_delta = max(cpu_total - precpu_total, 0.0)
             sys_delta = max(sys_total - presys_total, 1.0)
-            cpu_pct = (cpu_delta / sys_delta) * cpus * 100.0
+            # Normalized to "% of the whole machine" (100% = all cores busy),
+            # same convention as _read_victim_cgroup_stats's own cpu_percent —
+            # the raw Docker-stats formula (cpu_delta/sys_delta * cpus * 100)
+            # is fraction-of-one-core, so it read as e.g. 425% on a 4-core
+            # host under real load, a correct number that still looked like
+            # a bug without this normalization.
+            cpu_pct = (cpu_delta / sys_delta) * 100.0
 
             mem_usage = float(st.get("memory_stats", {}).get("usage", 0.0))
             mem_limit = float(st.get("memory_stats", {}).get("limit", 1.0))
@@ -3317,6 +4026,17 @@ def _wait_for_pipeline_completion(experiment: str, started: float | None, timeou
 
     while time.time() < deadline:
         current_run = _history_item(run_id) if run_id else None
+        # Fast path: act_at is written independently (via _persist_run_phase_marker,
+        # fed by the SOARCA trigger's own timing file) as soon as the countermeasure
+        # actually lands — well before this loop's own log-tail-based act_hit would
+        # notice it. Once it's there, the countermeasure is confirmed and there is
+        # nothing left for this function to wait for; skip straight to returning
+        # instead of paying for another full round of _build_live_report_panel's
+        # multi-container log tails (each iteration of the loop below rebuilds it
+        # from scratch, which is the main cost keeping this function from
+        # returning promptly even when the countermeasure landed seconds ago).
+        if current_run and current_run.get("act_at"):
+            return
         current_attack_started = float((current_run or {}).get("attack_started_at") or STATE.get("last_attack_started_at") or 0.0) or None
         phase_since_ts = int(current_attack_started) if isinstance(current_attack_started, (int, float)) else int(time.time()) + 86400
         observe_blob = "\n".join(
@@ -3356,7 +4076,7 @@ def _wait_for_pipeline_completion(experiment: str, started: float | None, timeou
             _tail_logs("pmp-misp-soarca-trigger", 400, since_ts=phase_since_ts),
         ]
         act_blob = "\n".join(_act_blob_parts)
-        report_panel = _build_live_report_panel(experiment, started, STATE.get("last_attack_started_at"))
+        report_panel = _cached_build_live_report_panel(experiment, started, STATE.get("last_attack_started_at"))
         live_timeline = report_panel.get("timeline") or {}
         profile_panel = report_panel.get("tapcd") or {}
         misp_panel = report_panel.get("misp") or {}
@@ -3371,7 +4091,7 @@ def _wait_for_pipeline_completion(experiment: str, started: float | None, timeou
             detect_hit = bool(_detection_evidence_lines(detect_blob + "\n" + observe_blob + "\n" + enrich_blob, experiment))
             profile_hit = bool(profile_panel.get("native_profile_ready") or profile_panel.get("actor_profile_count") or profile_panel.get("profile_detail_lines"))
             enrich_hit = bool(misp_panel.get("event_ids_detected_in_logs") or "nuevo evento misp" in enrich_blob.lower())
-            act_hit = any(k in act_blob.lower() for k in ["playbook de aislamiento ejecutado", "playbook ejecutado", "lanzando playbook de aislamiento", "applied", "countermeasure"])
+            act_hit = any(k in act_blob.lower() for k in ["playbook de aislamiento ejecutado", "isolation playbook executed", "playbook ejecutado", "playbook executed", "lanzando playbook de aislamiento", "launching isolation playbook", "applied", "countermeasure"])
         else:
             observe_hit = any(k in observe_blob.lower() for k in ["ssh", "packet", "flow", "password spraying"])
             if experiment == "exp3":
@@ -3384,7 +4104,7 @@ def _wait_for_pipeline_completion(experiment: str, started: float | None, timeou
                 detect_hit = bool(_detection_evidence_lines(detect_blob, experiment))
             profile_hit = bool(profile_panel.get("native_profile_ready") or profile_panel.get("actor_profile_count") or profile_panel.get("profile_detail_lines"))
             enrich_hit = bool(misp_panel.get("event_ids_detected_in_logs") or "nuevo evento misp" in enrich_blob.lower())
-            act_hit = any(k in act_blob.lower() for k in ["playbook ejecutado", "lanzando playbook", "applied", "block", "countermeasure"])
+            act_hit = any(k in act_blob.lower() for k in ["playbook ejecutado", "playbook executed", "lanzando playbook", "launching playbook", "applied", "block", "countermeasure"])
 
         # The live panel is the authoritative per-run signal source. If the UI
         # already confirmed a phase for this exact run, trust that evidence even
@@ -3400,6 +4120,28 @@ def _wait_for_pipeline_completion(experiment: str, started: float | None, timeou
             or (profile_panel.get("actor_profile_count") or 0) > 0
             or (profile_panel.get("native_profile_ready") or False)
         )
+        # Require the lead actor profile to actually carry at least one ML
+        # field (motivation) before treating profiling as complete, not just
+        # SOME profile line existing. prep_pred's "Enviado" summary line
+        # (profile/attack/ttps only) is logged by novadef-novadef_prep_pred-1
+        # measurably before soarca-trigger consumes the same event and emits
+        # its own richer TAPCD_PROFILE_READY line (motivation=/affiliation=/
+        # attitude=/skills=/etc). Without this check, this loop's polling can
+        # observe native_profile_ready=True from the short line alone, exit
+        # immediately, and hand off to report generation before the rich line
+        # has been written -- silently persisting a profile with every ML
+        # dimension blank even though the correct data arrives moments later.
+        # This bounded 1-field check does not remove the theoretical race
+        # (report generation could still race an even-later line under
+        # sufficiently different container-scheduling latency), but it closes
+        # the gap that was actually observed and reproduced in this campaign.
+        if profile_hit:
+            _lead_actors = (profile_panel.get("actor_profiles") or [])
+            _lead_has_ml_field = bool(_lead_actors) and bool(
+                str((_lead_actors[0] or {}).get("motivation") or "").strip()
+            )
+            if not _lead_has_ml_field:
+                profile_hit = False
         enrich_hit = bool(
             enrich_hit
             or live_timeline.get("enrich_at") is not None
@@ -3425,7 +4167,14 @@ def _wait_for_pipeline_completion(experiment: str, started: float | None, timeou
         # deadline must not fire until the action phase (SOARCA execution) is
         # confirmed. SOARCA is the sole component that applies the countermeasure
         # (exp1 block_ip_range, exp2/exp3 isolation), so none may exit early.
-        soft_deadline_eligible = detect_hit and (profile_hit or enrich_gate_ok or act_hit)
+        # profile_hit is REQUIRED here too (not just OR'd with act_hit): the
+        # countermeasure routinely lands (~3s) well before the rich
+        # TAPCD_PROFILE_READY line is written by soarca-trigger, so without
+        # this, act_hit alone satisfied soft_deadline_eligible once 20s
+        # elapsed and this function returned with profile_hit still False --
+        # report generation then ran immediately after and persisted whatever
+        # partial profile (or none) was visible at that instant.
+        soft_deadline_eligible = detect_hit and profile_hit and (enrich_gate_ok or act_hit)
         if experiment in {"exp1", "exp2", "exp3"}:
             soft_deadline_eligible = soft_deadline_eligible and act_hit
         if time.time() >= soft_deadline and soft_deadline_eligible:
@@ -3437,6 +4186,21 @@ def _wait_kafka_consumers_ready(timeout_sec: int = 25) -> None:
     """
     Give pipeline consumers a short warm-up window after restarts so
     fast host experiments (exp2/Falco) are not emitted before subscriptions.
+
+    Also confirms alert-manager-v1-falco and soarca-tapcd-trigger (the
+    ransomware/host detection path — falco_events -> alert_manager ->
+    profiles_out -> soarca-trigger) via kafka-consumer-groups.sh --describe,
+    not just log text: a freshly restarted confluent-kafka/kafka-python
+    consumer needs its own join/rebalance round-trip before poll() returns
+    anything (measured 6-30s in a cold case), and exp2/exp3's own stability
+    gate only watches victim RX packet-rate — it has no visibility into
+    whether these consumers have actually rejoined. Without this, the
+    attack's own Falco events piled up unread until the rebalance finished,
+    adding that whole window directly to attack→countermeasure latency.
+    This call already sits right before the attack launches (see its call
+    site), so the wall-clock time already spent in the scenario cold-start
+    and monitor/noise delays before this point counts towards timeout_sec
+    too — no separate wait stacked on top of those.
     """
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
@@ -3445,8 +4209,12 @@ def _wait_kafka_consumers_ready(timeout_sec: int = 25) -> None:
         ready_misp = ("successfully joined group" in misp_log) or ("setting newly assigned partitions" in misp_log)
         ready_alert = ("starting kafka consume loop" in alert_log) or ("adding:" in alert_log)
         if ready_misp and ready_alert:
-            return
+            break
         time.sleep(1.5)
+    _wait_for_kafka_consumer_groups_ready(
+        ["alert-manager-v1-falco", "soarca-tapcd-trigger", "stream-json-alerts"],
+        max_wait_seconds=max(deadline - time.time(), 0.0),
+    )
 
 
 def _wait_for_final_report_readiness(run_id: str, timeout_sec: int = 45) -> tuple[bool, str]:
@@ -3474,6 +4242,7 @@ def _compute_experiment_metrics(
     countermeasure_text: str = "",
     attrs: list[dict[str, Any]] | None = None,
     detection_confirmed: bool = False,
+    attack_enabled: bool = True,
 ) -> dict[str, Any]:
     attack_anchor = attack_started or started
     traffic_panel = traffic_panel or {}
@@ -3575,12 +4344,12 @@ def _compute_experiment_metrics(
     if isinstance(live_timeline.get("decide_at"), (int, float)):
         decide_time = float(live_timeline.get("decide_at") or 0.0) or None
     if decide_time is None:
-        decide_time = _first_timestamp_for_keywords(act_blob, ["selección defensiva", "d3fend", "lanzando playbook", "selected"])
+        decide_time = _first_timestamp_for_keywords(act_blob, ["selección defensiva", "defensive selection", "d3fend", "lanzando playbook", "launching playbook", "selected"])
     act_time = None
     if isinstance(live_timeline.get("act_at"), (int, float)):
         act_time = float(live_timeline.get("act_at") or 0.0) or None
     if act_time is None:
-        act_time = _first_timestamp_for_keywords(act_blob, ["playbook ejecutado", "playbook de aislamiento ejecutado", "applied", "block", "isolation", "executor"])
+        act_time = _first_timestamp_for_keywords(act_blob, ["playbook ejecutado", "playbook executed", "playbook de aislamiento ejecutado", "isolation playbook executed", "applied", "block", "isolation", "executor"])
     # Prefer actual attack-relative telemetry instead of run start to keep the
     # latency values scientifically meaningful.
     attack_start = attack_anchor
@@ -3616,10 +4385,52 @@ def _compute_experiment_metrics(
             return arr[lo]
         return arr[lo] + (arr[hi] - arr[lo]) * (idx - lo)
 
-    tp = 1 if relevant_attack_observed else 0
-    fn = 0 if relevant_attack_observed else 1
-    fp = max(len([ln for ln in detection_evidence_blob.splitlines() if ln.strip()]) - tp, 0)
-    tn = 0
+    # Count distinct alert lines, not every repetition of the same one. A
+    # single real incident (e.g. exp2's ransomware script re-invoking openssl
+    # per file, or Falco re-emitting its rule match on every one of those
+    # calls) produces dozens/hundreds of near-identical detector log lines —
+    # counting each repetition as its own false positive punished precision/
+    # accuracy/F1 purely for how chatty the underlying detector is, not for
+    # any actual detection error. Normalize whitespace/timestamps out of each
+    # line before dedup so only genuinely different alerts count separately.
+    _distinct_evidence_lines = {
+        re.sub(r"\d", "0", re.sub(r"\s+", " ", ln)).strip()
+        for ln in detection_evidence_blob.splitlines()
+        if ln.strip()
+    }
+    _alert_fired = relevant_attack_observed or bool(_distinct_evidence_lines)
+    # This block's ground truth is ONE label per run (relevant_attack_generated
+    # is hardcoded to 1 above): a single run either had a real attack or not,
+    # so tp/fp/fn/tn must each be 0 or 1 -- there is no such thing as "2 false
+    # positives" inside one run's confusion-matrix contribution, no matter how
+    # many detector log lines exist. Counting len(_distinct_evidence_lines) as
+    # the fp/tp value conflated "how many differently-worded log lines
+    # describe this one real incident" with "how many incidents were there",
+    # which is exactly the kind of one-real-event/multiple-evidence-lines
+    # mismatch already root-caused for the actor-profile-selection bug. A
+    # deduplicated (distinct-text) evidence count can legitimately be >1 for
+    # ONE true incident (e.g. a fast fan-in alert line plus a separate,
+    # differently-worded TAPCD_PROFILE_READY line for the same attack), so it
+    # was never a safe proxy for a false-positive count in the first place.
+    if attack_enabled:
+        # Ground truth positive: an attack really ran. Alerting (in any
+        # amount/form) is the one true positive for this run; staying
+        # completely silent is the one false negative. Extra evidence lines
+        # beyond the first are corroboration of the same true incident, not
+        # separate false positives.
+        tp = 1 if relevant_attack_observed else 0
+        fn = 0 if relevant_attack_observed else 1
+        fp = 0
+        tn = 0
+    else:
+        # Ground truth negative (benign run, attack_enabled=False): no attack
+        # ran, so any alerting at all is the one false positive for this run
+        # (regardless of how many log lines describe it) and staying silent
+        # is the one true negative.
+        tp = 0
+        fn = 0
+        fp = 1 if _alert_fired else 0
+        tn = 0 if _alert_fired else 1
     precision = tp / max(tp + fp, 1)
     recall = tp / max(tp + fn, 1)
     accuracy = (tp + tn) / max(tp + tn + fp + fn, 1)
@@ -3633,6 +4444,13 @@ def _compute_experiment_metrics(
         count = 0
         for line in blob.splitlines():
             low = line.lower()
+            # soarca-core's ssh capability logs a bare {"level":"error","msg":"EOF"}
+            # after every successful one-shot SSH command as the connection
+            # closes — this is not a playbook failure (that shows up as a
+            # separate "dial tcp ... connection refused/no route to host"
+            # line instead), so don't count it as a real execution error.
+            if '"component":"soarca/pkg/core/capability/ssh"' in low and '"msg":"eof"' in low:
+                continue
             if any(k in low for k in error_keywords) and not any(k in low for k in blocked):
                 count += 1
         return count
@@ -3693,7 +4511,111 @@ def _compute_experiment_metrics(
         "exp2": ["falco", "file", "process"],
         "exp3": ["tshark", "flow", "falco", "ssh", "host_signal"],
     }.get(experiment, ["tshark", "flow"])
-    observed_sources = [src for src in expected_observe_sources if src in observe_blob.lower() or src in effective_detect_blob.lower()]
+    # "tshark" and "ssh" evidence used to rely purely on keyword text showing
+    # up somewhere in the observe/detect log tails. Both containers that could
+    # ever emit those literal words (network_intrusion_detector_novadef logs
+    # "Escuchando tshark_traces..." / "[snort-out] ssh"-style lines) only do
+    # so ONCE, at process startup — every subsequent line is high-volume
+    # per-attack detection output. _tail_logs() applies Docker's `tail=N`
+    # AFTER `since=`, so any restart of that container mid-run (e.g. the GUI
+    # API's own _reset_detector_runtime_state(), or any other operational
+    # restart) pushes that one startup line out of the visible tail well
+    # before N more real detection lines accumulate — permanently and
+    # incorrectly reporting 0/3 or 2/3 coverage for a run that has perfectly
+    # normal tshark-derived network telemetry. Use the traffic sampler's own
+    # recorded packet_source instead: it's written on every sample for the
+    # whole run's lifetime, not a single easily-evicted startup line, and
+    # directly reflects whether the netfilter/tshark packet-counting path is
+    # actually producing data (see _container_observe_stats/_read_network).
+    _observed_packet_sources = {str(p.get("packet_source") or "").lower() for p in traffic_series}
+    _network_telemetry_confirmed = bool(
+        _observed_packet_sources & {"netfilter_input", "tshark_inbound", "victim_proc"}
+    )
+    # "ssh" evidence has the identical eviction problem, but its literal text
+    # ("[snort-out] ssh") is even rarer than the tshark startup line — it can
+    # get pushed out of a busy detector's log tail within seconds. exp1/exp3
+    # always target the SSH service on port 2222 specifically (see
+    # distributed_password_spraying.sh / victim-init), so the fast fan-in
+    # detector's own real per-attack alert lines ("FAST fan-in alert:
+    # x.x.x.x:2222 ...") are direct, per-run evidence that the SSH-targeted
+    # traffic was actually observed — just under a different literal string.
+    _ssh_evidence_confirmed = bool(
+        re.search(r":2222\b", effective_detect_blob) or "ssh" in effective_detect_blob.lower() or "ssh" in observe_blob.lower()
+    )
+    # "falco"/"file"/"process" (exp2/exp3) have the identical eviction problem
+    # as "tshark"/"ssh" above: they used to rely on those literal words showing
+    # up in the observe/detect log tails, but falco_novadef writes its events to
+    # /var/log/falco/falco_events.json (stdout_output is disabled), so nothing
+    # in its stdout tail ever contains them. Use the same per-sample telemetry
+    # already read from that file for every point in traffic_series instead:
+    # falco_signal_total (>0 confirms Falco produced events at all) and the
+    # rule tags Falco itself attaches to each event (see
+    # _read_falco_host_metrics) — "file"/"impact" for file-encryption activity,
+    # "execution"/"process" for process-execution activity — both present on
+    # NOVADEF's own ransomware lab rules for the whole run's lifetime, not a
+    # single easily-evicted startup line.
+    _falco_signal_confirmed = any(float(p.get("falco_events", 0.0) or p.get("falco_signal_total", 0.0) or 0.0) > 0.0 for p in traffic_series)
+    _falco_tags_seen: set[str] = set()
+    for p in traffic_series:
+        for tag in p.get("falco_tags") or []:
+            _falco_tags_seen.add(str(tag).strip().lower())
+    # The report is generated as soon as the countermeasure is confirmed
+    # (_run_ready_for_final_report), which for exp2/exp3 can be only a couple
+    # of seconds after the ransomware emulation script starts — long before
+    # the periodic traffic sampler (fires every ~0.1-1s, but only appends
+    # once it has actually run) has accumulated enough samples to see the
+    # full tag diversity Falco ends up emitting over the run's remaining
+    # lifetime. traffic_series only reflects samples taken up to THIS instant,
+    # so falling back to a direct, fresh read of falco_events.json here
+    # (same source _read_falco_host_metrics always uses) captures every event
+    # Falco has recorded for this run so far, independent of the sampler's
+    # own cadence/timing luck.
+    if not (_falco_tags_seen & {"file", "impact", "process", "execution"}):
+        try:
+            _fresh_falco = _read_falco_host_metrics(sample_key=f"metrics-fallback-{experiment}-{started}", since_ts=attack_anchor) or {}
+            for tag in _fresh_falco.get("falco_tags") or []:
+                _falco_tags_seen.add(str(tag).strip().lower())
+            if not _falco_signal_confirmed:
+                _falco_signal_confirmed = float(_fresh_falco.get("falco_signal_total", 0.0) or 0.0) > 0.0
+        except Exception:
+            pass
+    _falco_file_evidence_confirmed = bool(_falco_tags_seen & {"file", "impact"})
+    _falco_process_evidence_confirmed = bool(_falco_tags_seen & {"process", "execution"})
+    observed_sources = []
+    for src in expected_observe_sources:
+        if src == "tshark" and _network_telemetry_confirmed:
+            observed_sources.append(src)
+        elif src == "ssh" and _ssh_evidence_confirmed:
+            observed_sources.append(src)
+        elif src == "falco" and _falco_signal_confirmed:
+            observed_sources.append(src)
+        elif src == "file" and _falco_file_evidence_confirmed:
+            observed_sources.append(src)
+        elif src == "process" and _falco_process_evidence_confirmed:
+            observed_sources.append(src)
+        elif src == "host_signal" and _falco_signal_confirmed:
+            # exp3's host-side vector is the same ransomware/lateral-execution
+            # emulation as exp2, detected the same way (Falco events written to
+            # falco_events.json, never to stdout) — "host_signal" never had a
+            # literal producer of that exact string to match against in the
+            # first place. Falco having recorded ANY event for this run is
+            # already direct proof the host telemetry channel was live.
+            observed_sources.append(src)
+        elif src in {"falco", "file", "process", "host_signal"}:
+            # These four ALWAYS have dedicated structural evidence checked
+            # above (Falco signal totals / rule tags) — never fall through to
+            # the generic keyword search below for them. That fallback
+            # matches the bare word showing up ANYWHERE in the observe/detect
+            # log tail, including totally unrelated hits like flow_module's
+            # own "New file opened: .../trace_31.pcapng" log line — which was
+            # silently marking "file" (and similarly "falco"/"process") as
+            # observed on every single benign ground-truth run, even though
+            # Falco recorded zero real events (falco_events==0, no tags) the
+            # whole run. Reaching this branch means the real check above
+            # already failed, so these must NOT be marked observed.
+            pass
+        elif src in observe_blob.lower() or src in effective_detect_blob.lower():
+            observed_sources.append(src)
     observation_source_coverage = len(observed_sources) / max(len(expected_observe_sources), 1)
     telemetry_points = len(traffic_series)
     telemetry_intervals = [max(float(traffic_series[i + 1].get("ts", 0.0) or 0.0) - float(traffic_series[i].get("ts", 0.0) or 0.0), 0.0) for i in range(max(telemetry_points - 1, 0))]
@@ -3882,7 +4804,7 @@ def _compute_experiment_metrics(
         "act": {
             "soarca_trigger": _count_keyword_hits(act_blob, ["soarca-trigger", "playbook", "selected", "d3fend"]),
             "soarca_core": _count_keyword_hits(act_blob, ["soarca-core", "d3fend", "countermeasure", "workflow"]),
-            "soarca_executor": _count_keyword_hits(act_blob, ["executor", "iptables", "response applied", "playbook ejecutado"]),
+            "soarca_executor": _count_keyword_hits(act_blob, ["executor", "iptables", "response applied", "playbook ejecutado", "playbook executed"]),
         },
     }
     dimension_metrics = {
@@ -3906,7 +4828,14 @@ def _compute_experiment_metrics(
             ) if lead_actor else 0.0,
         },
         "response": {
-            "countermeasure_present": 1 if countermeasure_text and countermeasure_text not in {"", "-", "Pending / no decision yet"} else 0,
+            # Requires actual execution evidence, not just a selected/inferred
+            # countermeasure label. SOARCA always resolves a "default" D3FEND
+            # mapping for the experiment's context as soon as it has SOME
+            # stage evidence, even with zero execution — that text alone used
+            # to flip this to 1 for benign ground-truth runs that never
+            # triggered a real response, silently contaminating the true-
+            # negative count.
+            "countermeasure_present": 1 if (countermeasure_text and countermeasure_text not in {"", "-", "Pending / no decision yet"} and response_execution_present) else 0,
             "soarca_execution_present": 1 if response_execution_present else 0,
             "response_error_count": response_error_count,
         },
@@ -3971,6 +4900,14 @@ def _compute_experiment_metrics(
         },
     }
 
+    # Real activity window for operational_scalability's throughput rates —
+    # see that block's own comment for why `duration` (the run's entire
+    # lifetime, including the long passive tail after the countermeasure)
+    # made every rate round down to near-zero.
+    activity_window_sec = (
+        max((act_time or time.time()) - attack_start, 0.001) if attack_start is not None else duration
+    )
+
     return {
         "event_observability_ratio": round(observability_ratio, 4),
         "observation_quality": {
@@ -4017,11 +4954,22 @@ def _compute_experiment_metrics(
             "countermeasure_packet_drop_percent": round(cm_drop_ratio * 100.0, 2),
         },
         "operational_scalability": {
-            "telemetry_ingest_rate_eps": round(raw_points / duration, 4),
-            "detector_processing_rate_eps": round(tp / duration, 4),
-            "database_write_rate_eps": round(max(len(attrs), 1 if (live_misp.get("event_ids_detected_in_logs") or []) else 0) / duration, 4),
-            "soarca_action_rate_eps": round((1 if response_execution_present else 0) / duration, 4),
-            "events_window_seconds": round(duration, 3),
+            # These rates used to divide by `duration` (finished - started),
+            # the run's ENTIRE lifetime — including the long passive tail
+            # after the countermeasure fires, since a run intentionally stays
+            # "running" until the operator presses Stop. A handful of real
+            # pipeline events spread over that whole window (often 1800s by
+            # default) rounded down to ~0.0-0.5 ev/s regardless of how fast
+            # the actual OODA cycle was, making "Pipeline throughput" always
+            # look near-idle. Use the real activity window (attack start to
+            # the action being taken, or "now" if still mid-cycle) instead —
+            # falls back to `duration` only if the attack/act timestamps
+            # aren't available at all.
+            "telemetry_ingest_rate_eps": round(raw_points / activity_window_sec, 4),
+            "detector_processing_rate_eps": round(tp / activity_window_sec, 4),
+            "database_write_rate_eps": round(max(len(attrs), 1 if (live_misp.get("event_ids_detected_in_logs") or []) else 0) / activity_window_sec, 4),
+            "soarca_action_rate_eps": round((1 if response_execution_present else 0) / activity_window_sec, 4),
+            "events_window_seconds": round(activity_window_sec, 3),
             "telemetry_event_count": raw_points,
             "detector_event_count": 1 if relevant_attack_observed else 0,
             "db_write_count": len(attrs) if attrs else int(bool(live_misp.get("event_ids_detected_in_logs") or [])),
@@ -4113,7 +5061,17 @@ def _compute_experiment_metrics(
             "execution_present": bool(response_execution_present),
             "d3fend_alignment_score": round(response_alignment_score, 4),
             "response_error_count": _non_warning_error_count(act_blob),
-            "response_success_score": round(1.0 if response_execution_present and _non_warning_error_count(act_blob) == 0 else (0.5 if countermeasure_text else 0.0), 4),
+            # A merely-inferred/default countermeasure label with NO real
+            # execution evidence used to score 0.5 here (only a fully-clean
+            # execution scored 1.0, and a genuinely absent decision scored
+            # 0.0) -- for a benign ground-truth run (no attack, no
+            # countermeasure ever executed) that meant every single run
+            # silently reported "50% response success" for a response that
+            # never happened, corrupting the true-negative statistics. Score
+            # is now binary: 1.0 only with confirmed clean execution, 0.0
+            # otherwise -- matching the article_act computation above (line
+            # ~4602) that already required execution_present.
+            "response_success_score": round(1.0 if response_execution_present and _non_warning_error_count(act_blob) == 0 else 0.0, 4),
             "response_timeliness": _sec_pack(response_timeliness) if response_execution_present else None,
         },
         "pipeline_reliability": {
@@ -4231,9 +5189,22 @@ def _compute_experiment_metrics(
             "detection_to_profile_link": {
                 "ids_alert_to_profile_linked": bool(actor_profile_count > 0 and first_alert is not None),
                 "actor_profile_count": actor_profile_count,
+                # The 8 fields actually predicted by the ML/DL classifiers
+                # (Section 3.2.4 of the NOVADEF paper): Attitude, RiskLevel,
+                # Profile, Affiliation, Knowledge, AutomationLevel,
+                # Motivation, Skills. Previously only 5 of these 8 were
+                # counted here (profile/affiliation/motivation/attitude/
+                # skills, divided by 5.0) -- riskLevel, knowledge, and
+                # automationLevel were extracted and stored on every actor
+                # (see _native_actor_profile_from_line) but silently excluded
+                # from this ratio, so a run could report 1.0 completeness
+                # while actually only covering 5/8 of the real ML attribute
+                # set, or conversely be marked incomplete by a gap in one of
+                # the 3 uncounted fields without that ever surfacing here.
                 "profile_field_completeness_ratio": round(
-                    sum(1 for fld in ["profile", "affiliation", "motivation", "attitude", "skills"]
-                        if str(lead_actor.get(fld) or "").strip()) / 5.0, 4
+                    sum(1 for fld in ["profile", "affiliation", "motivation", "attitude",
+                                       "skills", "riskLevel", "knowledge", "automationLevel"]
+                        if str(lead_actor.get(fld) or "").strip()) / 8.0, 4
                 ) if lead_actor else 0.0,
                 "profile_timeliness": _sec_pack(
                     max((stable_identification or attack_start or 0) - (attack_start or 0), 0.0)
@@ -4279,8 +5250,12 @@ def _compute_experiment_metrics(
                 "observe_s": round(max((first_alert or 0) - (attack_start or 0), 0.0), 3) if attack_start and first_alert else 0.0,
                 "orient_s": round(max((stable_identification or 0) - (first_alert or 0), 0.0), 3) if first_alert and stable_identification else 0.0,
                 "enrich_s": round(max((first_misp or stable_identification or 0) - (stable_identification or first_alert or 0), 0.0), 3) if (first_misp or stable_identification) else 0.0,
-                "decide_s": round(stage_deltas.get("enrich_to_decide", 0.0) or 0.0, 3),
-                "act_s": round(stage_deltas.get("decide_to_act", 0.0) or 0.0, 3),
+                # max(..., 0.0) guards against a negative delta when a
+                # duplicate-campaign dedup path reuses an existing decision
+                # timestamp that lands after this run's own act_time — same
+                # non-negative guard the other four fields already apply.
+                "decide_s": round(max(stage_deltas.get("enrich_to_decide", 0.0) or 0.0, 0.0), 3),
+                "act_s": round(max(stage_deltas.get("decide_to_act", 0.0) or 0.0, 0.0), 3),
                 "e2e_s": round(max((act_time or 0) - (attack_start or 0), 0.0), 3) if attack_start and act_time else 0.0,
             },
         },
@@ -4431,9 +5406,9 @@ def _soarca_execution_evidence(log_text: str) -> bool:
     positive_markers = [
         "soarca_countermeasure_applied",
         "novadef_countermeasure_applied",
-        "✅ playbook ejecutado",
-        "✅ playbook de aislamiento ejecutado",
-        "playbook de aislamiento ejecutado",
+        "✅ playbook ejecutado", "✅ playbook executed",
+        "✅ playbook de aislamiento ejecutado", "✅ isolation playbook executed",
+        "playbook de aislamiento ejecutado", "isolation playbook executed",
         "response applied",
         "response executed",
         "done_block_ip",
@@ -4472,15 +5447,15 @@ def _soarca_execution_evidence_excerpt(log_text: str, max_lines: int = 12) -> st
     if not text.strip():
         return ""
     action_markers = (
-        "lanzando playbook",
-        "playbook ejecutado",
-        "playbook de aislamiento ejecutado",
+        "lanzando playbook", "launching playbook",
+        "playbook ejecutado", "playbook executed",
+        "playbook de aislamiento ejecutado", "isolation playbook executed",
         "soarca_countermeasure_applied",
         "novadef_countermeasure_applied",
         "soarca_countermeasure_requested",
-        "🎯 target ssh",
-        "bloqueado en",
-        "aislamiento en",
+        "🎯 target ssh", "🎯 dynamic ssh target",
+        "bloqueado en", "blocked on",
+        "aislamiento en", "isolation on",
         "d3fend",
         "response applied",
         "response executed",
@@ -4520,6 +5495,21 @@ def _persist_run_phase_marker(run_id: str, key: str, ts: float | None) -> None:
         for item in RUN_HISTORY:
             if str(item.get("run_id") or "") != str(run_id):
                 continue
+            # Once this run's final report exists, its phase markers are done
+            # being computed — _build_live_report_panel() already applied
+            # every guard (event-id evidence, success/failure of the actual
+            # enrichment call, etc.) at the moment the report was built, and
+            # that computed value is what the persisted report_panel/waterfall
+            # reflect. novadef_phase_timing.json is a single shared file
+            # across every campaign hitting the same victim (not scoped per
+            # run_id), so a poll that happens to fire AFTER this run closed
+            # can read a value written for a completely different, later
+            # profile in the same campaign and, without this guard, "correct"
+            # a marker that was already finalized — reintroducing exactly the
+            # cross-run contamination this function's floor checks exist to
+            # prevent, just after report generation instead of before it.
+            if item.get("report_id"):
+                break
             current = float(item.get(key) or 0.0) or None
             if current is None or ts_value < current:
                 item[key] = ts_value
@@ -4685,30 +5675,50 @@ def _neo4j_actor_profiles(
 
 
 def _score_actor_profile(actor: dict[str, Any], source_ips: list[str] | None = None) -> int:
-    src_set = set(source_ips or [])
-    actor_src = set(actor.get("source_ips") or [])
-    score = 0
-    if src_set and actor_src.intersection(src_set):
-        score += 100
-    if actor.get("profile") == "credential-access-distributed-spraying":
-        score += 40
-    if "password_spraying" in str(actor.get("skills") or ""):
-        score += 20
-    if actor.get("knowledge") == "remote_services_authentication":
-        score += 20
-    if actor.get("motivation") == "credential_access":
-        score += 10
-    if actor.get("attitude") == "opportunistic":
-        score += 5
-    # Reward ML-field completeness strongly: the network/ML profile (e.g.
-    # crime-syndicate / criminal) carries Motivation/Knowledge/Skills/etc. from
-    # prep_pred, whereas the host ransomware-operator profile leaves them empty.
-    # For exp3 we want the richer profile to be the displayed lead so the panel
-    # shows the full actor characterization, not the bare ransomware stub.
+    # ML-field completeness MUST dominate this score. A rich profile (e.g.
+    # from pmp-misp-soarca-trigger's TAPCD_PROFILE_READY line, carrying
+    # Motivation/Knowledge/Attitude/Affiliation/Skills/RiskLevel/
+    # AutomationLevel/KillChainPhase) has to outscore a bare "Enviado"
+    # summary stub (profile/attack/ttps only, every ML field blank) in every
+    # case, regardless of any other signal -- that stub is never a better
+    # profile to surface, just a leaner log line.
+    #
+    # Root cause of a real bug found via a bimodal profile_field_
+    # completeness_ratio (~30-45% of runs stuck at 1/8 ML fields) across a
+    # 60-run campaign: the +100 source-IP-match bonus below used to run
+    # BEFORE this completeness reward and could outweigh it entirely. The
+    # bare "Enviado" line has no `src_ips=` field of its own, so it falls
+    # back to inheriting the run's externally-supplied `source_ips` (e.g.
+    # from MISP attributes) verbatim -- which trivially "matches" itself.
+    # The rich TAPCD_PROFILE_READY line instead carries its OWN literal
+    # `src_ips=` (whichever single source IP the detector had observed at
+    # the moment that specific log line was written), which does not
+    # necessarily equal the run's externally-supplied source_ips. So the
+    # stub could win the +100 bonus while the rich profile could not, even
+    # though the rich profile is strictly more informative and from the
+    # same actor_id/campaign. Capping this bonus well below the maximum
+    # possible completeness reward (8 fields x 8 = 64) makes it a pure
+    # tie-breaker between profiles of similar completeness again, instead
+    # of a way to override completeness entirely.
     _ml_fields = ["motivation", "knowledge", "skills", "affiliation", "attitude", "riskLevel", "automationLevel", "killChainPhase"]
     _populated = len([k for k in _ml_fields if str(actor.get(k) or "").strip()])
-    score += _populated * 8
+    score = _populated * 8
     score += len([k for k in ["profile", "skills", "knowledge", "motivation", "affiliation", "attitude"] if actor.get(k)])
+
+    src_set = set(source_ips or [])
+    actor_src = set(actor.get("source_ips") or [])
+    if src_set and actor_src.intersection(src_set):
+        score += 3
+    if actor.get("profile") == "credential-access-distributed-spraying":
+        score += 2
+    if "password_spraying" in str(actor.get("skills") or ""):
+        score += 1
+    if actor.get("knowledge") == "remote_services_authentication":
+        score += 1
+    if actor.get("motivation") == "credential_access":
+        score += 1
+    if actor.get("attitude") == "opportunistic":
+        score += 1
     return score
 
 
@@ -4731,8 +5741,31 @@ def _select_primary_actor_profile(actors: list[dict[str, Any]], source_ips: list
     for actor in actors:
         key = _actor_profile_key(actor)
         current = deduped.get(key)
-        if current is None or _score_actor_profile(actor, source_ips=source_ips) > _score_actor_profile(current, source_ips=source_ips):
+        if current is None:
             deduped[key] = actor
+            continue
+        # MERGE, don't just keep-the-higher-scored-one-and-discard-the-rest:
+        # prep_pred publishes the SAME actor_id across multiple log lines
+        # over its lifetime that are each complete in different ways --
+        # "📨 TAPCD_PROFILE_READY"/short "📤 Enviado" carry the 8 ML fields
+        # (Motivation/Skills/etc.) but always log explainability=- (SHAP is
+        # computed afterwards, in a background thread, specifically so its
+        # ~4s cost never blocks Decide/Act), while the later "📤 Enriquecido
+        # (explainability)" follow-up line carries real Explainability/
+        # ExplainabilityAllFields but almost none of the other ML fields.
+        # Picking one and dropping the other always lost real evidence no
+        # matter which line won the score — merge them into one record
+        # instead, keeping the highest-scored line's values but backfilling
+        # any field it left blank from the other, so a real SHAP result that
+        # already arrived is never thrown away just because an earlier,
+        # richer-in-other-fields line scored higher overall.
+        if _score_actor_profile(actor, source_ips=source_ips) > _score_actor_profile(current, source_ips=source_ips):
+            winner, loser = actor, current
+        else:
+            winner, loser = current, actor
+        merged = dict(loser)
+        merged.update({k: v for k, v in winner.items() if str(v or "").strip()})
+        deduped[key] = merged
     ordered = sorted(
         deduped.values(),
         key=lambda a: (
@@ -4751,19 +5784,40 @@ def _native_actor_profile_from_line(line: str, source_ips: list[str] | None = No
     # Líneas de resumen emitidas por prep_pred: "📤 Enviado actor_id=profile_X profile=Y attack=Z"
     # También líneas del soarca-trigger: "📨 TAPCD_PROFILE_READY actor=profile_X profile=Y ... detection_attack=Z"
     # These do NOT start with "profile_" so they need their own parser.
-    _enviado_m = re.search(r"actor(?:_id)?=(profile_\S+)\s+profile=(\S+).*?(?:attack|detection_attack)=(\S+)", raw)
+    # actor_id is NOT always "profile_..." — misp_to_soarca.py's campaign
+    # consolidation (see prep_pred.py: actor_id = f"campaign_{campaign}_{dst}"
+    # whenever a campaign_id is present, which is the common case) produces
+    # ids like "campaign_camp_172_18_0_32_991001_172.18.0.32". The previous
+    # `profile_\S+` requirement silently rejected every campaign-consolidated
+    # profile here, so none of its kv fields (explainability included) were
+    # ever parsed for those — match any non-whitespace actor id instead.
+    # The (?:attack|detection_attack)=... suffix is now OPTIONAL: prep_pred's
+    # "📤 Enriquecido (explainability) actor_id=... profile=... explainability=..."
+    # follow-up line (published from a background thread once SHAP finishes,
+    # a few seconds after the fast "📤 Enviado"/"📨 TAPCD_PROFILE_READY" lines)
+    # never carried attack=/detection_attack= at all, so it never matched this
+    # regex and was silently invisible to this parser — even though it is the
+    # ONLY log line that actually carries a real, non-empty Explainability
+    # value (the fast lines always log explainability=- by design, computed
+    # later precisely so SHAP's ~4s cost never blocks Decide/Act). Making
+    # this group optional lets the enrichment line parse into a real actor
+    # dict too, whose "explainability"/"explainability_fields" fields (parsed
+    # by the loop below) then take over the placeholder set by an earlier
+    # line for the SAME actor_id at _select_primary_actor_profile time.
+    _enviado_m = re.search(r"actor(?:_id)?=(\S+)\s+profile=(\S+)(?:.*?(?:attack|detection_attack)=(\S+))?", raw)
     if _enviado_m:
         _aid = _enviado_m.group(1).rstrip(",")
         _prof = _enviado_m.group(2).rstrip(",")
-        _atk = _enviado_m.group(3).rstrip(",")
+        _atk = (_enviado_m.group(3) or "").rstrip(",")
         actor: dict[str, Any] = {
             "actor_id": _aid,
             "profile_id": _aid,
             "raw_profile_line": raw,
             "raw_fields": [],
             "profile": _prof,
-            "detection_attack": _atk,
         }
+        if _atk:
+            actor["detection_attack"] = _atk
         # Extract all KV fields present in the TAPCD_PROFILE_READY log line.
         # soarca-trigger logs them explicitly from the real profile_row CSV,
         # so these values come from prep_pred ML — not invented.
@@ -4801,6 +5855,8 @@ def _native_actor_profile_from_line(line: str, source_ips: list[str] | None = No
             ("firstSeen",         "first_seen"),
             ("lastActivity",      "last_activity"),
             ("evasion",           "evasion"),
+            ("explainability",    "explainability"),
+            ("explainability_all_fields_raw", "explainability_fields"),
         ]:
             _v = _kv(_key)
             if _v:
@@ -4897,6 +5953,8 @@ def _native_actor_profile_from_line(line: str, source_ips: list[str] | None = No
         actor["campaigns"] = _col(25)
     if _col(26):
         actor["comments"] = _col(26)
+    if _col(27):
+        actor["explainability"] = _col(27)
     return actor
 
 
@@ -4912,49 +5970,6 @@ def _native_actor_profiles_from_lines(lines: list[str], source_ips: list[str] | 
             seen_raw.add(raw_line)
             actors.append(actor)
     return actors
-
-
-def _latest_misp_event_from_db(experiment: str) -> dict[str, str] | None:
-    where = "1=1"
-    if experiment == "exp1":
-        where = "info LIKE '%Password Spraying%' OR info LIKE '%Brute Force%'"
-    elif experiment == "exp2":
-        where = "info LIKE '%Host Ransomware Emulation Detected%' OR info LIKE '%FALCO:%'"
-    elif experiment == "exp3":
-        # exp3 generates one consolidated event that starts as a network alert and
-        # gets enriched with the Falco/ransomware profile. The title includes both
-        # vectors. Pick the event with most attributes (most enriched = most complete).
-        where = (
-            "info LIKE '%Password Spraying%' OR info LIKE '%Brute Force%' "
-            "OR info LIKE '%FALCO:%' OR info LIKE '%Hybrid%' "
-            "OR info LIKE '%T1021%' OR info LIKE '%T1078%'"
-        )
-    if experiment == "exp3":
-        cmd = (
-            "mysql -uroot -pmy_root_password misp -NBe "
-            f"\"SELECT e.id, e.info FROM events e "
-            f"LEFT JOIN attributes a ON a.event_id=e.id "
-            f"WHERE {where} "
-            f"GROUP BY e.id ORDER BY COUNT(a.id) DESC, e.id DESC LIMIT 1;\""
-        )
-    else:
-        cmd = (
-            "mysql -uroot -pmy_root_password misp -NBe "
-            f"\"SELECT id, info FROM events WHERE {where} ORDER BY id DESC LIMIT 1;\""
-        )
-    try:
-        db = DOCKER_CLIENT.containers.get("pmp-misp-db")
-        res = db.exec_run(["sh", "-lc", cmd], stdout=True, stderr=True)
-        out = (res.output or b"").decode("utf-8", errors="replace").strip()
-        if not out:
-            return None
-        parts = out.split("\t", 1)
-        if not parts or not parts[0].isdigit():
-            return None
-        info = parts[1] if len(parts) > 1 else ""
-        return {"id": parts[0], "info": info}
-    except Exception:
-        return None
 
 
 def _runtime_experiment_summary(experiment: str, started: float | None, last_output: str) -> dict[str, str]:
@@ -5032,7 +6047,7 @@ def _runtime_experiment_summary(experiment: str, started: float | None, last_out
     if fast_detect_ready:
         detect_ready = True
 
-    live_panel = _build_live_report_panel(experiment, started, attack_started)
+    live_panel = _cached_build_live_report_panel(experiment, started, attack_started)
     live_tapcd = (live_panel.get("tapcd") or {}) if live_panel else {}
     live_misp = (live_panel.get("misp") or {}) if live_panel else {}
     live_cm = (live_panel.get("countermeasure") or {}) if live_panel else {}
@@ -5168,7 +6183,7 @@ def _summary_from_latest_report(report_id: str) -> dict[str, str] | None:
         profile = "Pending / no native TAPCD profile evidence yet"
 
     selected = str(cm.get("selected") or "-")
-    if bool(response_metrics.get("execution_present")) or any(k in cm_excerpt for k in ["playbook ejecutado", "applied", "response", "executor"]):
+    if bool(response_metrics.get("execution_present")) or any(k in cm_excerpt for k in ["playbook ejecutado", "playbook executed", "applied", "response", "executor"]):
         countermeasure = f"MITRE D3FEND: {selected} (applied)"
     elif any(k in cm_excerpt for k in ["eof", "i/o timeout", "dial tcp", "error"]):
         countermeasure = f"MITRE D3FEND: {selected} (attempted, execution errors detected)"
@@ -5207,11 +6222,22 @@ def _run_has_countermeasure(run_item: dict[str, Any] | None) -> bool:
     report_id = str(run_item.get("report_id") or "")
     if report_id:
         return True
+    # act_at is written independently and directly (via _persist_run_phase_marker,
+    # fed by SOARCA's own timing file) the moment the countermeasure lands — a
+    # cheap dict read that makes rebuilding the whole live report panel (several
+    # multi-container log tails) unnecessary in the common case where act_at is
+    # already there. Callers of this function poll it in a loop (e.g.
+    # _wait_for_pipeline_completion, _run_ready_for_final_report), so skipping
+    # the expensive rebuild here is what actually lets those loops return
+    # promptly instead of always paying the full panel-rebuild cost every
+    # iteration even once the countermeasure evidence already exists.
+    if run_item.get("act_at"):
+        return True
     started = run_item.get("started_at")
     experiment = str(run_item.get("experiment") or "")
     if not experiment or started is None:
         return False
-    panel = _build_live_report_panel(experiment, started, run_item.get("attack_started_at"))
+    panel = _cached_build_live_report_panel(experiment, started, run_item.get("attack_started_at"))
     if not panel:
         return False
     cm = panel.get("countermeasure") or {}
@@ -5226,11 +6252,29 @@ def _run_has_countermeasure(run_item: dict[str, Any] | None) -> bool:
     return bool(_soarca_execution_evidence(cm_text))
 
 
+# How long _run_ready_for_final_report waits for exp3's host-isolation
+# evidence after its network countermeasure lands, before giving up and
+# generating the report anyway. Measured host isolation arriving ~2-5s after
+# the network countermeasure in normal runs; well above that for margin
+# without leaving a genuinely-failed Akira launch stuck forever.
+EXP3_HOST_ISOLATION_GRACE_SECONDS = float(os.getenv("EXP3_HOST_ISOLATION_GRACE_SECONDS", "20"))
+
+
 def _run_ready_for_final_report(run_item: dict[str, Any] | None) -> tuple[bool, str]:
     if not run_item:
         return False, "run not found"
     if bool(run_item.get("deleted")):
         return False, "run deleted"
+
+    # Benign ground-truth run (no attack ever launched): _run_background's own
+    # benign-window loop already confirmed no countermeasure fired during the
+    # full observation window and marked benign_window_elapsed — that IS a
+    # true negative, ready for report generation. Without this branch, a
+    # benign run could never satisfy the countermeasure-based checks below
+    # (there is never a countermeasure to find) and would never produce a
+    # report at all.
+    if not bool(run_item.get("attack_enabled", True)) and bool(run_item.get("benign_window_elapsed")) and not _run_has_countermeasure(run_item):
+        return True, "benign window elapsed, no detection (true negative)"
 
     # If the countermeasure has already been confirmed the pipeline has
     # completed its critical defensive stage. Allow report generation
@@ -5258,7 +6302,7 @@ def _run_ready_for_final_report(run_item: dict[str, Any] | None) -> tuple[bool, 
 
     experiment = str(run_item.get("experiment") or "")
     started = run_item.get("started_at")
-    panel = _build_live_report_panel(experiment, started, run_item.get("attack_started_at")) if experiment and started else {}
+    panel = _cached_build_live_report_panel(experiment, started, run_item.get("attack_started_at")) if experiment and started else {}
     tapcd_panel = (panel.get("tapcd") or {}) if panel else {}
     misp_panel = (panel.get("misp") or {}) if panel else {}
     cm_panel = (panel.get("countermeasure") or {}) if panel else {}
@@ -5268,8 +6312,13 @@ def _run_ready_for_final_report(run_item: dict[str, Any] | None) -> tuple[bool, 
     require_misp_for_final_report = bool(int(os.getenv("EXPERIMENT_REQUIRE_MISP_FOR_FINAL_REPORT", "0")))
     cm_selected = str(cm_panel.get("selected") or "").strip()
     victim_name = _run_container_name(run_item, "victim")
+    # run_item.act_at (direct dict read, no panel rebuild) is authoritative once
+    # present — the panel's own timeline.act_at is derived from the SAME
+    # underlying soarca timing file via _build_live_report_panel, so there is no
+    # correctness gap in trusting the cheaper source first.
     act_ok = bool(
-        isinstance((panel.get("timeline") or {}).get("act_at"), (int, float))
+        run_item.get("act_at")
+        or isinstance((panel.get("timeline") or {}).get("act_at"), (int, float))
         or _effective_soarca_execution(experiment, str(cm_panel.get("soarca_excerpt") or ""), victim_name=victim_name)
     )
 
@@ -5287,6 +6336,36 @@ def _run_ready_for_final_report(run_item: dict[str, Any] | None) -> tuple[bool, 
         return False, "countermeasure selection missing"
     if not act_ok:
         return False, "SOARCA execution evidence missing"
+
+    # exp3 is a two-phase incident: the network countermeasure (block_ip_range)
+    # lands ~2s before the host one (isolation), since Akira's Falco trigger
+    # fires shortly after the network attack starts (see _delayed_akira_for_
+    # exp3's own comment on that 2s offset). act_ok above only requires ANY
+    # SOARCA execution evidence, so without this check the report/chart_data
+    # snapshot for exp3 gets frozen right after the network countermeasure —
+    # before the host isolation (the action that actually closes the
+    # hybrid-attack loop) has happened, leaving host_countermeasure_at
+    # permanently null in that snapshot even though isolation DID occur
+    # moments later (confirmed in soarca-trigger's own logs). Wait a short,
+    # bounded grace period for host isolation evidence specifically before
+    # calling exp3 "ready" — but don't block forever if it never arrives
+    # (e.g. Akira launch failed for this run), since that would silently turn
+    # every failed host phase into a report that's never generated at all.
+    if experiment == "exp3":
+        _host_grace_deadline_key = f"exp3_host_grace_deadline::{run_item.get('run_id') or ''}"
+        _host_isolation_evidence = "playbook de aislamiento ejecutado", "isolation playbook executed" in str(cm_panel.get("soarca_excerpt") or "").lower()
+        if not _host_isolation_evidence:
+            _victim_for_grace = _run_container_name(run_item, "victim")
+            _grace_logs = _soarca_act_log_text(_victim_for_grace, int(float(started or 0)) or None, 160)
+            _host_isolation_evidence = "playbook de aislamiento ejecutado", "isolation playbook executed" in _grace_logs.lower()
+        if not _host_isolation_evidence:
+            _act_since = run_item.get("act_at") or run_item.get("attack_started_at") or started
+            _grace_elapsed = time.time() - float(_act_since or time.time())
+            if _grace_elapsed < EXP3_HOST_ISOLATION_GRACE_SECONDS:
+                return False, "host isolation evidence pending (exp3 second phase)"
+            # Grace period exhausted — proceed without host isolation evidence
+            # (e.g. Akira genuinely failed to launch for this run) rather than
+            # blocking the report forever.
 
     return True, "ready"
 
@@ -5345,19 +6424,83 @@ def _observe_ready(run_id: str) -> bool:
     return False
 
 
+def _read_detected_source_ips(attack_since_ts: float | None) -> list[str]:
+    """
+    Read the fast fan-in detector's own alert file for the real, live-growing
+    set of attacker source IPs it has actually observed so far.
+
+    This exists so the topology panel can reveal attacker nodes the moment
+    each one is detected (a few seconds into the attack) instead of waiting
+    for TAPCD's full actor profile, which can take much longer than exp1/exp3's
+    entire attack duration to complete — by the time TAPCD is ready the attack
+    may already be over, so archSyncAttackers() was never called and no
+    attacker nodes ever appeared. The detector (PMP/Alert_Module/Docker/
+    Entrypoints/entrypoint_network_intrusion_detector.py) purges this file at
+    the start of every run (_reset_detector_runtime_state), so every line in
+    it already belongs to the current run — no run_id/campaign filtering
+    needed, same assumption _detection_evidence_lines() below relies on.
+
+    Read via docker exec into the detector container itself (where the file
+    lives natively at /app/results/...), not via HOST_REPO_ROOT — that env var
+    holds the HOST's own path (e.g. /home/novadef/NOVADEF), which is not where
+    this container's bind mount actually lands (it lands at /novadef here);
+    resolving it as a literal path inside this container silently returns a
+    directory that isn't the real mount, so .exists() was always False.
+    """
+    try:
+        det = DOCKER_CLIENT.containers.get("network_intrusion_detector_novadef")
+        res = det.exec_run(
+            ["sh", "-lc", "tail -n 200 /app/results/network_intrusion_alerts.jsonl 2>/dev/null || true"],
+            stdout=True,
+            stderr=True,
+        )
+        blob = (res.output or b"").decode("utf-8", errors="replace")
+        if not blob.strip():
+            return []
+        lines = blob.splitlines()
+    except Exception:
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in lines[-200:]:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            alert = json.loads(raw)
+        except Exception:
+            continue
+        if attack_since_ts is not None:
+            ts_str = str(alert.get("timestamp") or "")
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                if ts < attack_since_ts - 5:
+                    continue
+            except Exception:
+                pass
+        for ip in alert.get("src_ips") or []:
+            ip = str(ip or "").strip()
+            if ip and ip not in seen:
+                seen.add(ip)
+                ordered.append(ip)
+    return ordered
+
+
 def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> dict[str, Any]:
     # If the API process was restarted during a live run, background sampler
     # threads are lost. Sample on-demand here so charts keep updating.
     #
     # stale_after must stay well above the background sampler's normal
-    # interval (EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_SECONDS, default 0.7s).
-    # It previously defaulted to 2.0s — close enough to the sampler's own
-    # cadence that under load (e.g. Falco emitting hundreds of events/s during
-    # ransomware, which slows down _container_observe_stats' docker exec calls)
-    # this on-demand path fired concurrently with the background sampler,
-    # producing two RX-counter reads a few hundred ms apart. Both get appended
-    # as separate samples, and the delta_packets computation (raw_delta -
-    # drop_delta between consecutive samples) can spike briefly when those two
+    # interval (EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_SECONDS, now targeting
+    # ~0.1s, capped in practice by _container_observe_stats' docker-exec
+    # cost — real cadence is closer to a few hundred ms). This on-demand path
+    # only exists to recover from a dead sampler thread (e.g. after an API
+    # restart), so a fixed 6s margin stays comfortably above that cadence
+    # either way. If it were close to the real cadence instead, this path
+    # could fire concurrently with the background sampler, producing two
+    # RX-counter reads a few hundred ms apart — both get appended as separate
+    # samples, and the delta_packets computation (raw_delta - drop_delta
+    # between consecutive samples) can spike briefly when those two
     # near-simultaneous reads race — this is what caused the anomalous ~400
     # pkt/s spike observed on the live chart despite no real traffic change.
     # 6s gives the background sampler ample room to be merely "a bit slow"
@@ -5391,14 +6534,32 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
     _attack_started = float((run_item or {}).get("attack_started_at") or 0) or None
     if _attack_started is None and str((run_item or {}).get("run_id") or "") == str(STATE.get("current_run_id") or ""):
         _attack_started = float(STATE.get("last_attack_started_at") or 0) or None
+    # exp3's host phase (Akira) launches ~2s after the network phase (see
+    # _delayed_akira_for_exp3) -- attack_started_at alone always reflects the
+    # network phase's start, so the host chart's "Host attack" line landed on
+    # the network timestamp instead of when Akira actually launched. This
+    # mirrors network_countermeasure_at/host_countermeasure_at below: exp1/exp2
+    # have no second attack phase, so it stays None for them.
+    _host_attack_started = float((run_item or {}).get("host_attack_started_at") or 0) or None
     markers: dict[str, float | None] = {
         "started_at": float((run_item or {}).get("started_at") or 0) or None,
         "attack_started_at": _attack_started,
+        "host_attack_started_at": _host_attack_started,
         "detection_at": None,
         "network_detect_at": None,
         "host_detect_at": None,
         "finished_at": float((run_item or {}).get("finished_at") or 0) or None,
         "countermeasure_at": None,
+        # exp3 fires TWO independent countermeasures (block_ip_range for the
+        # network phase, host isolation for the ransomware phase), each tied
+        # to its own detection. countermeasure_at alone always resolved to
+        # whichever ran first (network), so the host chart drew ITS
+        # "Countermeasure" line at the network timestamp — before its own
+        # Falco detection even fired, which is causally backwards for that
+        # chart. These two let each chart use the countermeasure that
+        # actually belongs to it.
+        "network_countermeasure_at": None,
+        "host_countermeasure_at": None,
         # OODA phase timestamps (Observe/Profile/Enrich/Decide) for the
         # "phase timings" summary shown once the run completes. detect_at and
         # act_at already have their own markers (detection_at/countermeasure_at)
@@ -5422,9 +6583,23 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
         markers["countermeasure_at"] = float(cached_cm_ts)
     if use_cached_marker and isinstance(cached_detect_ts, (int, float)):
         markers["detection_at"] = float(cached_detect_ts)
-    # Only skip expensive log computation when the cache has a REAL value.
-    # A cached None means the marker was not found yet — we must keep trying.
-    skip_expensive_computation = use_cached_marker and isinstance(cached_cm_ts, (int, float))
+    # Only skip expensive log computation for the full marker_cache_ttl (6s)
+    # when the cache has a REAL countermeasure value — a cached None means
+    # the marker was not found yet and a real detection could land any
+    # moment, so we must keep trying... but not on every single poll. With
+    # the frontend now polling /api/traffic every ~100ms
+    # (TRAFFIC_INTERVAL_MS), the pre-countermeasure window — exactly when
+    # the user is watching the chart most closely — recomputed this from
+    # scratch (5-8 docker log tails) up to ~10x/sec, which is what made the
+    # endpoint itself take ~250-300ms per call and become the real
+    # bottleneck behind "the chart doesn't feel live", not the sampler.
+    # negative_cache_ttl gives a short (1.5s) grace window to skip
+    # recomputation even with no countermeasure yet — short enough that a
+    # real detection (which in practice takes several seconds to occur) is
+    # never meaningfully delayed by it.
+    negative_cache_ttl = float(os.getenv("EXPERIMENT_TRAFFIC_MARKERS_NEGATIVE_CACHE_SECONDS", "1.5"))
+    within_negative_cache = cache_computed_at > 0 and (now_ts - cache_computed_at) <= max(negative_cache_ttl, 0.2)
+    skip_expensive_computation = (use_cached_marker and isinstance(cached_cm_ts, (int, float))) or within_negative_cache
 
     report_id = str((run_item or {}).get("report_id") or "")
     is_running = bool((run_item or {}).get("running"))
@@ -5499,7 +6674,7 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
                 markers["countermeasure_at"] = datetime.fromisoformat(act_ts.replace("Z", "+00:00")).timestamp()
             except Exception:
                 markers["countermeasure_at"] = None
-    if markers["detection_at"] is None:
+    if markers["detection_at"] is None and not within_negative_cache:
         since_ts = int(float((run_item or {}).get("started_at") or 0)) or None
         attack_since_ts = int(float(markers["attack_started_at"] or 0)) or None
         # If the attack has not started yet there cannot be a detection — skip to
@@ -5548,7 +6723,14 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
                 detect_ts = None
             if detect_ts is not None:
                 markers["detection_at"] = detect_ts
-    if markers["countermeasure_at"] is None and not skip_expensive_computation:
+    # Also recompute when the phase-specific markers are still missing, even
+    # if the generic countermeasure_at is already cached/persisted — exp3
+    # fires network_countermeasure_at first and host_countermeasure_at
+    # (isolation) can arrive many seconds later, well after countermeasure_at
+    # already latched onto the first one and this whole block started being
+    # skipped via skip_expensive_computation.
+    _need_phase_cm = markers["network_countermeasure_at"] is None or markers["host_countermeasure_at"] is None
+    if (markers["countermeasure_at"] is None or _need_phase_cm) and not (skip_expensive_computation and not _need_phase_cm):
         since_ts = int(float((run_item or {}).get("started_at") or 0)) or (int(time.time()) - 120)
         profile_logs = (
             _tail_logs("novadef-novadef_stream_low-1", 220, since_ts=since_ts)
@@ -5585,8 +6767,8 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
             k in soarca_logs_live.lower()
             for k in [
                 "soarca_countermeasure_applied",
-                "playbook de aislamiento ejecutado",
-                "playbook ejecutado",
+                "playbook de aislamiento ejecutado", "isolation playbook executed",
+                "playbook ejecutado", "playbook executed",
                 "response executed",
                 "response applied",
                 "done_block_ip",
@@ -5601,10 +6783,10 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
                 act_logs,
                 [
                     "soarca_countermeasure_applied",
-                    "playbook de aislamiento ejecutado",
-                    "✅ playbook de aislamiento ejecutado",
-                    "✅ playbook ejecutado",
-                    "playbook ejecutado",
+                    "playbook de aislamiento ejecutado", "isolation playbook executed",
+                    "✅ playbook de aislamiento ejecutado", "✅ isolation playbook executed",
+                    "✅ playbook ejecutado", "✅ playbook executed",
+                    "playbook ejecutado", "playbook executed",
                     "response executed",
                     "response applied",
                     "done_block_ip",
@@ -5628,6 +6810,28 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
                 ]
                 if ts_candidates:
                     markers["countermeasure_at"] = float(max(ts_candidates))
+            # Compute network vs host countermeasure timestamps SEPARATELY —
+            # each chart needs the one that actually belongs to it (see the
+            # comment on these markers' declaration above). "bloqueado"/
+            # "block_ip_range" only ever appear in the network-phase log
+            # lines; "aislamiento"/"isolation" only in the host-phase ones —
+            # unlike the combined cm_ts search above, these cannot cross-match.
+            _net_cm_ts = _first_timestamp_for_keywords_with_nearest_fallback(
+                act_logs,
+                ["bloqueado en", "blocked on", "block_ip_range", "d3-networktrafficfiltering", "rango bloqueado", "range blocked"],
+            )
+            if _net_cm_ts is not None and since_ts is not None and _net_cm_ts < since_ts:
+                _net_cm_ts = None
+            if _net_cm_ts is not None:
+                markers["network_countermeasure_at"] = _net_cm_ts
+            _host_cm_ts = _first_timestamp_for_keywords_with_nearest_fallback(
+                act_logs,
+                ["playbook de aislamiento ejecutado", "isolation playbook executed", "aislamiento ejecutado en", "isolation executed on", "d3-executionisolation"],
+            )
+            if _host_cm_ts is not None and since_ts is not None and _host_cm_ts < since_ts:
+                _host_cm_ts = None
+            if _host_cm_ts is not None:
+                markers["host_countermeasure_at"] = _host_cm_ts
 
     # For running/live runs, only expose countermeasure marker when there is
     # concrete SOARCA execution evidence in current act logs.
@@ -5642,19 +6846,125 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
         _live_act_logs = _soarca_act_log_text(_live_victim, _live_since_ts, 220)
         if not _effective_soarca_execution(str((run_item or {}).get("experiment") or ""), _live_act_logs, victim_name=_live_victim):
             markers["countermeasure_at"] = None
+            # network_countermeasure_at/host_countermeasure_at derive from the
+            # same act_logs evidence as countermeasure_at above — if that
+            # evidence didn't hold up, neither of these did either.
+            markers["network_countermeasure_at"] = None
+            markers["host_countermeasure_at"] = None
 
-    # Compute separate network-layer and host-layer detection timestamps for
-    # exp3.  We read the MISP integrator logs once and look for the two
-    # distinct detection keywords: network IDS alert vs. Falco SSH brute force.
+    # Compute separate network-layer and host-layer detection timestamps.
+    # We read the MISP integrator logs once and look for the two distinct
+    # detection keywords: network IDS alert vs. Falco SSH brute force.
+    # exp1 is network-only (password spraying, no ransomware/host component),
+    # so host_detect_at will simply stay None for it below — that's correct,
+    # not a gap in this block. This used to be gated to exp3 only, which left
+    # exp1's traffic chart with no "Net detection" marker at all even though
+    # exp1 absolutely does have one (countermeasure_at existing proves
+    # detection happened — SOARCA doesn't act without it).
     _exp = str((run_item or {}).get("experiment") or "")
-    if _exp == "exp3":
-        _since_ts = int(float((run_item or {}).get("attack_started_at") or (run_item or {}).get("started_at") or 0)) or None
+    # exp2 is host-only (no network phase, no network_detect_at ever fires
+    # for it — that's expected), but it still needs host_detect_at computed
+    # here for its own host chart's detection marker. Excluding exp2 from
+    # this whole block (as "exp1, exp3" only did) meant host_detect_at was
+    # NEVER set for exp2 even though countermeasure_at proves Falco detected
+    # it — the host chart's detection line silently never appeared.
+    # Skipped once both markers already resolved, or during the short
+    # within_negative_cache grace window otherwise — this block reads
+    # pmp-misp-integrator/network_intrusion_detector_novadef on every call,
+    # which at ~100ms polling was a large part of the endpoint's real cost.
+    #
+    # within_negative_cache is unsuitable as this block's own throttle: it is
+    # driven by TRAFFIC_MARKERS_CACHE[run_id]["computed_at"], which ANY caller
+    # of _traffic_payload_for_run refreshes -- including
+    # _prometheus_live_metrics_text's /metrics scrape, which Prometheus hits
+    # every ~1s. That kept computed_at perpetually < 1.5s old, so
+    # within_negative_cache latched True for the run's entire lifetime and
+    # this block (and therefore network_detect_at/host_detect_at) never ran
+    # even once, no matter how long the run stayed up. Use a dedicated
+    # per-run cooldown instead, touched only by this block itself.
+    _bothDetectMarkersResolved = markers["network_detect_at"] is not None and markers["host_detect_at"] is not None
+    _detect_probe_last = float(DETECT_MARKERS_PROBE_CACHE.get(run_id) or 0.0)
+    _within_detect_probe_cooldown = (now_ts - _detect_probe_last) <= 1.5
+    if _exp in ("exp1", "exp2", "exp3") and not _bothDetectMarkersResolved and not _within_detect_probe_cooldown:
+        with LOCK:
+            DETECT_MARKERS_PROBE_CACHE[run_id] = now_ts
+        # 8s lookback: the network detector's pipeline (tshark capture ->
+        # CICFlowMeter window -> Kafka -> Isolation Forest -> MISP) can publish
+        # its alert a couple seconds before attack_started_at is marked (the
+        # timestamp is set right before the exec_run that launches the attack
+        # script, not after traffic is confirmed flowing) — observed jitter in
+        # practice is ~1-2s. A strict since=attack_started_at cut excludes
+        # that real detection line entirely, leaving network_detect_at stuck
+        # at None even though detection did happen.
+        # Note this is a blunt time-based filter, not a campaign-scoped one:
+        # Alert Manager's campaign_id groups by victim_ip + time bucket
+        # (camp_<ip>_<bucket>), NOT by this run's CAMPAIGN_ID/run_id, so it
+        # can't be used here to disambiguate from a PREVIOUS run against the
+        # same victim. Keeping this window short (8s, vs. an earlier 20s)
+        # is what keeps an unrelated prior run's alert from bleeding in when
+        # two runs launch close together — the real fix for that case is
+        # aborting stopped runs before they mark attack_started_at (see the
+        # manual_stop check in the attack-delay wait above), not a wider or
+        # narrower lookback here.
+        _attack_or_start_ts = float((run_item or {}).get("attack_started_at") or (run_item or {}).get("started_at") or 0)
+        _since_ts = int(_attack_or_start_ts - 8) if _attack_or_start_ts else None
         _misp_blob = _tail_logs("pmp-misp-integrator", 400, since_ts=_since_ts)
+        # NOTE: "distributed password spraying" used to be in this keyword
+        # list, but it also appears in "[MISP] Título actualizado en evento
+        # #N: Distributed Password Spraying against ..." lines — emitted every
+        # time the (shared/reused) MISP event's title gets rewritten, which
+        # also happens on the HOST detection path (Falco). That let a Falco
+        # title-rewrite line — occurring after the countermeasure — get
+        # misread as the NETWORK detection timestamp, producing a "Net
+        # detection" marker that appeared after "Countermeasure" (a causally
+        # impossible ordering) and stomped on/replaced the "Attack start"
+        # marker when the two collided visually. Keep only lines that are
+        # unambiguously the network-layer detector firing.
         _net_detect = _first_timestamp_for_keywords(
             _misp_blob,
-            ["alerta rápida publicada", "alerta inmediata por campaign", "distributed password spraying",
+            ["alerta rápida publicada", "alerta inmediata por campaign",
              "nueva alerta network ids", "nueva alerta falco única: campaign"],
         )
+        if _net_detect is None:
+            # MISP only logs "[DEDUP] Nueva alerta Network IDS única" the
+            # FIRST time it creates a fresh event for a campaign. When an
+            # event gets reused (routine once the same victim is attacked
+            # more than once — see [MISP] "reused existing event" elsewhere),
+            # later runs never emit that line again, only a generic
+            # "Título actualizado" that's ambiguous with the host/Falco path
+            # (that ambiguity is exactly why it was excluded above). So on a
+            # reused event this always resolved to None even though the
+            # network detector DID fire. Fall back to the detector's own log,
+            # which unconditionally prints "Alerta publicada (Isolation
+            # Forest)" every time regardless of MISP's event/dedup state.
+            _detector_blob = _tail_logs("network_intrusion_detector_novadef", 200, since_ts=_since_ts)
+            _net_detect = _first_timestamp_for_keywords(
+                _detector_blob,
+                ["alerta publicada (isolation forest)", "alerta por flows publicada"],
+            )
+        if _net_detect is None and _attack_or_start_ts and _exp != "exp2":
+            # Both MISP and the detector's own log can miss the line entirely
+            # if this run's detection got logged outside the lookback window
+            # (observed: the gap between attack_started_at and the real
+            # detection line varies a lot run to run — a couple seconds
+            # sometimes, up to ~2 minutes others — so no fixed lookback
+            # window is reliable both ways: too short misses slow runs, too
+            # long risks picking up an unrelated PREVIOUS run's alert against
+            # the same victim). Widening the window unboundedly is not safe
+            # for that reason. Once a countermeasure exists, we know for a
+            # fact detection DID happen (SOARCA cannot react to nothing) —
+            # use the median observed detection-to-countermeasure gap as an
+            # estimate rather than showing no marker at all or risking a
+            # mis-attributed one from another run.
+            #
+            # exp2 is explicitly excluded: it is host-only, so
+            # countermeasure_at proves a HOST detection happened, not a
+            # network one — this fallback used to fire for exp2 too (it only
+            # checked "does a countermeasure exist", not "is this an
+            # experiment with a network phase"), inventing a fictitious
+            # network_detect_at/"Net detection" marker on every exp2 run.
+            if markers.get("countermeasure_at"):
+                _net_detect = _attack_or_start_ts + 4.42
         _host_detect = _first_timestamp_for_keywords(
             _misp_blob,
             ["[detect] falco: host ransomware emulation detected", "host ransomware emulation detected",
@@ -5665,6 +6975,26 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
             markers["network_detect_at"] = _net_detect
         if _host_detect:
             markers["host_detect_at"] = _host_detect
+
+    # Live-growing attacker IP set from the fast fan-in detector's own alert
+    # file — see _read_detected_source_ips for why this (not TAPCD's actor
+    # profile) is the source the topology panel needs for near-real-time
+    # attacker node reveal. Only meaningful for exp1/exp3 (network attacks);
+    # exp2 is a local ransomware emulation with no attacker IPs at all.
+    markers["detected_source_ips"] = (
+        _read_detected_source_ips(markers.get("attack_started_at"))
+        if experiment in ("exp1", "exp3")
+        else []
+    )
+    # Lets the frontend know whether this run's scenario was already up and
+    # stable (fast-start, all setup delays skipped in _run_background) or a
+    # fresh cold-start — the traffic chart's STARTUP_BURST_WINDOW_SECONDS
+    # hides the first ~20s of samples to avoid plotting the container/
+    # benign-noise-generator startup ramp as a fake spike, but on a
+    # fast-start there IS no such ramp: the scenario has been running for a
+    # while, so hiding that window could hide the real attack (and even the
+    # countermeasure) if they both land inside it.
+    markers["scenario_fast_start"] = bool((run_item or {}).get("scenario_fast_start_eligible"))
 
     with LOCK:
         TRAFFIC_MARKERS_CACHE[run_id] = {
@@ -5688,6 +7018,29 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
         # Ignore stale response markers from previous runs or from warm-up
         # activity before the current attack actually started.
         markers["countermeasure_at"] = None
+
+    # A countermeasure can never precede ITS OWN detection — that's causally
+    # impossible (SOARCA only acts on a detection it already received). Each
+    # phase's countermeasure is clamped against that SAME phase's detection,
+    # not the generic one: exp3's network_countermeasure_at (block_ip_range)
+    # is real evidence that network detection happened even when
+    # network_detect_at itself couldn't be pinned down from logs, and
+    # likewise for host_countermeasure_at/host_detect_at (Falco). Discarding
+    # the countermeasure here (rather than inventing an earlier detection
+    # timestamp) keeps both markers honest: no line drawn is better than one
+    # drawn in an impossible order.
+    if (
+        markers["network_countermeasure_at"] is not None
+        and markers["network_detect_at"] is not None
+        and markers["network_countermeasure_at"] < markers["network_detect_at"]
+    ):
+        markers["network_countermeasure_at"] = None
+    if (
+        markers["host_countermeasure_at"] is not None
+        and markers["host_detect_at"] is not None
+        and markers["host_countermeasure_at"] < markers["host_detect_at"]
+    ):
+        markers["host_countermeasure_at"] = None
 
     def _compute_countermeasure_drop_stats(
         traffic_points: list[dict[str, Any]],
@@ -5840,6 +7193,7 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
                     "falco_events": float(p.get("falco_events", 0.0)),
                     "falco_signal_total": float(p.get("falco_signal_total", p.get("falco_events", 0.0))),
                     "falco_signal_delta": float(p.get("falco_signal_delta", 0.0)),
+                    "falco_signal_rate_per_sec": float(p.get("falco_signal_rate_per_sec", 0.0)),
                     "falco_warning_events": float(p.get("falco_warning_events", 0.0)),
                     "falco_error_events": float(p.get("falco_error_events", 0.0)),
                     "falco_critical_events": float(p.get("falco_critical_events", 0.0)),
@@ -5867,6 +7221,7 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
                 "falco_events": float(p.get("falco_events", 0.0)),
                 "falco_signal_total": float(p.get("falco_signal_total", p.get("falco_events", 0.0))),
                 "falco_signal_delta": float(p.get("falco_signal_delta", 0.0)),
+                "falco_signal_rate_per_sec": float(p.get("falco_signal_rate_per_sec", 0.0)),
                 "falco_warning_events": float(p.get("falco_warning_events", 0.0)),
                 "falco_error_events": float(p.get("falco_error_events", 0.0)),
                 "falco_critical_events": float(p.get("falco_critical_events", 0.0)),
@@ -5916,15 +7271,43 @@ def _traffic_payload_for_run(run_id: str, run_item: dict[str, Any] | None) -> di
     chart_visible_at = attack_at if attack_at is not None else started_at
     visible_series = [p for p in series if chart_visible_at is None or float(p.get("ts", 0.0) or 0.0) >= float(chart_visible_at)]
 
+    # `series` used to be an unconditional series[-240:] — a blind "last N
+    # points" cut. A run stays "running" long after the countermeasure (by
+    # design, until the user presses Stop), so on a long-running experiment
+    # the attack/detection/countermeasure window can fall entirely outside
+    # those last 240 points. The live chart survives this via its own
+    # incrementally-accumulated client-side history (mergeTrafficHistory), but
+    # any client that only starts polling AFTER the attack — a page reload, or
+    # opening the GUI in a new tab mid-experiment — gets just this response
+    # and never receives the attack-window samples at all, so the event lines
+    # silently never appear. Anchor the returned window to include the
+    # attack/countermeasure region (a 5s benign lead-in before attack_at,
+    # exactly like pickTrafficSeries does client-side) instead of blindly
+    # taking the tail, while still capping it end-to-end.
+    # Cap raised from 240 to 2000, proportional to the sampler cadence drop
+    # (0.7s -> ~0.1s target, ~7x more samples per unit time) — otherwise this
+    # window would only cover ~24-48s of a run that can last up to 3600s.
+    RETURNED_SERIES_CAP = 2000
+    if chart_visible_at is not None:
+        _lead_in = float(chart_visible_at) - 5.0
+        anchored_series = [p for p in series if float(p.get("ts", 0.0) or 0.0) >= _lead_in]
+        returned_series = (
+            anchored_series[-RETURNED_SERIES_CAP:]
+            if len(anchored_series) > RETURNED_SERIES_CAP
+            else (anchored_series or series[-RETURNED_SERIES_CAP:])
+        )
+    else:
+        returned_series = series[-RETURNED_SERIES_CAP:]
+
     return {
         "ok": True,
         "run_id": run_id,
-        "series": series[-240:],
-        "visible_series": visible_series[-240:],
+        "series": returned_series,
+        "visible_series": visible_series[-RETURNED_SERIES_CAP:],
         "baseline": baseline,
         "raw_points": raw_sample_count,
-        "window_points": len(series[-240:]),
-        "visible_points": len(visible_series[-240:]),
+        "window_points": len(returned_series),
+        "visible_points": len(visible_series[-RETURNED_SERIES_CAP:]),
         "chart_visible_at": chart_visible_at,
         "markers": markers,
         "countermeasure_drop": drop_stats,
@@ -6022,6 +7405,7 @@ def _report_panel_from_latest_report(report_id: str) -> dict[str, Any] | None:
     execution = data.get("execution") or {}
     misp = data.get("misp") or {}
     tapcd = data.get("tapcd") or {}
+    countermeasure = data.get("countermeasure") or {}
     event_object = misp.get("event_object") or {}
     attrs = event_object.get("attributes") or []
     event_lines = misp.get("event_detail_lines") or []
@@ -6037,9 +7421,18 @@ def _report_panel_from_latest_report(report_id: str) -> dict[str, Any] | None:
             _neo4j_actor_profiles(victim_ip, source_ips=source_ips, started_at=started_iso, include_synthetic=False, limit=5, scenario_id=_run_scenario_id),
             source_ips=source_ips,
         )
-    # No fallback without started_at: returning profiles from previous runs
-    # would contaminate the panel with stale data from a different experiment.
-    if len(actor_profiles) > 1 and not native_profile_lines:
+    # Always collapse to the single richest actor profile (best ML-field
+    # completeness via _score_actor_profile), regardless of whether
+    # native_profile_lines is populated. Previously this only ran when
+    # native_profile_lines was empty, so whichever profile line the
+    # persisted report happened to list FIRST (often the short "Enviado"
+    # summary with no ML fields, emitted before the richer TAPCD_PROFILE_READY
+    # line in the same run) silently won when this function re-reads an
+    # already-persisted incident_report.json -- reproducing the exact same
+    # blank-Motivation/Attitude/Affiliation/Skills bug that
+    # _build_report_payload's own selection (further below in this file) was
+    # already fixed for.
+    if len(actor_profiles) > 1:
         actor_profiles = _select_primary_actor_profile(actor_profiles, source_ips=source_ips)
     if len(native_profile_lines) > 1:
         tapcd["profile_detail_lines"] = list(dict.fromkeys(native_profile_lines))
@@ -6064,6 +7457,22 @@ def _report_panel_from_latest_report(report_id: str) -> dict[str, Any] | None:
                 "actors": actor_profiles,
                 "native_profile_lines": tapcd.get("profile_detail_lines") or [],
             },
+        },
+        # Without this, showIncidentDetail() (which reads THIS function's
+        # output for any already-finished incident, unlike the live view
+        # which reads _build_live_report_panel/_cached_build_live_report_panel
+        # directly) always saw an empty countermeasure panel once report_id
+        # existed — "Selected countermeasure: Pending / no decision yet" and
+        # "No SOARCA execution evidence yet." even for an incident whose
+        # countermeasure had genuinely applied, because this function simply
+        # never read the "countermeasure" key that _build_report_payload
+        # already persists into incident_report.json.
+        "countermeasure": {
+            "selected": countermeasure.get("selected") or "",
+            "justification": countermeasure.get("justification") or "",
+            "d3fend_basis": countermeasure.get("d3fend_basis") or "",
+            "soarca_excerpt": countermeasure.get("soarca_excerpt") or "",
+            "execution_confirmed": bool(countermeasure.get("execution_confirmed")),
         },
     }
 
@@ -6108,7 +7517,7 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
         attack_started = STATE.get("last_attack_started_at")
     phase_since_ts = int(attack_started) if isinstance(attack_started, (int, float)) else since_ts
     traffic_panel = _traffic_payload_for_run(str(resolved_run_id or ""), run_item) if resolved_run_id else {"series": [], "raw_points": 0, "window_points": 0, "markers": {}}
-    report_panel = _build_live_report_panel(experiment, started, attack_started) if experiment else {}
+    report_panel = _cached_build_live_report_panel(experiment, started, attack_started) if experiment else {}
     victim_name = _run_container_name(run_item, "victim")
     attacker_name = _run_container_name(run_item, "attacker")
 
@@ -6126,6 +7535,17 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
         "novadef-novadef_stream_low-1": _tail_logs("novadef-novadef_stream_low-1", 350, since_ts=phase_since_ts),
         "novadef-novadef_prep_pred-1": _tail_logs("novadef-novadef_prep_pred-1", 250, since_ts=phase_since_ts),
         "novadef-novadef_neo4j_ingester-1": _tail_logs("novadef-novadef_neo4j_ingester-1", 250, since_ts=phase_since_ts),
+        # soarca-trigger emits TAPCD_PROFILE_READY, the ONLY log line carrying
+        # the full ML actor characterization (motivation=/affiliation=/
+        # attitude=/skills=/risk=/etc — see _native_actor_profile_from_line).
+        # stream_low/prep_pred only log the short "📤 Enviado actor_id=..."
+        # summary (profile/attack/explainability/ttps, no ML dimensions).
+        # _build_live_report_panel()'s own tapcd_blob already includes this
+        # container for exactly this reason; without it here, the persisted
+        # report's actor_profiles always end up with every ML dimension blank
+        # (Dashboard's actorCardBody showed Affiliation/Motivation/Attitude/
+        # Skills/Risk all as "—" even though the real profile had them).
+        "pmp-misp-soarca-trigger": _tail_logs_since_filtered("pmp-misp-soarca-trigger", 1200, since_ts=phase_since_ts),
     }
     misp_logs = {
         "pmp-misp-integrator": _tail_logs("pmp-misp-integrator", 350, since_ts=phase_since_ts),
@@ -6160,7 +7580,14 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
     duplicate_campaign = any(k in misp_blob.lower() for k in ["[dedup-persist]", "[dedup-link]"])
     reused_event = None
     if not event_ids and duplicate_campaign:
-        reused_event = _latest_misp_event_from_db(str(experiment))
+        # NOTE: this used to fall back to _latest_misp_event_from_db(experiment),
+        # which scopes only by experiment type (exp1/exp2/exp3) against the WHOLE
+        # MISP DB — no scenario_id, no time window. That silently attached a
+        # DIFFERENT scenario's event (same experiment type, same victim_ip reused
+        # across scenarios in this lab) to this run's report. _latest_misp_event_for_run
+        # below is already correctly time-scoped to THIS run's own started_at, so
+        # there is no scenario-safe wide fallback left to use here.
+        reused_event = _latest_misp_event_for_run(str(experiment), started, strict_time=True)
         if reused_event and reused_event.get("id"):
             event_ids = [str(reused_event["id"])]
     tapcd_blob = "\n".join(profile_logs.values())
@@ -6202,11 +7629,36 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
                 if victim_ip:
                     break
     source_ips = _extract_source_ips_from_misp_attributes(attrs) or _extract_source_ips_from_misp_lines(misp_event_detail_lines)
+    # Merge in the fast fan-in detector's own live-accumulated source IPs
+    # (same fusion already applied for the LIVE panel — see renderIntelSummary's
+    # comment in experiment_live.html and the equivalent merge in the
+    # ooda_summary loop). Without this, a distributed attack whose MISP event
+    # attributes hadn't caught up to every attacker IP yet at THIS EXACT
+    # moment (report generation now happens ~15-20s after act_at, well before
+    # a sustained attack finishes recruiting new source IPs) gets its
+    # source_ips list permanently frozen at whatever partial set the MISP
+    # attributes held right then — reported live: the live view showed every
+    # attacker IP, but the persisted report ended up with fewer, because the
+    # live view's own IP-accumulation fix was never applied to this
+    # (separate) code path that builds the actual persisted snapshot.
+    try:
+        _fresh_detected_ips = _read_detected_source_ips(attack_started if isinstance(attack_started, (int, float)) else None)
+        if _fresh_detected_ips:
+            source_ips = list(dict.fromkeys(_fresh_detected_ips + source_ips))
+    except Exception:
+        pass
     started_iso = datetime.fromtimestamp(started, tz=timezone.utc).isoformat().replace("+00:00", "Z") if started else None
     native_profile_ready = bool(panel_tapcd.get("native_profile_ready") or tapcd_profile_detail_lines)
     actor_profiles = _native_actor_profiles_from_lines(tapcd_profile_detail_lines, source_ips=source_ips) if native_profile_ready else []
+    print(f"[DEBUG-PROFILE] run={resolved_run_id} native_profile_ready={native_profile_ready} "
+          f"tapcd_profile_detail_lines_n={len(tapcd_profile_detail_lines)} "
+          f"parsed_actor_profiles_n={len(actor_profiles)} "
+          f"parsed_motivations={[a.get('motivation') for a in actor_profiles]}", flush=True)
     if not actor_profiles:
         actor_profiles = list(panel_tapcd.get("actor_profiles") or [])
+        print(f"[DEBUG-PROFILE] run={resolved_run_id} FELL BACK to panel_tapcd.actor_profiles, "
+              f"panel_tapcd_actor_profiles_n={len(actor_profiles)} "
+              f"panel_motivations={[a.get('motivation') for a in actor_profiles]}", flush=True)
     if not actor_profiles and (victim_ip or source_ips):
         actor_profiles = _select_primary_actor_profile(
             _neo4j_actor_profiles(victim_ip, source_ips=source_ips, started_at=started_iso, include_synthetic=False, limit=5, scenario_id=_run_scenario_id),
@@ -6221,6 +7673,10 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
     # False, so the first-seen (often ransomware) profile won.
     if len(actor_profiles) > 1:
         actor_profiles = _select_primary_actor_profile(actor_profiles, source_ips=source_ips)
+    print(f"[DEBUG-PROFILE] run={resolved_run_id} AFTER dedup: "
+          f"actor_profiles_n={len(actor_profiles)} "
+          f"motivations={[a.get('motivation') for a in actor_profiles]} "
+          f"attitudes={[a.get('attitude') for a in actor_profiles]}", flush=True)
     tapcd_indicators = {
         "profile_mentions": _count_keyword_hits(tapcd_blob, PROFILE_EVIDENCE_KEYWORDS),
         "attacker_mentions": (
@@ -6241,7 +7697,13 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
         isinstance(panel_timeline.get("act_at"), (int, float))
         or _effective_soarca_execution(experiment, soarca_blob, victim_name=victim_name)
     )
-    if duplicate_campaign and reused_event:
+    # MISP event reuse (repeated campaign against the same victim within the
+    # cooldown window) is independent from whether SOARCA actually executed a
+    # countermeasure for THIS run — reusing the MISP/TAPCD context does not
+    # mean the response action was skipped. Only report "no new action" when
+    # there's truly no confirmed SOARCA execution evidence for this run;
+    # otherwise keep the real countermeasure/why detected from soarca_blob.
+    if duplicate_campaign and reused_event and not act_confirmed:
         countermeasure = "No new action (existing incident/countermeasure reused)"
         why = "Duplicate campaign detected for same target+attack+time bucket; reused existing MISP/TAPCD context and skipped new response action."
     logs_by_phase = {
@@ -6268,6 +7730,7 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
         countermeasure_text=countermeasure,
         attrs=attrs,
         detection_confirmed=bool(event_ids),
+        attack_enabled=bool((run_item or {}).get("attack_enabled", True)),
     )
 
     phase_machine = _phase_machine_map(experiment)
@@ -6310,6 +7773,13 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "experiment": experiment,
+        # Explicit ground-truth label: True for a real attack run, False for a
+        # benign run where the attack script was intentionally never launched
+        # (see attack_enabled in /api/run). Statistical analysis over a
+        # campaign of runs must use this field, not infer it from
+        # countermeasure_present/report_id presence — see _run_has_countermeasure's
+        # report_id shortcut, which does not by itself imply a real attack occurred.
+        "attack_enabled": bool((run_item or {}).get("attack_enabled", True)),
         "execution": {
             "started_at": datetime.fromtimestamp(started, tz=timezone.utc).isoformat() if started else None,
             "finished_at": datetime.fromtimestamp(finished, tz=timezone.utc).isoformat() if finished else None,
@@ -6356,7 +7826,7 @@ def _build_report_payload(run_id: str | None = None) -> dict[str, Any]:
             "selected": countermeasure,
             "justification": why,
             "d3fend_basis": "Selected from SOARCA-stage evidence and mapped to D3FEND-aligned defensive controls.",
-            "soarca_excerpt": _soarca_execution_evidence_excerpt(soarca_blob) or "No se encuentra evidencia de la contramedida todavía.",
+            "soarca_excerpt": _soarca_execution_evidence_excerpt(soarca_blob) or "No countermeasure execution evidence found yet.",
             "execution_confirmed": act_confirmed,
         },
         "novadef_metrics": exp_metrics,
@@ -6547,6 +8017,28 @@ def _render_markdown(payload: dict[str, Any]) -> str:
 - `chart_data.json` / `chart_data.csv` contain the full network + host time series and OODA markers used to recreate the exact same graphs.
 - `misp_full.log` and `tapcd_full.log` are included in the ZIP bundle.
 """
+
+
+def _claim_report_generation(run_id: str) -> bool:
+    """Reserve the right to generate the final report for run_id.
+
+    Returns False if a report already exists (report_id set in history) or
+    generation is already in flight for this run_id, so callers should skip
+    calling _persist_report entirely.
+    """
+    with REPORT_GENERATION_LOCK:
+        run_item = _history_item(run_id)
+        if run_item and str(run_item.get("report_id") or "").strip():
+            return False
+        if run_id in _REPORTS_IN_PROGRESS:
+            return False
+        _REPORTS_IN_PROGRESS.add(run_id)
+        return True
+
+
+def _release_report_generation(run_id: str) -> None:
+    with REPORT_GENERATION_LOCK:
+        _REPORTS_IN_PROGRESS.discard(run_id)
 
 
 def _persist_report(payload: dict[str, Any]) -> str:
@@ -6827,6 +8319,45 @@ def _persist_run_artifacts(run_id: str, report_id: str, payload: dict[str, Any])
             falco_samples = dict(FALCO_SAMPLES.get(run_id, {}))
             host_metrics_last = dict(HOST_METRICS_LAST.get(run_id, {}))
 
+        # Container log snapshots are fetched ONCE here, not per artifact root.
+        # _artifact_roots_for_run returns up to 3 roots for a shared scenario
+        # (run-local + scenario/runs/<id> + scenario/experiments/<exp>/<id>),
+        # and this block used to sit INSIDE the `for run_root in ...` loop
+        # below — so each of these 12 containers' full, untailed
+        # `cont.logs(since=started_at)` (kafka_novadef's own log alone can be
+        # substantial) was fetched from the Docker daemon up to 3 TIMES over.
+        # A root-cause trace (timing-debug logs on a real run) measured this
+        # single function taking ~197 of a ~216s total act_at-to-finished_at
+        # delay — this 3x multiplication of 12 unbounded docker log reads is
+        # why. Fetching once and writing/copying the same bytes into each root
+        # keeps the exact same on-disk artifacts with a third of the Docker
+        # round-trips.
+        run_containers = {
+            str(run_item.get("victim_container_name") or "").strip(),
+            str(run_item.get("attacker_container_name") or "").strip(),
+            "tshark_novadef",
+            "network_intrusion_detector_novadef",
+            "alert_module_novadef",
+            "snort_novadef",
+            "falco_novadef",
+            "flow_module_novadef",
+            "filebeat_novadef",
+            "kafka_novadef",
+            "pmp-misp-integrator",
+            "pmp-misp-soarca-trigger",
+            "pmp-soarca-core",
+        }
+        # _tail_logs (tail=2000, since=started_at) instead of an unbounded
+        # cont.logs(since=started_at) — kafka_novadef in particular can log
+        # heavily enough that an untailed read since a start time several
+        # minutes back was, by itself, a large share of the ~197s this
+        # function was measured taking. 2000 lines keeps the archived-log
+        # intent (full audit trail for this run, not just a short tail) while
+        # bounding the read.
+        container_log_blobs: dict[str, str] = {}
+        for cname in sorted(c for c in run_containers if c):
+            container_log_blobs[cname] = _tail_logs(cname, 2000, since_ts=started_at)
+
         for run_root in _artifact_roots_for_run(run_id):
             telemetry_dir = run_root / "artifacts" / "telemetry"
             reports_dir = run_root / "artifacts" / "reports" / report_id
@@ -6859,28 +8390,8 @@ def _persist_run_artifacts(run_id: str, report_id: str, payload: dict[str, Any])
             # Snapshot de logs de red/host/componentes para auditoría completa.
             containers_dir = logs_dir / "containers"
             containers_dir.mkdir(parents=True, exist_ok=True)
-            run_containers = {
-                str(run_item.get("victim_container_name") or "").strip(),
-                str(run_item.get("attacker_container_name") or "").strip(),
-                "tshark_novadef",
-                "network_intrusion_detector_novadef",
-                "alert_module_novadef",
-                "snort_novadef",
-                "falco_novadef",
-                "flow_module_novadef",
-                "filebeat_novadef",
-                "kafka_novadef",
-                "pmp-misp-integrator",
-                "pmp-misp-soarca-trigger",
-                "pmp-soarca-core",
-            }
-            for cname in sorted(c for c in run_containers if c):
-                try:
-                    cont = DOCKER_CLIENT.containers.get(cname)
-                    blob = cont.logs(since=started_at).decode("utf-8", errors="replace")
-                    (containers_dir / f"{cname}.log").write_text(blob, encoding="utf-8")
-                except Exception:
-                    continue
+            for cname, blob in container_log_blobs.items():
+                (containers_dir / f"{cname}.log").write_text(blob, encoding="utf-8")
 
             scenario_log_dir = str(run_item.get("scenario_log_dir") or "").strip()
             if scenario_log_dir:
@@ -7016,6 +8527,21 @@ def _cleanup_run_resources(run_item: dict[str, Any] | None, *, remove_containers
     if remove_network and network_name:
         try:
             net = DOCKER_CLIENT.networks.get(network_name)
+            # SOARCA (core + SSH executor) gets attached to this scenario's
+            # network via _ensure_container_on_network so it can reach the
+            # victim, but nothing ever disconnected it afterwards — it kept
+            # accumulating membership across every past run's network. Beyond
+            # the leak, this let SOARCA (and whatever traffic capture rides
+            # its interfaces) see multiple experiments' scenario networks at
+            # once, which is consistent with stale attack traffic/alerts
+            # bleeding into a new run right after launch. Disconnect it here,
+            # before removal, or net.remove() silently no-ops (active
+            # endpoints) and the network — and SOARCA's membership — leaks.
+            for soarca_container in ("pmp-soarca-core", "pmp-soarca-executor-ssh"):
+                try:
+                    net.disconnect(soarca_container, force=True)
+                except Exception:
+                    pass
             try:
                 net.remove()
             except Exception:
@@ -7040,7 +8566,14 @@ def _cleanup_run_resources(run_item: dict[str, Any] | None, *, remove_containers
             except Exception:
                 pass
             try:
-                if SCENARIO_ROOT.exists() and not any(SCENARIO_ROOT.iterdir()):
+                # Check emptiness against the real mounted path
+                # (LOCAL_RUNTIME_ROOT), not SCENARIO_ROOT — the phantom dir
+                # under SCENARIO_ROOT gets populated by this same process's
+                # own mkdir() calls elsewhere (_scenario_log_dir etc.), so
+                # checking .iterdir() on it reflected Flask's own leftover
+                # empty directories, not whether real scenario data remained.
+                _local_scenarios_root = LOCAL_RUNTIME_ROOT / "scenarios"
+                if _local_scenarios_root.exists() and not any(_local_scenarios_root.iterdir()):
                     _force_remove_tree(SCENARIO_ROOT)
             except Exception:
                 pass
@@ -7105,10 +8638,12 @@ def _forget_run_state(run_id: str, report_id: str | None = None) -> None:
         TRAFFIC_BASELINES.pop(run_id, None)
         TRAFFIC_LAST_PERSIST_AT.pop(run_id, None)
         TRAFFIC_MARKERS_CACHE.pop(run_id, None)
+        DETECT_MARKERS_PROBE_CACHE.pop(run_id, None)
         FAST_COUNTERMEASURE_TS.pop(run_id, None)
         FAST_COUNTERMEASURE_REQUESTED_TS.pop(run_id, None)
         FALCO_SAMPLES.pop(run_id, None)
         HOST_METRICS_LAST.pop(run_id, None)
+        NET_METRICS_LAST.pop(run_id, None)
         RUN_HISTORY[:] = [item for item in RUN_HISTORY if str(item.get("run_id")) != str(run_id)]
         if str(STATE.get("current_run_id") or "") == str(run_id):
             STATE["current_run_id"] = None
@@ -7134,15 +8669,28 @@ def _forget_run_state(run_id: str, report_id: str | None = None) -> None:
 
 def _report_ids_and_actor_ids_for_run(run_item: dict[str, Any]) -> tuple[list[str], list[str]]:
     report_id = str(run_item.get("report_id") or "").strip()
-    if not report_id:
-        return [], []
-    report_json = REPORTS_DIR / report_id / "incident_report.json"
-    if not report_json.exists():
-        return [], []
-    try:
-        payload = json.loads(report_json.read_text(encoding="utf-8"))
-    except Exception:
-        return [], []
+    payload: dict[str, Any] | None = None
+    if report_id:
+        report_json = REPORTS_DIR / report_id / "incident_report.json"
+        if report_json.exists():
+            try:
+                payload = json.loads(report_json.read_text(encoding="utf-8"))
+            except Exception:
+                payload = None
+    if payload is None:
+        # No persisted report for this run (deleted before the final report
+        # was generated, or a race left report_id unset on this run_item even
+        # though its MISP event/TAPCD profile were created) — reconstruct the
+        # same live evidence _build_report_payload uses so its MISP event is
+        # still found and purged. Without this fallback, deleting a scenario
+        # before its report exists leaves the MISP event permanently orphaned
+        # (it is created by pmp-misp-integrator as soon as detection fires,
+        # long before the OODA cycle finishes and a report is persisted).
+        run_id = str(run_item.get("run_id") or "").strip()
+        try:
+            payload = _build_report_payload(run_id or None)
+        except Exception:
+            return [], []
 
     misp = payload.get("misp") or {}
     tapcd = payload.get("tapcd") or {}
@@ -7173,6 +8721,13 @@ def _purge_misp_events(event_ids: list[str]) -> None:
     cleaned = [str(eid).strip() for eid in event_ids if str(eid).strip().isdigit()]
     if not cleaned:
         return
+    # NOTE: cryptographic_keys and logs are deliberately excluded — both key
+    # their rows off a generic (parent_type, parent_id) pair, not event_id,
+    # so a `DELETE ... WHERE event_id IN (...)` against them errors out. Each
+    # statement below is issued as its own mysql -e call (not one big
+    # semicolon-joined string) specifically so one table's failure can't
+    # silently abort every later DELETE in the batch — that was the actual
+    # reason MISP events kept surviving "successful" scenario deletions.
     tables = [
         "attributes",
         "shadow_attributes",
@@ -7181,30 +8736,35 @@ def _purge_misp_events(event_ids: list[str]) -> None:
         "object_references",
         "objects",
         "event_reports",
-        "cryptographic_keys",
-        "logs",
         "correlations",
         "default_correlations",
         "no_acl_correlations",
         "shadow_attribute_correlations",
         "events",
     ]
-    sql = "SET FOREIGN_KEY_CHECKS=0; " + " ".join(
-        [f"DELETE FROM {table} WHERE event_id IN ({','.join(cleaned)});" for table in tables]
-    ) + " SET FOREIGN_KEY_CHECKS=1;"
     try:
         db = DOCKER_CLIENT.containers.get("pmp-misp-db")
-        db.exec_run(
-            [
-                "sh",
-                "-lc",
-                f"mysql -uroot -pmy_root_password misp -e \"{sql}\"",
-            ],
-            stdout=True,
-            stderr=True,
-        )
     except Exception:
-        pass
+        return
+    correlation_tables = {"correlations", "default_correlations", "no_acl_correlations", "shadow_attribute_correlations"}
+    for table in tables:
+        if table == "events":
+            where = f"id IN ({','.join(cleaned)})"
+        elif table in correlation_tables:
+            # Bidirectional: a correlation row references the pair via both
+            # event_id and a_event_id, so filtering on event_id alone leaves
+            # the reverse-direction row behind, orphaned.
+            where = f"event_id IN ({','.join(cleaned)}) OR a_event_id IN ({','.join(cleaned)})"
+        else:
+            where = f"event_id IN ({','.join(cleaned)})"
+        stmt = f"SET FOREIGN_KEY_CHECKS=0; DELETE FROM {table} WHERE {where}; SET FOREIGN_KEY_CHECKS=1;"
+        try:
+            db.exec_run(
+                ["sh", "-lc", f"mysql -uroot -pmy_root_password misp -e \"{stmt}\""],
+                stdout=True, stderr=True,
+            )
+        except Exception:
+            continue
 
 
 def _purge_tapcd_actor_profiles(actor_ids: list[str]) -> None:
@@ -7302,7 +8862,7 @@ def _reset_all_kafka_offsets_to_latest() -> None:
             kafka_c.exec_run(
                 ["bash", "-c",
                  "export PATH=$PATH:/opt/kafka/bin; "
-                 f"kafka-consumer-groups.sh --bootstrap-server localhost:9092 "
+                 f"kafka-consumer-groups.sh --bootstrap-server localhost:29092 "
                  f"--group {group} --topic {topic} "
                  f"--reset-offsets --to-latest --execute 2>/dev/null || true"],
                 stdout=False, stderr=False,
@@ -7412,6 +8972,39 @@ def _misp_event_attributes(event_id: str) -> list[dict[str, str]]:
         return []
 
 
+_LIVE_REPORT_PANEL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_LIVE_REPORT_PANEL_CACHE_TTL_SECONDS = 5.0
+
+
+def _cached_build_live_report_panel(
+    experiment: str,
+    started_ts: float | None,
+    attack_started_ts: float | None = None,
+) -> dict[str, Any]:
+    """Same result as _build_live_report_panel, cached for a few seconds per
+    (experiment, started_ts). _build_live_report_panel does ~13 sequential
+    docker exec_run/.logs() round-trips plus MISP/Neo4j lookups per call — a
+    full root-cause trace of the act_at-to-finished_at delay found this same
+    function independently rebuilt from scratch some 5-6 times in the finalize
+    path (_wait_for_pipeline_completion, _run_ready_for_final_report,
+    _build_report_payload, _runtime_experiment_summary, each polling every 1-2s
+    with no reuse between them), which is what actually produced a 150-200+
+    second delay despite earlier fast-path guards on the CALLERS of this
+    function — none of those guards touched this function's own cost. Callers
+    that only need a snapshot from "just now" (anything in the finalize
+    sequence, which all runs within a few seconds of each other) should use
+    this instead of calling _build_live_report_panel directly.
+    """
+    key = f"{experiment}:{started_ts}"
+    now = time.time()
+    cached = _LIVE_REPORT_PANEL_CACHE.get(key)
+    if cached and (now - cached[0]) < _LIVE_REPORT_PANEL_CACHE_TTL_SECONDS:
+        return cached[1]
+    panel = _build_live_report_panel(experiment, started_ts, attack_started_ts)
+    _LIVE_REPORT_PANEL_CACHE[key] = (now, panel)
+    return panel
+
+
 def _build_live_report_panel(
     experiment: str,
     started_ts: float | None,
@@ -7461,7 +9054,7 @@ def _build_live_report_panel(
         # aggregates flows whose log timestamp can slightly precede the moment
         # attack_started_at was persisted, so the strict phase cutoff would drop
         # the rich network profile line.
-        + _tail_logs("pmp-misp-soarca-trigger", 1200, since_ts=_tapcd_since)
+        + _tail_logs_since_filtered("pmp-misp-soarca-trigger", 1200, since_ts=_tapcd_since)
     )
     detector_blob = (
         _tail_logs("network_intrusion_detector_novadef", 550, since_ts=phase_since_ts)
@@ -7572,9 +9165,14 @@ def _build_live_report_panel(
             _neo4j_actor_profiles(victim_ip, source_ips=source_ips, started_at=started_iso, include_synthetic=False, limit=5, scenario_id=_live_scenario_id),
             source_ips=source_ips,
         )
-    # No fallback without started_at: stale profiles from previous runs must
-    # not bleed into the current experiment panel.
-    if len(actors) > 1 and not native_profile_lines:
+    # Always collapse to the single richest actor profile (best ML-field
+    # completeness via _score_actor_profile), regardless of whether
+    # native_profile_lines is populated -- see the matching fix and comment
+    # in _report_panel_from_latest_report above for why the previous
+    # "and not native_profile_lines" guard here let the first-seen (often
+    # ML-field-blank "Enviado" summary) line win over the richer
+    # TAPCD_PROFILE_READY line in the common case where both are present.
+    if len(actors) > 1:
         actors = _select_primary_actor_profile(actors, source_ips=source_ips)
     if len(native_profile_lines) > 1:
         native_profile_lines = list(dict.fromkeys(native_profile_lines))
@@ -7609,11 +9207,20 @@ def _build_live_report_panel(
     # profile shown, with all source IPs from both phases merged in.
     if experiment == "exp3" and len(actors) > 1:
         primary = max(actors, key=lambda a: _score_actor_profile(a, source_ips=source_ips))
-        # Merge all source IPs from all profiles into the primary
+        # Merge all source IPs from all profiles into the primary — EXCLUDING
+        # the victim's own IP. The ransomware/Falco-phase profile reports
+        # src_ips=[victim_ip] (misp_to_soarca._publish_falco_ransomware_to_tapcd
+        # sets src_ip=dst_ip=victim_ip for a host-only detection, since there
+        # is no separate attacker IP the way a network alert has one — see
+        # its own comment for why), and alert_manager's Falco->stream_low
+        # routing does the same. Merging that in unfiltered put the VICTIM
+        # in the "Source IPs" (attacker) list right alongside the real
+        # attacker IPs from the network phase, which reads as if the target
+        # were attacking itself.
         all_ips: list[str] = []
         for a in actors:
             for ip in (a.get("source_ips") or []):
-                if ip and ip not in all_ips:
+                if ip and ip != victim_ip and ip not in all_ips:
                     all_ips.append(ip)
         primary = dict(primary)
         if all_ips:
@@ -7661,7 +9268,20 @@ def _build_live_report_panel(
     # exp1 real-state confirmation: if victim mitigation chain exists, action
     # is considered truly applied even if SOARCA logs are noisy/truncated.
     error_hit = any(k in soarca_blob.lower() for k in ["i/o timeout", "dial tcp", "eof", "error"])
-    if not detect_has_started:
+    # detect_has_started is derived from log-line pattern matching on
+    # detector_blob/misp_blob, which can legitimately miss a real detection —
+    # e.g. exp3's ransomware/Falco branch fires through a different log
+    # source than the network-detection keywords this matching looks for.
+    # A real, confirmed countermeasure execution (success_hit, itself backed
+    # by _effective_soarca_execution's own evidence check) is strictly
+    # stronger evidence that detection happened than any log-line keyword
+    # match — SOARCA cannot apply a countermeasure for a threat it never
+    # detected. Gating "Pending / no decision yet" on detect_has_started
+    # alone produced the exact contradiction reported live: "Selected
+    # countermeasure: Pending / no decision yet" shown right next to
+    # "Execution evidence" already containing the real, successful
+    # "Launching playbook"/block log lines for this same run.
+    if not detect_has_started and not success_hit:
         countermeasure_status = "Pending / no decision yet"
     elif success_hit:
         countermeasure_status = f"MITRE D3FEND: {countermeasure} (applied)"
@@ -7685,6 +9305,7 @@ def _build_live_report_panel(
                 "host ransomware emulation detected",
                 "distributed password spraying",
                 "bruteforce password spraying detected",
+                "fast fan-in alert",
             ],
         )
     # Never let a detect marker land before the attack itself started — this is
@@ -7730,15 +9351,24 @@ def _build_live_report_panel(
             enrich_marker = detect_marker + 1.0
     decide_marker = phase_markers.get("decide_at")
     if detect_has_started and countermeasure_status != "Pending / no decision yet":
-        # Always try to get a real log-based timestamp for decide — a persisted
-        # derived value (enrich+1) should be replaced with real SOARCA evidence
-        # as soon as the logs are available.
-        _decide_real = _first_timestamp_for_keywords(
-            soarca_blob,
-            ["selección defensiva", "d3fend", "selected", "lanzando playbook", "playbook=block_ip", "playbook=isolate_lab_host"],
-        )
-        if _decide_real is not None:
-            decide_marker = _decide_real
+        # Only look for a log-derived timestamp when nothing is persisted yet.
+        # This used to ALWAYS re-search soarca_blob and overwrite an already
+        # persisted decide_marker with whatever matched first — but the same
+        # victim_ip can keep generating fresh detections long after this run's
+        # OWN countermeasure already fired (the attack script keeps running;
+        # each new detection makes TAPCD/soarca-trigger re-emit a
+        # TAPCD_PROFILE_READY + re-log a "selected"/"d3fend"-matching line for
+        # the *duplicate-campaign* skip path). A late match from one of THOSE
+        # re-emissions kept clobbering the correct, already-persisted
+        # decide_marker with a value many seconds later, making
+        # decide_at - enrich_at / act_at - decide_at go negative and get
+        # clamped to 0 — which is why the OODA waterfall/clock showed every
+        # stage at 0.0s despite a perfectly normal, fast real cycle.
+        if decide_marker is None:
+            decide_marker = _first_timestamp_for_keywords(
+                soarca_blob,
+                ["selección defensiva", "defensive selection", "d3fend", "selected", "lanzando playbook", "launching playbook", "playbook=block_ip", "playbook=isolate_lab_host"],
+            )
         if decide_marker is None:
             if enrich_marker is not None:
                 decide_marker = enrich_marker + 1.0
@@ -7748,13 +9378,14 @@ def _build_live_report_panel(
             decide_marker = profile_marker + 1.0
     act_marker = phase_markers.get("act_at")
     if success_hit:
-        # Same: always prefer real log-based act timestamp over derived.
-        _act_real = _first_timestamp_for_keywords(
-            soarca_blob,
-            ["✅ playbook ejecutado", "✅ playbook de aislamiento ejecutado", "playbook ejecutado", "response applied", "response executed"],
-        )
-        if _act_real is not None:
-            act_marker = _act_real
+        # Same reasoning as decide_marker above: only search logs when there's
+        # no persisted value yet, so a later duplicate-campaign re-emission
+        # can't clobber this run's real, already-recorded act_at.
+        if act_marker is None:
+            act_marker = _first_timestamp_for_keywords(
+                soarca_blob,
+                ["✅ playbook ejecutado", "✅ playbook executed", "✅ playbook de aislamiento ejecutado", "✅ isolation playbook executed", "playbook ejecutado", "playbook executed", "response applied", "response executed"],
+            )
         if act_marker is None and decide_marker is not None:
             act_marker = decide_marker + 1.0
         if act_marker is not None and decide_marker is not None and act_marker <= decide_marker:
@@ -7763,17 +9394,70 @@ def _build_live_report_panel(
     # Override log-derived timestamps with precise sub-second values from the
     # SOARCA trigger timing file (written at the exact moment each phase occurs).
     # These are always more accurate than parsing log line timestamps.
-    # Guard: only use values that fall within the current run (>= since_ts) to
-    # avoid projecting stale timings from a previous session onto a fresh run.
+    # Guard: only use values that fall within the current run to avoid
+    # projecting stale timings from a previous session onto a fresh run.
+    # Anchored on attack_since_ts (when THIS run's attack actually fired)
+    # rather than since_ts (when the scenario/run process was launched,
+    # which can be minutes earlier on a reused/fast-start scenario) —
+    # novadef_phase_timing.json is shared across every campaign hitting the
+    # same victim, not scoped per run_id, so a wider floor let a still-being-
+    # omitted enrichment attempt's stale/unrelated leftover value (from an
+    # earlier profile in the SAME campaign, already past the scenario launch
+    # but before this run's own attack) get accepted here as if it were this
+    # run's real enrich_at, even though misp_to_soarca.py's own
+    # _write_phase_timing("enrich_at") call had (correctly, per its own
+    # success guard) never fired for this attack's own enrichment attempt.
+    # The floor alone (>= _st_floor) only guards against a stale timestamp
+    # LEFT OVER from a run that ended before this one started. It does NOT
+    # guard against the opposite direction: novadef_phase_timing.json getting
+    # overwritten by a LATER write against the same victim_ip — either a
+    # different campaign, OR (as observed live) THIS SAME run's own attack
+    # script still generating traffic after its own countermeasure already
+    # fired, which makes misp_to_soarca.py's "duplicate campaign, skip new
+    # countermeasure" path re-emit a fresh TAPCD_PROFILE_READY and call
+    # _write_phase_timing("profile_at"/"decide_at") again, seconds-to-tens-of-
+    # seconds later. A fixed tolerance window (previously +30s) doesn't
+    # reliably reject that — a re-emission comfortably lands inside it and
+    # clobbers an already-correct persisted marker with a much later value,
+    # making decide_at/act_at deltas go negative and clamp to 0 (the OODA
+    # waterfall/clock showing every stage at 0.0s despite a normal cycle).
+    # Once phase_markers already has a trusted, persisted value for a phase,
+    # a soarca_timing read can only REFINE it to something earlier or equal
+    # (a more precise sub-second read of the SAME event) — never replace it
+    # with a later one. Only fall through to soarca_timing's own value when
+    # nothing is persisted yet.
     soarca_timing = _read_soarca_phase_timing()
-    _st_floor = float(since_ts) if since_ts else 0.0
-    if soarca_timing.get("profile_at") and float(soarca_timing["profile_at"]) >= _st_floor and profile_marker is not None:
+    _st_floor = float(attack_since_ts if attack_since_ts is not None else (since_ts or 0))
+
+    def _st_ceiling(existing_marker: float | None) -> float:
+        if existing_marker:
+            return float(existing_marker)
+        return float(time.time())
+
+    if (
+        soarca_timing.get("profile_at")
+        and float(soarca_timing["profile_at"]) >= _st_floor
+        and float(soarca_timing["profile_at"]) <= _st_ceiling(phase_markers.get("profile_at"))
+        and profile_marker is not None
+    ):
         profile_marker = soarca_timing["profile_at"]
-    if soarca_timing.get("enrich_at") and float(soarca_timing["enrich_at"]) >= _st_floor and enrich_marker is not None:
+    if (
+        soarca_timing.get("enrich_at")
+        and float(soarca_timing["enrich_at"]) >= _st_floor
+        and float(soarca_timing["enrich_at"]) <= _st_ceiling(phase_markers.get("enrich_at"))
+    ):
         enrich_marker = soarca_timing["enrich_at"]
-    if soarca_timing.get("decide_at") and float(soarca_timing["decide_at"]) >= _st_floor:
+    if (
+        soarca_timing.get("decide_at")
+        and float(soarca_timing["decide_at"]) >= _st_floor
+        and float(soarca_timing["decide_at"]) <= _st_ceiling(phase_markers.get("decide_at"))
+    ):
         decide_marker = soarca_timing["decide_at"]
-    if soarca_timing.get("act_at") and float(soarca_timing["act_at"]) >= _st_floor:
+    if (
+        soarca_timing.get("act_at")
+        and float(soarca_timing["act_at"]) >= _st_floor
+        and float(soarca_timing["act_at"]) <= _st_ceiling(phase_markers.get("act_at"))
+    ):
         act_marker = soarca_timing["act_at"]
 
     if run_id:
@@ -7822,7 +9506,7 @@ def _build_live_report_panel(
             "selected": countermeasure_status,
             "justification": why,
             "d3fend_basis": "Selected from SOARCA-stage evidence and mapped to D3FEND-aligned defensive controls.",
-            "soarca_excerpt": _soarca_execution_evidence_excerpt(soarca_blob) or "No se encuentra evidencia de la contramedida todavía.",
+            "soarca_excerpt": _soarca_execution_evidence_excerpt(soarca_blob) or "No countermeasure execution evidence found yet.",
         },
         "timeline": {
             "observe_at": observe_marker,
@@ -7836,7 +9520,42 @@ def _build_live_report_panel(
 
 
 def _run_background(experiment: str, run_id: str) -> None:
+    # Publish this run's floor IMMEDIATELY, before any scenario-reuse/
+    # stability-gate/attack-delay waiting below. The floor is soarca-trigger's
+    # only defense against a stale TAPCD_PROFILE_READY line from a PREVIOUS
+    # run on the same reused victim IP triggering a countermeasure for THIS
+    # run before its own attack has even started (real incident observed:
+    # decide_at/act_at landed ~68s BEFORE attack_started_at, because the old
+    # call site wrote the floor only once attack_started_at itself was set --
+    # AFTER the stability gate and attack_delay_seconds waits below, leaving
+    # a real multi-second-to-~70s window where residual evidence from the
+    # scenario's previous incident could still fire a countermeasure that
+    # then shows up attributed to this run's timeline). Moving this to the
+    # top of the function, before the run claims/waits on the scenario at
+    # all, closes that window instead of narrowing it.
+    _write_experiment_floor_to_trigger(time.time())
     existing_run = _history_item(run_id) or {}
+    attack_duration_seconds = _clamp_int(
+        existing_run.get("attack_duration_seconds"), lo=60, hi=3600, default=1800
+    )
+    attacker_intensity = _clamp_int(
+        existing_run.get("attacker_intensity"), lo=2, hi=16, default=16
+    )
+    attack_enabled = bool(existing_run.get("attack_enabled", True))
+    # distributed_password_spraying.sh's own default (1.5s) staggers the
+    # attack into 3 ramping waves (25%/55%/100% of sources+packets) so a LIVE
+    # dashboard viewer sees distinct steps instead of one instant jump — by
+    # design, not a bug (see the script's own comment above its wave loop).
+    # That is exactly what makes a single representative run's packet-volume
+    # curve rise gradually over ~5-6s instead of spiking immediately. Passing
+    # 0 here collapses the three waves' gaps to nothing, so all three fire
+    # back-to-back and the full-intensity burst lands in under a second —
+    # for a one-off diagnostic/figure run only; the statistical campaign's
+    # 30 already-collected runs always used the script's own default and are
+    # unaffected (existing_run.get() defaults to None here, i.e. "let the
+    # script use its own 1.5s" for every run that doesn't pass this).
+    surge_wave_gap_seconds = existing_run.get("surge_wave_gap_seconds")
+    source_ip_end = 160 + attacker_intensity - 1
     shared_scenario_run = bool(existing_run.get("scenario_shared"))
     shared_scenario_fast_start = _shared_scenario_fast_start_ready(existing_run)
     scenario_id = str(existing_run.get("scenario_id") or "").strip()
@@ -7853,6 +9572,7 @@ def _run_background(experiment: str, run_id: str) -> None:
         and existing_attacker_uptime is not None
     ):
         scenario = {
+            "scenario_id": scenario_id,
             "project": str(existing_run.get("scenario_project") or ""),
             "network": str(existing_run.get("scenario_network") or existing_run.get("network") or ""),
             "victim_container_name": str(existing_run.get("victim_container_name") or ""),
@@ -7875,6 +9595,7 @@ def _run_background(experiment: str, run_id: str) -> None:
             )
         else:
             scenario = _ensure_scenario_for_run(run_id)
+            scenario["scenario_id"] = scenario_id
         _update_history(
             run_id,
             {
@@ -7923,10 +9644,6 @@ def _run_background(experiment: str, run_id: str) -> None:
         attacker_container = "scenario_attacker"
     print(f"[traffic-debug] _run_background: Starting experiment {experiment} (run_id={run_id})", flush=True)
     try:
-        kafka_ready_wait = int(os.getenv("EXPERIMENT_KAFKA_READY_WAIT_SECONDS", "15"))
-        if shared_scenario_fast_start:
-            kafka_ready_wait = 0
-        _wait_kafka_consumers_ready(timeout_sec=max(kafka_ready_wait, 0))
         with LOCK:
             TRAFFIC_SERIES[run_id] = []
             TRAFFIC_BASELINES[run_id] = 0.0
@@ -7967,18 +9684,48 @@ def _run_background(experiment: str, run_id: str) -> None:
                 _reset_victim_iptables(str(victim_container))
             except Exception:
                 pass
-        _reset_misp_dedup_state(scenario_id=scenario_id)  # clears _active_event_by_victim + disk dedup
+        # _reset_detector_runtime_state() now stops every pipeline consumer,
+        # advances ALL of their Kafka offsets to latest (cic_flow,
+        # network_auth_events, flows_conditional_agg, profiles_out) while they
+        # are actually inactive, and only then restarts them — see its
+        # docstring for why the offset reset used to silently no-op when run
+        # after the consumers were already back up. Within a scenario,
+        # historical Kafka messages/profiles must coexist (the user's
+        # requirement), so this never deletes records, only advances offsets.
+        #
+        # pmp-misp-integrator is one of the containers this RESTARTS (added
+        # for the same prep_pred-style Kafka-offset fix) — restarting it
+        # loses its in-memory _ACTIVE_SCENARIO_ID (reset to the module-level
+        # 'default' on the new process). _reset_misp_dedup_state() below
+        # POSTs the real scenario_id to the integrator's /reset endpoint —
+        # calling it BEFORE this restart (the old order) meant the correctly-
+        # scoped reset was immediately wiped out by the restart that followed,
+        # leaving _ACTIVE_SCENARIO_ID stuck on 'default' for the entire run.
+        # Every MISP event this integrator then created for this scenario was
+        # tagged "scenario:default" instead of the run's real scenario_id, so
+        # _enrich_misp_with_profile()'s tag-scoped restSearch (which filters
+        # on "scenario:<real_id>") could never find it — the D3FEND/profile
+        # MISP enrichment silently no-op'd for the ENTIRE run, no matter how
+        # many times it retried. Calling the dedup/scenario reset AFTER the
+        # restart is what makes it actually stick.
         _reset_detector_runtime_state()  # clears campaign_state.json, SOARCA dedup, offsets
-        # Advance ALL pipeline consumer-group offsets to latest WITHOUT deleting
-        # records. Within a scenario, historical Kafka messages/profiles must
-        # coexist (the user's requirement), so we do not purge records here — but
-        # every consumer must start reading only NEW messages so a second run
-        # cannot reprocess flows/profiles from a previous run. This is what stops
-        # prep_pred (--from-beginning) from replaying an old flow and emitting a
-        # stale actor profile (e.g. the 'activist' from a prior day).
-        _reset_all_kafka_offsets_to_latest()
+        _reset_misp_dedup_state(scenario_id=scenario_id)  # clears _active_event_by_victim + disk dedup
         if not shared_scenario_fast_start:
             time.sleep(10)
+
+        # Placed HERE — after _reset_detector_runtime_state() has actually
+        # stopped+restarted every pipeline consumer (alert_manager,
+        # soarca-trigger, etc.) and after _kill_ransomware_everywhere()'s own
+        # ransomware-sweep has restarted filebeat_falco_novadef — not before
+        # them. It used to run as the very first line of this function, when
+        # none of those restarts had happened yet, so it always found the
+        # PREVIOUS run's consumers (whatever state they were already in) and
+        # returned near-instantly, giving zero real signal about whether
+        # THIS run's freshly-restarted consumers had rejoined.
+        kafka_ready_wait = int(os.getenv("EXPERIMENT_KAFKA_READY_WAIT_SECONDS", "30"))
+        if shared_scenario_fast_start:
+            kafka_ready_wait = 0
+        _wait_kafka_consumers_ready(timeout_sec=max(kafka_ready_wait, 0))
 
         # Stage 1: allow the experiment view to settle before monitoring.
         if monitor_delay_seconds > 0:
@@ -7989,6 +9736,13 @@ def _run_background(experiment: str, run_id: str) -> None:
             deadline = time.time() + monitor_delay_seconds
             while time.time() < deadline:
                 time.sleep(1.0)
+                # See the same check in the attack-delay wait below for why
+                # this matters: without it, a stop during this window is
+                # silently ignored and the run keeps going through every
+                # later stage regardless.
+                if bool((_history_item(run_id) or {}).get("manual_stop")):
+                    print(f"[traffic-debug] Run {run_id} stopped manually during monitor delay; aborting launch", flush=True)
+                    return
 
         # Do not start monitoring yet. Keep the initial 15 s window free of
         # victim telemetry so the live chart does not accumulate startup
@@ -8001,6 +9755,9 @@ def _run_background(experiment: str, run_id: str) -> None:
             deadline = time.time() + noise_delay_seconds
             while time.time() < deadline:
                 time.sleep(1.0)
+                if bool((_history_item(run_id) or {}).get("manual_stop")):
+                    print(f"[traffic-debug] Run {run_id} stopped manually during noise delay; aborting launch", flush=True)
+                    return
 
         # (Re)bind tshark to the active victim NOW that the scenario is fully
         # provisioned and its scenario-network interface (172.18.0.x / eth1) is
@@ -8126,6 +9883,34 @@ def _run_background(experiment: str, run_id: str) -> None:
             deadline = time.time() + attack_delay_seconds
             while time.time() < deadline:
                 time.sleep(1.0)
+                # /api/run/<id>/stop sets manual_stop+running=False and removes
+                # the scenario containers immediately, but this loop used to
+                # ignore that and sleep out the full delay regardless. It then
+                # marked attack_started_at and tried to exec_run the attack
+                # script in a container that stop_run had already deleted —
+                # failing with a 404 almost by accident, not because the code
+                # respected the stop. Bail out here so a manual stop during
+                # this window doesn't record a fake attack_started_at (nor
+                # attempt to launch into an already-removed attacker).
+                if bool((_history_item(run_id) or {}).get("manual_stop")):
+                    print(f"[traffic-debug] Run {run_id} stopped manually during attack delay; aborting launch", flush=True)
+                    return
+                # exp2/exp3 (the host/ransomware detection path — Falco
+                # writes to falco_events.json, the dedicated
+                # filebeat_falco_novadef instance tails it, publishes to
+                # Kafka, alert_manager/soarca-trigger consume it) measured a
+                # consistent 7-13s gap between Falco writing an event and it
+                # actually reaching the detection pipeline, even with every
+                # consumer/harvester already confirmed warm beforehand — not
+                # a cold-start effect (Filebeat's harvester was already open
+                # well before this point in every measurement) but some
+                # steady-state latency in that chain. The "launching
+                # experiment" screen the GUI already shows during this
+                # existing attack_delay_seconds window absorbs it for free —
+                # no separate wait is added on top; this loop's own 15s
+                # (EXPERIMENT_ATTACK_DELAY_SECONDS) already covers it in every
+                # measurement so far. exp1 has no Falco/host dependency and
+                # is unaffected either way since this is the same loop.
 
         attack_started_at = time.time()
         try:
@@ -8143,6 +9928,11 @@ def _run_background(experiment: str, run_id: str) -> None:
             with LOCK:
                 STATE["last_attack_started_at"] = attack_started_at
             _update_history(run_id, {"attack_started_at": attack_started_at})
+            # Publish this run's floor to the SOARCA trigger so it rejects any
+            # profile whose LastActivity predates the current attack — the only
+            # way to stop a stale profile from the PREVIOUS run (same victim IP)
+            # firing the countermeasure before this attack even starts.
+            _write_experiment_floor_to_trigger(attack_started_at)
         print(f"[traffic-debug] Attack launch timestamp for {run_id}: {attack_started_at}", flush=True)
         victim_target = str(scenario.get("victim_ip") or "").strip() or "scenario_victim"
 
@@ -8181,23 +9971,45 @@ def _run_background(experiment: str, run_id: str) -> None:
             #   (a) SOARCA aplica la contramedida (la víctima dropea su tráfico), o
             #   (b) el experimento termina y se escribe stop_network_attack.signal.
             # ATTACK_DURATION_SECONDS alto = el ataque persiste todo el experimento.
-            attack_cmd = (
-                'SOURCE_BATCH_SIZE=16 ATTEMPTS_PER_PAIR=3 PROBE_BURST=300 '
-                'INITIAL_SURGE_PACKETS_PER_SOURCE=500 SOURCE_IP_START=160 SOURCE_IP_END=175 '
-                'TARGET_USER_LIMIT=6 HPING_INTERVAL_US=200 ATTEMPT_SLEEP_SECONDS=0.05 '
-                'SLEEP_SECONDS=0.0 ATTACK_DURATION_SECONDS=1800 '
-                f'CAMPAIGN_ID={run_id} '
-                f'nohup bash /opt/novadef/distributed_password_spraying.sh {exp1_victim_target} 2222 '
-                '>/var/novadef/logs/attack_exp1.out 2>&1 &'
-            )
-            try:
-                attacker = DOCKER_CLIENT.containers.get(str(attacker_container))
-                attacker.exec_run(["bash", "-lc", attack_cmd], stdout=True, stderr=True)
-                rc, output = 0, "exp1 attack launched in background (sustained)"
-                print(f"[traffic-debug] exp1 attack launched in background for {run_id}", flush=True)
-            except Exception as e:
-                rc, output = 1, f"exp1 attack launch error: {e}"
-                print(f"[traffic-debug] exp1 attack launch FAILED for {run_id}: {e}", flush=True)
+            if attack_enabled:
+                surge_gap_env = f'SURGE_WAVE_GAP_SECONDS={surge_wave_gap_seconds} ' if surge_wave_gap_seconds is not None else ''
+                attack_cmd = (
+                    f'SOURCE_BATCH_SIZE={attacker_intensity} ATTEMPTS_PER_PAIR=3 PROBE_BURST=300 '
+                    f'INITIAL_SURGE_PACKETS_PER_SOURCE=500 SOURCE_IP_START=160 SOURCE_IP_END={source_ip_end} '
+                    f'TARGET_USER_LIMIT=6 HPING_INTERVAL_US=200 ATTEMPT_SLEEP_SECONDS=0.05 '
+                    f'SLEEP_SECONDS=0.0 ATTACK_DURATION_SECONDS={attack_duration_seconds} '
+                    f'{surge_gap_env}'
+                    f'CAMPAIGN_ID={run_id} '
+                    f'nohup bash /opt/novadef/distributed_password_spraying.sh {exp1_victim_target} 2222 '
+                    '>/var/novadef/logs/attack_exp1.out 2>&1 &'
+                )
+                try:
+                    attacker = DOCKER_CLIENT.containers.get(str(attacker_container))
+                    attacker.exec_run(["bash", "-lc", attack_cmd], stdout=True, stderr=True)
+                    rc, output = 0, "exp1 attack launched in background (sustained)"
+                    print(f"[traffic-debug] exp1 attack launched in background for {run_id}", flush=True)
+                except Exception as e:
+                    rc, output = 1, f"exp1 attack launch error: {e}"
+                    print(f"[traffic-debug] exp1 attack launch FAILED for {run_id}: {e}", flush=True)
+            else:
+                rc, output = 0, "exp1 attack skipped (benign ground-truth run)"
+                print(f"[traffic-debug] exp1 attack SKIPPED (attack_enabled=False) for {run_id}", flush=True)
+
+            # Same fast-surge capture as exp3 (see that branch's comment for
+            # why): originally added because the steady sampler's old ~2s
+            # cadence missed the round-1 surge, which lands in ~1-2s. The
+            # steady sampler now targets ~0.1s (EXPERIMENT_TRAFFIC_SAMPLE_
+            # INTERVAL_SECONDS), so it alone likely catches the surge too —
+            # this extra burst is kept as a redundant safety net rather than
+            # load-bearing, and costs little since it is only 6 samples.
+            def _fast_sample_surge_exp1():
+                for _ in range(6):
+                    try:
+                        _append_traffic_sample(run_id, container_name=str(victim_container))
+                    except Exception:
+                        pass
+                    time.sleep(0.6)
+            threading.Thread(target=_fast_sample_surge_exp1, daemon=True).start()
         elif experiment == "exp2":
             # MISP/MongoDB/dedup were already purged before monitoring started.
             # Reset attack_started_at to the actual moment the emulation launches
@@ -8206,6 +10018,7 @@ def _run_background(experiment: str, run_id: str) -> None:
             with LOCK:
                 STATE["last_attack_started_at"] = attack_started_at
             _update_history(run_id, {"attack_started_at": attack_started_at})
+            _write_experiment_floor_to_trigger(attack_started_at)
             print(f"[traffic-debug] Attack launch timestamp (corrected for exp2) for {run_id}: {attack_started_at}", flush=True)
             threading.Thread(
                 target=_grafana_post_annotation,
@@ -8213,9 +10026,13 @@ def _run_background(experiment: str, run_id: str) -> None:
                 kwargs={"ts_ms": int(attack_started_at * 1000)},
                 daemon=True,
             ).start()
-            ok, launch_out = _start_exp2_persistent_emulation(run_id)
-            rc = 0 if ok else 1
-            output = launch_out if launch_out else ("started persistent exp2 loop" if ok else "failed to start persistent exp2 loop")
+            if attack_enabled:
+                ok, launch_out = _start_exp2_persistent_emulation(run_id)
+                rc = 0 if ok else 1
+                output = launch_out if launch_out else ("started persistent exp2 loop" if ok else "failed to start persistent exp2 loop")
+            else:
+                rc, output = 0, "exp2 attack skipped (benign ground-truth run)"
+                print(f"[traffic-debug] exp2 attack SKIPPED (attack_enabled=False) for {run_id}", flush=True)
         elif experiment == "exp3":
             threading.Thread(
                 target=_grafana_post_annotation,
@@ -8238,49 +10055,57 @@ def _run_background(experiment: str, run_id: str) -> None:
             # sentinel after the `nohup ... &` lets us verify the background
             # process actually started (exec_run alone does not guarantee that —
             # a shell init failure under `bash -lc` can silently drop the nohup).
-            exp3_attack_cmd = (
-                "command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1 || true\n"
-                'export ATTACK_DURATION_SECONDS=1800\n'
-                'export SOURCE_BATCH_SIZE=16\n'
-                'export ATTEMPTS_PER_PAIR=3\n'
-                'export PROBE_BURST=300\n'
-                'export INITIAL_SURGE_PACKETS_PER_SOURCE=500\n'
-                'export HPING_INTERVAL_US=200\n'
-                'export SOURCE_IP_START=160\n'
-                'export SOURCE_IP_END=175\n'
-                'export TARGET_USER_LIMIT=6\n'
-                'export ATTEMPT_SLEEP_SECONDS=0.05\n'
-                'export SLEEP_SECONDS=0.4\n'
-                'export COMMAND_TIMEOUT=0.25\n'
-                f'export CAMPAIGN_ID={run_id}\n'
-                f'nohup bash /opt/novadef/hybrid_lateral_remote_execution.sh {exp3_victim_target} 2222'
-                ' >/var/novadef/logs/attack_exp3.out 2>&1 &\n'
-                'echo started_exp3_network\n'
-            )
             network_attack_ok = False
-            try:
-                attacker = DOCKER_CLIENT.containers.get(str(attacker_container))
-                res = attacker.exec_run(["sh", "-c", exp3_attack_cmd], stdout=True, stderr=True, user="root")
-                out = (res.output or b"").decode("utf-8", errors="replace")
-                network_attack_ok = (res.exit_code == 0) and ("started_exp3_network" in out)
-                rc, output = 0, "exp3 hybrid attack launched in background (sustained)"
-                print(
-                    f"[traffic-debug] exp3 network attack launch exit_code={res.exit_code} "
-                    f"ok={network_attack_ok} out={out[:300]}",
-                    flush=True,
+            if attack_enabled:
+                exp3_attack_cmd = (
+                    "command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1 || true\n"
+                    f'export ATTACK_DURATION_SECONDS={attack_duration_seconds}\n'
+                    f'export SOURCE_BATCH_SIZE={attacker_intensity}\n'
+                    'export ATTEMPTS_PER_PAIR=3\n'
+                    'export PROBE_BURST=300\n'
+                    'export INITIAL_SURGE_PACKETS_PER_SOURCE=500\n'
+                    'export HPING_INTERVAL_US=200\n'
+                    'export SOURCE_IP_START=160\n'
+                    f'export SOURCE_IP_END={source_ip_end}\n'
+                    'export TARGET_USER_LIMIT=6\n'
+                    'export ATTEMPT_SLEEP_SECONDS=0.05\n'
+                    'export SLEEP_SECONDS=0.0\n'
+                    'export COMMAND_TIMEOUT=0.25\n'
+                    f'export CAMPAIGN_ID={run_id}\n'
+                    f'nohup bash /opt/novadef/hybrid_lateral_remote_execution.sh {exp3_victim_target} 2222'
+                    ' >/var/novadef/logs/attack_exp3.out 2>&1 &\n'
+                    'echo started_exp3_network\n'
                 )
-            except Exception as e:
-                rc, output = 1, f"exp3 attack launch error: {e}"
-                print(f"[traffic-debug] exp3 attack launch FAILED for {run_id}: {e}", flush=True)
+                try:
+                    attacker = DOCKER_CLIENT.containers.get(str(attacker_container))
+                    res = attacker.exec_run(["sh", "-c", exp3_attack_cmd], stdout=True, stderr=True, user="root")
+                    out = (res.output or b"").decode("utf-8", errors="replace")
+                    network_attack_ok = (res.exit_code == 0) and ("started_exp3_network" in out)
+                    rc, output = 0, "exp3 hybrid attack launched in background (sustained)"
+                    print(
+                        f"[traffic-debug] exp3 network attack launch exit_code={res.exit_code} "
+                        f"ok={network_attack_ok} out={out[:300]}",
+                        flush=True,
+                    )
+                except Exception as e:
+                    rc, output = 1, f"exp3 attack launch error: {e}"
+                    print(f"[traffic-debug] exp3 attack launch FAILED for {run_id}: {e}", flush=True)
+            else:
+                # network_attack_ok stays False, which _delayed_akira_for_exp3
+                # below already treats as "network phase never started" and
+                # skips launching the ransomware phase too — no attack vector
+                # runs for this benign ground-truth run.
+                rc, output = 0, "exp3 attack skipped (benign ground-truth run)"
+                print(f"[traffic-debug] exp3 attack SKIPPED (attack_enabled=False) for {run_id}", flush=True)
 
-            # Capture the surge FAST. The steady sampler runs at ~2s cadence, so
-            # the round-1 surge (which lands in ~1-2s) was only picked up several
-            # samples later — the user saw "el spike grande apareció 5 segundos
-            # después" of the attack starting. Fire a short burst of quick samples
-            # right now, in a background thread (so we don't block the Akira
-            # scheduling below), so the surge shows on the chart ~1s after the
-            # attack instead of ~5s. Runs in parallel with the steady sampler;
-            # duplicate timestamps are de-duped downstream.
+            # Capture the surge FAST. Originally added because the steady
+            # sampler's old ~2s cadence missed the round-1 surge (lands in
+            # ~1-2s), so the user saw "el spike grande apareció 5 segundos
+            # después" of the attack starting. The steady sampler now targets
+            # ~0.1s (EXPERIMENT_TRAFFIC_SAMPLE_INTERVAL_SECONDS) so it alone
+            # likely catches the surge too — this burst is kept as a redundant
+            # safety net rather than load-bearing. Runs in parallel with the
+            # steady sampler; duplicate timestamps are de-duped downstream.
             def _fast_sample_surge():
                 for _ in range(6):
                     try:
@@ -8302,11 +10127,13 @@ def _run_background(experiment: str, run_id: str) -> None:
             # lateral impact) while giving the network layer time to be detected.
             # Only fires if the network phase actually started.
             def _delayed_akira_for_exp3():
-                # 2s after the network attack starts. The network surge creates
-                # its spike within ~1s (and the fast-sampler above makes it
-                # visible ~1s in), so firing the ransomware at +2s means it lands
-                # ~1s AFTER the network spike is on screen — the order the user
-                # wants: primero se ve el spike de red, luego el ransomware.
+                # 2s after the network attack starts — NOT waiting for the
+                # network phase's own detect->countermeasure cycle to finish.
+                # The two attack vectors run close together in time (host
+                # starts ~1-2s after network, both still in flight together),
+                # matching a real hybrid campaign's initial-access-then-
+                # lateral-impact pattern without serializing the two full
+                # cycles end-to-end.
                 time.sleep(2)
                 if not network_attack_ok:
                     print(f"[exp3] Skipping Akira launch — network attack did not start for {run_id}", flush=True)
@@ -8318,7 +10145,10 @@ def _run_background(experiment: str, run_id: str) -> None:
                     _ok, _out = _start_exp2_persistent_emulation(run_id, reset_iptables=False)
                     print(f"[exp3] Akira launch result: ok={_ok} out={_out[:300]}", flush=True)
                     if _ok:
-                        _update_history(run_id, {"exp3_host_attack_started": True})
+                        _update_history(run_id, {
+                            "exp3_host_attack_started": True,
+                            "host_attack_started_at": time.time(),
+                        })
                     else:
                         print(f"[exp3] Akira launch FAILED — check victim container logs", flush=True)
                 except Exception as _e:
@@ -8352,6 +10182,80 @@ def _run_background(experiment: str, run_id: str) -> None:
             return
         if rc == 0:
             try:
+                if not attack_enabled:
+                    # Benign ground-truth run: there is no attack to wait for, so
+                    # _wait_for_pipeline_completion/_wait_for_final_report_readiness
+                    # would just burn their full timeouts (90s + 60s) polling for
+                    # evidence that will never appear. Instead, poll for the
+                    # benign observation window directly, watching for a real
+                    # countermeasure firing anyway (a genuine false positive from
+                    # the benign background noise) — if that happens, fall through
+                    # to the normal countermeasure-confirmed path below so it gets
+                    # reported like any other real detection.
+                    benign_window = int(os.getenv("EXPERIMENT_BENIGN_WINDOW_SECONDS", "300"))
+                    benign_deadline = time.time() + benign_window
+                    print(f"[traffic-debug] Benign ground-truth run {run_id}: observing for {benign_window}s with no attack launched", flush=True)
+                    false_positive_fired = False
+                    while time.time() < benign_deadline:
+                        current_item = _history_item(run_id) or {}
+                        if current_item.get("manual_stop") or current_item.get("deleted"):
+                            with LOCK:
+                                STATE["running"] = False
+                                STATE["last_finished_at"] = time.time()
+                                _refresh_global_runtime_state(run_id)
+                            return
+                        if _run_has_countermeasure(current_item):
+                            false_positive_fired = True
+                            print(f"[traffic-debug] Benign run {run_id}: countermeasure fired anyway (false positive) after {benign_window - (benign_deadline - time.time()):.1f}s", flush=True)
+                            break
+                        time.sleep(2)
+                    if not false_positive_fired:
+                        _update_history(run_id, {"benign_window_elapsed": True})
+                        ready_timeout_ooda = int(os.getenv("EXPERIMENT_FINAL_REPORT_READY_TIMEOUT_SECONDS", "60"))
+                        ready_ooda, _ = _wait_for_final_report_readiness(run_id, timeout_sec=ready_timeout_ooda)
+                        if ready_ooda and _claim_report_generation(run_id):
+                            try:
+                                payload_ooda = _build_report_payload(run_id)
+                                report_id_ooda = _persist_report(payload_ooda)
+                                _persist_run_artifacts(run_id, report_id_ooda, payload_ooda)
+                                _update_history(
+                                    run_id,
+                                    {
+                                        "report_id": report_id_ooda,
+                                        "summary": _runtime_experiment_summary(
+                                            experiment, STATE.get("last_started_at"), str(STATE.get("last_output") or "")
+                                        ),
+                                        "report_panel": _report_panel_from_latest_report(report_id_ooda),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            finally:
+                                _release_report_generation(run_id)
+                        if experiment in {"exp2", "exp3"}:
+                            _stop_exp2_persistent_emulation(run_id=run_id)
+                        while True:
+                            current_item = _history_item(run_id) or {}
+                            if current_item.get("manual_stop") or current_item.get("deleted"):
+                                break
+                            time.sleep(2)
+                        with LOCK:
+                            STATE["running"] = False
+                            STATE["last_finished_at"] = time.time()
+                            _refresh_global_runtime_state(run_id)
+                        _update_history(
+                            run_id,
+                            {
+                                "running": False,
+                                "finished_at": STATE.get("last_finished_at"),
+                            },
+                        )
+                        return
+                    # else: a real countermeasure fired during the benign window —
+                    # fall through to the normal confirmation/report path below,
+                    # exactly as if this had been a real attack run, so it is
+                    # correctly captured as a false positive in the final report.
+
                 confirmation_timeout = int(os.getenv("EXPERIMENT_PIPELINE_CONFIRM_TIMEOUT_SECONDS", "90"))
                 wait_note = f"\n[traffic-debug] Waiting for TAPCD/MISP/SOARCA confirmation (timeout={confirmation_timeout}s)"
                 with LOCK:
@@ -8395,37 +10299,61 @@ def _run_background(experiment: str, run_id: str) -> None:
                 except Exception:
                     pass
 
-                ready_timeout_ooda = int(os.getenv("EXPERIMENT_FINAL_REPORT_READY_TIMEOUT_SECONDS", "60"))
-                ready_ooda, _ = _wait_for_final_report_readiness(run_id, timeout_sec=ready_timeout_ooda)
-                if ready_ooda:
-                    try:
-                        payload_ooda = _build_report_payload(run_id)
-                        report_id_ooda = _persist_report(payload_ooda)
-                        _persist_run_artifacts(run_id, report_id_ooda, payload_ooda)
-                        _update_history(
-                            run_id,
-                            {
-                                "report_id": report_id_ooda,
-                                "summary": _runtime_experiment_summary(
-                                    experiment, STATE.get("last_started_at"), str(STATE.get("last_output") or "")
-                                ),
-                                "report_panel": _report_panel_from_latest_report(report_id_ooda),
-                            },
-                        )
-                    except Exception:
-                        pass
                 # exp2/exp3 run a persistent ransomware loop; stop it now that the
                 # countermeasure has been applied so the host CPU spike subsides.
                 if experiment in {"exp2", "exp3"}:
                     _stop_exp2_persistent_emulation(run_id=run_id)
-                # Keep UI/sampler in "running" state until the user manually stops
-                # the run with the Stop button. This applies to ALL experiments so
-                # the network graph keeps updating after the countermeasure.
-                while True:
+                # Once the countermeasure has applied, the incident is DONE from
+                # the operator's point of view: the report must be generated and
+                # the run finalized within a short, bounded window after act_at
+                # (~15s), not whenever a much longer readiness timeout happens to
+                # elapse. The OLD ordering called _wait_for_final_report_readiness
+                # with a 60s timeout FIRST and only started this post-act window
+                # AFTER that returned — so an already-resolved incident (act_at
+                # set, countermeasure confirmed) could sit for up to 60+15s before
+                # finished_at ever appeared, during which showIncidentDetail()'s
+                # own ~9s retry loop would give up long before report_id existed
+                # and (before its own running-state fix) mislabel the incident
+                # "Finished" while it was still actually generating. Waiting on
+                # readiness WITHIN this same short window — instead of before it —
+                # means finished_at lands close to the full 15s mark whenever the
+                # report is ready in time, and the window's own manual_stop/
+                # deleted checks still apply throughout.
+                post_act_window = int(os.getenv("EXPERIMENT_POST_ACT_WINDOW_SECONDS", "15"))
+                _act_ts = None
+                try:
+                    _act_ts = float((_history_item(run_id) or {}).get("act_at") or 0.0) or None
+                except Exception:
+                    _act_ts = None
+                _finalize_deadline = (_act_ts or time.time()) + post_act_window
+                _remaining_for_readiness = max(_finalize_deadline - time.time(), 1.0)
+                ready_ooda, _ = _wait_for_final_report_readiness(run_id, timeout_sec=int(_remaining_for_readiness))
+                if ready_ooda and _claim_report_generation(run_id):
+                    try:
+                        payload_ooda = _build_report_payload(run_id)
+                        report_id_ooda = _persist_report(payload_ooda)
+                        _persist_run_artifacts(run_id, report_id_ooda, payload_ooda)
+                        _rt_summary = _runtime_experiment_summary(
+                            experiment, STATE.get("last_started_at"), str(STATE.get("last_output") or "")
+                        )
+                        _rp_panel = _report_panel_from_latest_report(report_id_ooda)
+                        _update_history(
+                            run_id,
+                            {
+                                "report_id": report_id_ooda,
+                                "summary": _rt_summary,
+                                "report_panel": _rp_panel,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    finally:
+                        _release_report_generation(run_id)
+                while time.time() < _finalize_deadline:
                     current_item = _history_item(run_id) or {}
                     if current_item.get("manual_stop") or current_item.get("deleted"):
                         break
-                    time.sleep(2)
+                    time.sleep(1)
                 with LOCK:
                     STATE["running"] = False
                     STATE["last_finished_at"] = time.time()
@@ -8474,19 +10402,24 @@ def _run_background(experiment: str, run_id: str) -> None:
                 _snapshot_run_logs(run_id)
         except Exception:
             pass
-        def _auto_cleanup_scenario() -> None:
-            time.sleep(15)
-            try:
-                item = _history_item(run_id) or {}
-                _cleanup_run_resources(
-                    item,
-                    remove_containers=True,
-                    remove_network=True,
-                    remove_artifacts=False,
-                )
-            except Exception:
-                pass
-        threading.Thread(target=_auto_cleanup_scenario, daemon=True).start()
+        # Scenarios are never auto-destroyed when a run finishes — every
+        # scenario here is scenario_shared=True (see run(), which routes both
+        # auto-created and user-named scenarios through
+        # _ensure_persistent_scenario), so there is no "one-shot" scenario
+        # variant to distinguish from a persistent one; they're all meant to
+        # persist across experiments until the user explicitly deletes them.
+        # This used to fire a 15s-delayed _cleanup_run_resources(...,
+        # remove_containers=True, remove_network=True) unconditionally after
+        # every run — destroying the scenario's containers/network behind
+        # the user's back even though only DELETE /api/scenarios/<id>
+        # (delete_scenario) is supposed to tear a scenario down. Because that
+        # auto-cleanup never went through delete_scenario, it also skipped
+        # delete_scenario's MISP/Kafka/Neo4j purge — leaving that run's MISP
+        # event orphaned (never truncated) even though its containers were
+        # gone, so the NEXT scenario's first event landed on a stale
+        # auto-increment (e.g. "Event=2" for what should have been that new
+        # scenario's very first event). Only the explicit delete button
+        # (delete_scenario) may remove a scenario's resources now.
 
 
 @app.get("/health")
@@ -8649,6 +10582,809 @@ def history() -> Any:
     return jsonify({"runs": runs})
 
 
+def _load_incident_report(report_id: str) -> dict[str, Any]:
+    if not report_id:
+        return {}
+    try:
+        report_json = REPORTS_DIR / report_id / "incident_report.json"
+        if not report_json.exists():
+            return {}
+        return json.loads(report_json.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+# _build_report_payload() shells out to several containers (docker exec log
+# tails, MISP DB queries) and takes multiple seconds — fine as a one-off, but
+# ooda_summary's per-run loop below calls it for EVERY still-running run
+# lacking a report_id, and the frontend polls this endpoint every ~8s. With
+# even one active run this made a single /api/ooda_summary response take
+# ~28s, well past the frontend's own poll interval — so requests piled up
+# and the UI never got a response in time, showing "Pending" indefinitely
+# even though the underlying live data existed. Caching each run_id's live
+# payload for a few seconds (well under the polling interval, so the UI still
+# sees fresh-enough data every refresh) turns N expensive rebuilds per
+# request back into about one per TTL window.
+_LIVE_REPORT_PAYLOAD_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_LIVE_REPORT_PAYLOAD_CACHE_TTL_SECONDS = 5.0
+
+
+def _cached_build_report_payload(run_id: str) -> dict[str, Any]:
+    now = time.time()
+    cached = _LIVE_REPORT_PAYLOAD_CACHE.get(run_id)
+    if cached and (now - cached[0]) < _LIVE_REPORT_PAYLOAD_CACHE_TTL_SECONDS:
+        return cached[1]
+    payload = _build_report_payload(run_id)
+    _LIVE_REPORT_PAYLOAD_CACHE[run_id] = (now, payload)
+    return payload
+
+
+@app.get("/api/ooda_summary")
+def ooda_summary() -> Any:
+    """
+    Aggregates real data from every generated incident_report.json (optionally
+    filtered to one scenario_id) into the four OODA phases, for the
+    Architecture Hub's Dashboard/Observe/Orient/Decide/Act navigation. Every
+    number here is derived from actual report fields (novadef_metrics.article_*,
+    tapcd.actor_profiles, misp.event_object, countermeasure) — nothing is
+    fabricated. Runs without a persisted report_id (still running, or failed
+    before a report was generated) are skipped for the aggregate metrics but
+    still counted in run totals.
+    """
+    scenario_filter = str(request.args.get("scenario_id") or "").strip()
+    with LOCK:
+        runs = [dict(item) for item in RUN_HISTORY if not item.get("deleted")]
+    # Repeat-offender rollup is always cross-scenario by definition (the
+    # whole point is spotting an attacker IP hitting MULTIPLE different
+    # scenarios/victims) — keep the unfiltered list before scoping `runs`
+    # down to whatever scenario_id the operator has selected.
+    all_runs_unfiltered = runs
+    if scenario_filter:
+        runs = [r for r in runs if str(r.get("scenario_id") or "").strip() == scenario_filter]
+
+    profiles: list[dict[str, Any]] = []
+    misp_events: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    executions: list[dict[str, Any]] = []
+    observe_events: list[dict[str, Any]] = []
+    observe_series: list[dict[str, Any]] = []
+    detector_stats: dict[str, dict[str, int]] = {
+        "network": {"tp": 0, "fp": 0, "fn": 0, "tn": 0},
+        "falco": {"tp": 0, "fp": 0, "fn": 0, "tn": 0},
+    }
+    # Attack surface heatmap (Dashboard general): one real epoch timestamp
+    # per incident that actually launched an attack — the frontend buckets
+    # these into a day-of-week × hour-of-day grid itself (no need to
+    # pre-aggregate server-side, the point count is small).
+    attack_timestamps: list[float] = []
+
+    observe_coverage: list[float] = []
+    observe_density: list[float] = []
+    observe_gaps: list[float] = []
+    orient_completeness: list[float] = []
+    orient_time_to_orient: list[float] = []
+    decide_alignment: list[float] = []
+    decide_time: list[float] = []
+    act_success: list[float] = []
+    act_errors: list[float] = []
+    act_traffic_reduction: list[float] = []
+    resource_cpu_by_container: dict[str, list[float]] = {}
+
+    # Dashboard additions: detection precision/recall/F1 (already computed
+    # per-report in novadef_metrics.detection_quality — averaged here rather
+    # than recomputed), a per-experiment stacked_bar_row average (already
+    # computed per-report in article_e2e_ooda — same source as the existing
+    # article_* aggregation above, just grouped by experiment instead of
+    # flattened), Falco's own top-rules-per-sample rolled up into one
+    # cross-run leaderboard, and a per-scenario comparison row (duration +
+    # whether the applied playbook matched the expected one).
+    # Aggregate detection quality across runs by SUMMING each run's raw
+    # tp/fp/fn/tn (each run contributes exactly one ground-truth label, see
+    # _compute_experiment_metrics's detection_quality block) and computing
+    # ONE confusion matrix over the total -- not by averaging each run's own
+    # precision/recall/f1 (each of which is individually 0% or 100% after
+    # the per-run false-positive-inflation fix). Averaging per-run ratios is
+    # not mathematically equivalent to the aggregate ratio and can be
+    # arbitrarily misleading under class imbalance; summing counts first is
+    # the only correct way to combine per-run confusion-matrix contributions
+    # into a real, single precision/recall/F1/accuracy for the dashboard.
+    detection_tp_total = 0
+    detection_fp_total = 0
+    detection_fn_total = 0
+    detection_tn_total = 0
+    stacked_bar_by_experiment: dict[str, list[dict[str, float]]] = {}
+    falco_rule_counts: dict[str, int] = {}
+    scenario_runs_by_id: dict[str, list[dict[str, Any]]] = {}
+
+    # MITRE ATT&CK <-> D3FEND coverage: for each run, every ATT&CK technique
+    # observed in its actor profiles gets linked to the D3FEND technique(s)
+    # NOVADEF actually applied for THAT run (article_decide.d3fend_technique_applied,
+    # a " + "-joined string of real D3-* ids from _d3fend_technique_map — not
+    # a theoretical mapping, the real countermeasure this run's own playbook
+    # applied). attack_observed counts incidents per technique; the
+    # attack_to_defend edges only include pairs actually seen together on the
+    # same run, so a technique with zero applied countermeasure runs
+    # correctly has no edges here (the frontend's own MITRE catalog covers
+    # the "recommended but not implemented" case separately).
+    attack_observed: dict[str, int] = {}
+    attack_to_defend: dict[str, set[str]] = {}
+
+    # SOARCA executions: link the real execution_id SOARCA returned (recorded
+    # by misp_to_soarca.py's _record_soarca_execution into the shared timing
+    # file) to whichever run in the current scope shares the same victim_ip
+    # AND whose time window contains when the execution was recorded — the
+    # timing file has no run_id/scenario_id of its own, so this is the only
+    # way to attribute an execution to "this scenario" instead of showing
+    # every SOARCA execution ever recorded regardless of scope. Executions
+    # that don't fall inside any in-scope run's window are simply omitted
+    # (they belong to a run outside the current filter, not fabricated here).
+    soarca_execution_summaries: list[dict[str, Any]] = []
+    _recorded_executions = _read_soarca_recorded_executions()
+    if _recorded_executions:
+        # misp_to_soarca.py records victim_ip as seen on launcher_default
+        # (172.18.x — the network shared with SOARCA/MISP/Kafka), but each
+        # run_item's own "victim_ip" field is the container's IP on its
+        # scenario-internal network instead (e.g. 172.20.x) — same
+        # container, two different docker networks, two different IPs.
+        # Resolve each run's OWN launcher_default IP (via its
+        # victim_container_name) here instead of comparing run["victim_ip"]
+        # directly, which would never match. Cached per container name since
+        # multiple executions in this loop can belong to the same run.
+        _launcher_ip_cache: dict[str, str | None] = {}
+
+        def _run_launcher_ip(run_item: dict[str, Any]) -> str | None:
+            cname = str(run_item.get("victim_container_name") or "").strip()
+            if not cname:
+                return None
+            if cname not in _launcher_ip_cache:
+                _launcher_ip_cache[cname] = _container_launcher_ip(cname)
+            return _launcher_ip_cache[cname]
+
+        for _rec in _recorded_executions:
+            _victim_ip = str(_rec.get("victim_ip") or "").strip()
+            _recorded_at = _rec.get("recorded_at")
+            if not _victim_ip or not isinstance(_recorded_at, (int, float)):
+                continue
+            _matched_run = None
+            for _r in runs:
+                if _run_launcher_ip(_r) != _victim_ip:
+                    continue
+                _r_start = _r.get("started_at")
+                _r_end = _r.get("finished_at") or time.time()
+                if not isinstance(_r_start, (int, float)):
+                    continue
+                if float(_r_start) - 5 <= _recorded_at <= float(_r_end) + 5:
+                    _matched_run = _r
+                    break
+            if _matched_run is None:
+                continue
+            _execution_id = str(_rec.get("execution_id") or "").strip()
+            _report = _fetch_soarca_execution_report(_execution_id)
+            _summary: dict[str, Any] = {
+                "execution_id": _execution_id,
+                "playbook_id": _rec.get("playbook_id"),
+                "run_id": _matched_run.get("run_id"),
+                "scenario_id": _matched_run.get("scenario_id"),
+                "experiment": _matched_run.get("experiment"),
+                "victim_ip": _victim_ip,
+            }
+            if _report:
+                _started = _report.get("started")
+                _ended = _report.get("ended")
+                _duration_ms = None
+                try:
+                    if _started and _ended:
+                        _t0 = datetime.fromisoformat(str(_started).replace("Z", "+00:00"))
+                        _t1 = datetime.fromisoformat(str(_ended).replace("Z", "+00:00"))
+                        _duration_ms = round((_t1 - _t0).total_seconds() * 1000.0, 1)
+                except Exception:
+                    _duration_ms = None
+                _summary.update({
+                    "name": _report.get("name"),
+                    "description": _report.get("description"),
+                    "status": _report.get("status"),
+                    "status_text": _report.get("status_text"),
+                    "started": _started,
+                    "ended": _ended,
+                    "duration_ms": _duration_ms,
+                    "step_results": _report.get("step_results") or {},
+                })
+            soarca_execution_summaries.append(_summary)
+
+    seen_reports = 0
+    for run in runs:
+        report_id = str(run.get("report_id") or "").strip()
+        data = _load_incident_report(report_id) if report_id else None
+        if not data:
+            # No persisted report yet — this run is either still active or
+            # ended without ever producing one. Skipping it entirely used
+            # to leave Orient/Decide/Act completely empty ("0 profiles",
+            # "0 decisions", "0 executions") for the ENTIRE duration of any
+            # in-progress run, even when a real TAPCD profile, MISP event,
+            # decision, and SOARCA execution had already happened — the
+            # exact same class of "frozen snapshot" bug already fixed
+            # elsewhere in this function for individual fields (source_ips,
+            # explainability, resource_overhead), just affecting the whole
+            # per-run record instead of one field. _build_report_payload()
+            # builds the identical novadef_metrics/tapcd/misp/countermeasure/
+            # chart_data shape a persisted report has, straight from live
+            # state — the same function that WOULD have produced this run's
+            # report if/when it finishes. Only do this for a run that's
+            # still genuinely running; a finished run with no report_id
+            # really has no evidence to show (e.g. it crashed before
+            # reporting), so it should stay skipped rather than fabricate one.
+            if not bool(run.get("running")):
+                continue
+            try:
+                data = _cached_build_report_payload(str(run.get("run_id") or ""))
+            except Exception:
+                continue
+            if not data:
+                continue
+        else:
+            seen_reports += 1
+        metrics = data.get("novadef_metrics") or {}
+        a_observe = metrics.get("article_observe") or {}
+        a_orient = metrics.get("article_orient") or {}
+        a_decide = metrics.get("article_decide") or {}
+        a_act = metrics.get("article_act") or {}
+
+        _run_techniques: set[str] = set()
+        for _actor in ((data.get("tapcd") or {}).get("actor_profiles") or []):
+            if not isinstance(_actor, dict):
+                continue
+            for _t in (_actor.get("techniques") or []):
+                _t = str(_t or "").strip()
+                if _t:
+                    _run_techniques.add(_t)
+        _run_defend_ids = [
+            _d.strip() for _d in str(a_decide.get("d3fend_technique_applied") or "").split("+")
+            if _d.strip() and _d.strip().lower() != "unknown"
+        ]
+        for _t in _run_techniques:
+            attack_observed[_t] = attack_observed.get(_t, 0) + 1
+            if _run_defend_ids:
+                attack_to_defend.setdefault(_t, set()).update(_run_defend_ids)
+        run_meta = {
+            "run_id": run.get("run_id"),
+            "scenario_id": run.get("scenario_id"),
+            "experiment": run.get("experiment"),
+            "started_at": run.get("started_at"),
+        }
+        if isinstance(run.get("attack_started_at"), (int, float)) and run.get("attack_started_at"):
+            attack_timestamps.append(float(run["attack_started_at"]))
+
+        mon = a_observe.get("monitoring_adaptability") or {}
+        if isinstance(mon.get("source_coverage_ratio"), (int, float)):
+            observe_coverage.append(float(mon["source_coverage_ratio"]))
+        if isinstance(mon.get("telemetry_signal_density_lps"), (int, float)):
+            observe_density.append(float(mon["telemetry_signal_density_lps"]))
+        if isinstance(mon.get("telemetry_gap_count"), (int, float)):
+            observe_gaps.append(float(mon["telemetry_gap_count"]))
+        # Observe view (Hub) was previously just 4 KPI numbers + a resource
+        # table — no way to see WHAT was actually observed for a given run
+        # (which sources fired, how many real log lines, an actual telemetry
+        # series). Build one detailGrid-style entry per run (same pattern as
+        # profiles/misp_events/decisions/executions above) plus a concatenated
+        # telemetry series for a real chart, from data already computed and
+        # persisted per-report — nothing here is fabricated.
+        _tool_breakdown = (metrics.get("tool_breakdown") or {}).get("observe") or {}
+        _net_dim = (metrics.get("dimension_breakdown") or {}).get("network") or {}
+        observe_events.append({
+            **run_meta,
+            "source_coverage_ratio": mon.get("source_coverage_ratio"),
+            "telemetry_signal_density_lps": mon.get("telemetry_signal_density_lps"),
+            "telemetry_gap_count": mon.get("telemetry_gap_count"),
+            "telemetry_points": mon.get("telemetry_points"),
+            "first_telemetry_latency_sec": (mon.get("first_telemetry_latency") or {}).get("sec"),
+            "tool_signal_counts": _tool_breakdown,
+        })
+        _chart_series = list((data.get("chart_data") or {}).get("series") or [])
+        for _p in _chart_series:
+            if not isinstance(_p, dict):
+                continue
+            observe_series.append({
+                "ts": _p.get("ts"),
+                "run_id": run.get("run_id"),
+                "rx_packets": _p.get("rx_packets"),
+                "falco_signal_delta": _p.get("falco_signal_delta"),
+                "cpu_percent": _p.get("cpu_percent"),
+                "memory_percent": _p.get("memory_percent"),
+                "packet_source": _p.get("packet_source"),
+                "host_source": _p.get("host_source"),
+            })
+        # "containers" maps each container name to a METRICS DICT
+        # ({"cpu_percent": ..., "memory_bytes": ..., ...} — see
+        # _docker_runtime_stats), not a bare number. This used to check
+        # isinstance(cval, (int, float)) directly on that dict, which is
+        # always False — resource_cpu_by_container never got populated, so
+        # the Dashboard's "Resource overhead (top containers)" panel was
+        # permanently empty regardless of how much CPU any container used.
+        overhead = (metrics.get("resource_overhead") or {}).get("containers") or {}
+        # Same one-shot-snapshot problem as source_ips/explainability above:
+        # these platform containers (tshark/falco/detector/alert_module/...)
+        # are SHARED infrastructure, not per-run — they keep running (and
+        # their CPU keeps changing) for as long as the whole NOVADEF stack is
+        # up, well past any one run's report snapshot. The frozen numbers
+        # here never update, so "Resource overhead" looked permanently
+        # stale. For the run that is CURRENTLY active, re-query real,
+        # current CPU/mem stats directly from Docker instead of the frozen
+        # report value.
+        if not (run.get("finished_at") or run.get("manual_stop") or run.get("deleted")):
+            try:
+                overhead = _docker_runtime_stats(
+                    [
+                        "tshark_novadef",
+                        "falco_novadef",
+                        "network_intrusion_detector_novadef",
+                        "alert_module_novadef",
+                        "novadef-novadef_stream_low-1",
+                        "pmp-misp-integrator",
+                        "pmp-soarca-core",
+                    ]
+                ) or overhead
+            except Exception:
+                pass
+        for cname, cmetrics in overhead.items():
+            if not isinstance(cmetrics, dict):
+                continue
+            cval = cmetrics.get("cpu_percent")
+            if isinstance(cval, (int, float)):
+                resource_cpu_by_container.setdefault(cname, []).append(float(cval))
+
+        detect_link = a_orient.get("detection_to_profile_link") or {}
+        if isinstance(detect_link.get("profile_field_completeness_ratio"), (int, float)):
+            orient_completeness.append(float(detect_link["profile_field_completeness_ratio"]))
+        # "Time to X" everywhere in the Hub now means the duration of THAT
+        # phase alone (previous phase's own completion -> this phase's
+        # completion), not "time since the attack started" — the latter
+        # made every later phase's KPI look like an ever-growing number even
+        # when the phase itself was fast (e.g. "Time to decide" reading
+        # ~3.3s when Decide itself actually took 3ms right after Profile).
+        # latency_ooda carries the real, raw timestamp for each phase.
+        _lat = metrics.get("latency_ooda") or {}
+        _first_alert_ts = _lat.get("first_alert_ts")
+        _stable_id_ts = _lat.get("stable_identification_ts")
+        _decide_ts = _lat.get("decide_ts")
+        if isinstance(_first_alert_ts, (int, float)) and isinstance(_stable_id_ts, (int, float)) and _stable_id_ts >= _first_alert_ts:
+            orient_time_to_orient.append(float(_stable_id_ts) - float(_first_alert_ts))
+
+        # False-positive rate by detector: attribute this run's already-
+        # computed binary tp/fp/fn/tn (detection_quality, strictly 0/1 per
+        # run — see the earlier fix that made this exact, not a count of
+        # log lines) to whichever channel's marker actually fired for this
+        # run. chart_data.markers persists network_detect_at/host_detect_at
+        # per report, exactly the same distinction the live incident view's
+        # own timeline already draws on (NET vs HOST badges).
+        _dq = metrics.get("detection_quality") or {}
+        _markers_for_dq = (data.get("chart_data") or {}).get("markers") or {}
+        _channel = "falco" if _markers_for_dq.get("host_detect_at") and not _markers_for_dq.get("network_detect_at") else "network"
+        for _k in ("tp", "fp", "fn", "tn"):
+            _v = _dq.get(_k)
+            if isinstance(_v, (int, float)):
+                detector_stats[_channel][_k] += int(_v)
+
+        for actor in ((data.get("tapcd") or {}).get("actor_profiles") or []):
+            if not isinstance(actor, dict):
+                continue
+            actor_with_meta = {**run_meta, **actor}
+            # Merge in the detector's own accumulated detected_source_ips
+            # (chart_data.markers.detected_source_ips), same fusion already
+            # applied client-side for the live/frozen incident panel (see
+            # experiment_live.html's renderIntelSummary) and for the
+            # topology's attacker-node list. actor.source_ips alone reflects
+            # only whichever IPs were visible at the moment that ONE profile
+            # log line was written — for a distributed attack whose profile
+            # line logged early, this showed 1 IP forever on the Dashboard's
+            # actor card even though the real campaign grew to 9-16 IPs.
+            _detected_ips = list(((data.get("chart_data") or {}).get("markers") or {}).get("detected_source_ips") or [])
+            # Same one-shot-snapshot problem as explainability below: for a
+            # run whose SCENARIO CONTAINERS ARE STILL UP (sustained attack,
+            # containers still up), chart_data.markers.detected_source_ips is
+            # frozen at whatever the fan-in detector had accumulated at
+            # report-snapshot time — a distributed attack keeps recruiting
+            # new source IPs for as long as it runs, so the frozen list
+            # under-counts. Prefer a fresh read of the detector's own live
+            # alert file in that case.
+            #
+            # Gated on the scenario's containers actually being alive, NOT on
+            # run.get("finished_at")/manual_stop/deleted: the auto-finalize
+            # window sets finished_at ~15-20s after act_at by design (the
+            # incident is considered "done" from the operator's point of
+            # view), but the underlying attack/detector/prep_pred containers
+            # in a shared scenario routinely keep running for their full
+            # attack_duration_seconds (often 1800s) afterward, still emitting
+            # real new evidence (more source IPs, SHAP explainability) the
+            # whole time. Gating on finished_at made this refresh stop
+            # working the moment auto-finalize was added, exactly when it
+            # was needed most — a "finished" incident's profile then never
+            # picked up explainability that legitimately arrived seconds
+            # later.
+            if _run_container_name(run, "victim") and _container_uptime_seconds(_run_container_name(run, "victim")) is not None:
+                try:
+                    _fresh_detected = _read_detected_source_ips(run.get("attack_started_at"))
+                    if _fresh_detected:
+                        _detected_ips = _fresh_detected
+                except Exception:
+                    pass
+            if _detected_ips:
+                _own_ips = list(actor.get("source_ips") or [])
+                actor_with_meta["source_ips"] = _detected_ips + [ip for ip in _own_ips if ip not in _detected_ips]
+            # The persisted report snapshot is taken once, shortly after Act —
+            # but prep_pred computes SHAP explainability in a background
+            # thread specifically so its ~4s cost never blocks Decide/Act
+            # (see prep_pred.py's compute_explainability_fields comment).
+            # For a sustained attack (containers/attack script kept running
+            # well past the snapshot, common in this codebase's experiments —
+            # attack_duration_seconds is routinely 1800s while the report is
+            # persisted within seconds of the first countermeasure), SHAP
+            # frequently finishes AFTER the snapshot was taken, so
+            # actor["explainability"] is permanently "-"/empty in the frozen
+            # report even though prep_pred keeps re-logging fresh, real SHAP
+            # results for the same actor_id for as long as the attack runs.
+            # If this run's scenario containers are still alive (see the
+            # source_ips fix just above for why finished_at is the wrong
+            # gate now that auto-finalize sets it ~15-20s after act_at, long
+            # before a sustained attack's containers actually stop) and this
+            # actor lacks explainability, re-tail prep_pred's current logs
+            # and pick up the latest match for this actor_id — same fusion
+            # principle as the source_ips merge just above.
+            if not str(actor.get("explainability") or "").strip() and _run_container_name(run, "victim") and _container_uptime_seconds(_run_container_name(run, "victim")) is not None:
+                try:
+                    _fresh_blob = _tail_logs("novadef-novadef_prep_pred-1", 400)
+                    _fresh_actor_id = str(actor.get("actor_id") or "")
+                    if _fresh_actor_id:
+                        for _fresh_line in reversed(_fresh_blob.splitlines()):
+                            if "Enriquecido (explainability)" not in _fresh_line or _fresh_actor_id not in _fresh_line:
+                                continue
+                            _fresh_parsed = _native_actor_profile_from_line(_fresh_line)
+                            if _fresh_parsed and str(_fresh_parsed.get("explainability") or "").strip():
+                                actor["explainability"] = _fresh_parsed["explainability"]
+                                if _fresh_parsed.get("explainability_all_fields_raw"):
+                                    actor["explainability_all_fields_raw"] = _fresh_parsed["explainability_all_fields_raw"]
+                                break
+                except Exception:
+                    pass
+            # "explainability" arrives as prep_pred's own compact SHAP string
+            # (e.g. "total_flows:+0.142|avg_flow_duration:+0.089") — parsed
+            # here into a list of {feature, contribution} so the frontend
+            # never has to split pipe/colon-delimited text itself.
+            _expl_raw = str(actor.get("explainability") or "").strip()
+            if _expl_raw:
+                _expl_parsed = []
+                for _pair in _expl_raw.split("|"):
+                    if ":" not in _pair:
+                        continue
+                    _fname, _fval = _pair.rsplit(":", 1)
+                    try:
+                        _expl_parsed.append({"feature": _fname, "contribution": float(_fval)})
+                    except ValueError:
+                        continue
+                if _expl_parsed:
+                    actor_with_meta["explainability"] = _expl_parsed
+            # Same parsing, but for the per-OTHER-ML-field SHAP explanations
+            # (Motivation/Knowledge/Attitude/Affiliation/Skills/RiskLevel/
+            # AutomationLevel) — raw format from prep_pred/misp_to_soarca is
+            # "Field1=feat:+val|feat:+val;Field2=feat:+val|..." (see
+            # ExplainabilityAllFields in prep_pred.py). Parsed into
+            # {FieldName: [{feature, contribution}, ...]} so the frontend can
+            # show "why this Motivation/RiskLevel/etc value" per field,
+            # exactly like it already does for the Profile classification.
+            _expl_all_raw = str(actor.get("explainability_all_fields_raw") or "").strip()
+            if _expl_all_raw:
+                _expl_by_field: dict[str, list[dict[str, Any]]] = {}
+                for _field_segment in _expl_all_raw.split(";"):
+                    if "=" not in _field_segment:
+                        continue
+                    _fname_field, _fpairs_raw = _field_segment.split("=", 1)
+                    _fname_field = _fname_field.strip()
+                    if not _fname_field:
+                        continue
+                    _parsed_pairs = []
+                    for _pair in _fpairs_raw.split("|"):
+                        if ":" not in _pair:
+                            continue
+                        _pname, _pval = _pair.rsplit(":", 1)
+                        try:
+                            _parsed_pairs.append({"feature": _pname, "contribution": float(_pval)})
+                        except ValueError:
+                            continue
+                    if _parsed_pairs:
+                        _expl_by_field[_fname_field] = _parsed_pairs
+                if _expl_by_field:
+                    actor_with_meta["explainabilityByField"] = _expl_by_field
+            profiles.append(actor_with_meta)
+
+        misp_obj = (data.get("misp") or {}).get("event_object") or {}
+        if misp_obj.get("event"):
+            misp_events.append({
+                **run_meta,
+                "event": misp_obj.get("event"),
+                "attributes": misp_obj.get("attributes") or [],
+                "tags": (data.get("misp") or {}).get("event_detail_lines") or [],
+            })
+
+        if isinstance(a_decide.get("d3fend_alignment_score"), (int, float)):
+            decide_alignment.append(float(a_decide["d3fend_alignment_score"]))
+        # "Time to decide" now means the Decide phase's OWN duration
+        # (profile completion -> decision made), consistent with every
+        # other "Time to X" in the Hub — not "time since the attack
+        # started" (time_to_decide_from_attack), which kept growing the
+        # longer Observe/Orient took even though Decide itself fires almost
+        # instantly by design ("trigger SOARCA immediately — do NOT wait
+        # for MISP enrichment").
+        if isinstance(_stable_id_ts, (int, float)) and isinstance(_decide_ts, (int, float)) and _decide_ts >= _stable_id_ts:
+            decide_time.append(float(_decide_ts) - float(_stable_id_ts))
+        cm = data.get("countermeasure") or {}
+        if cm.get("selected"):
+            decisions.append({
+                **run_meta,
+                "selected": cm.get("selected"),
+                "justification": cm.get("justification"),
+                "d3fend_basis": cm.get("d3fend_basis"),
+                "playbook_correct": a_decide.get("playbook_correct"),
+                "alignment_score": a_decide.get("d3fend_alignment_score"),
+            })
+
+        if isinstance(a_act.get("response_error_count"), (int, float)):
+            act_errors.append(float(a_act["response_error_count"]))
+        if isinstance(a_act.get("traffic_reduction_percent"), (int, float)):
+            act_traffic_reduction.append(float(a_act["traffic_reduction_percent"]))
+        resp_eff = (metrics.get("response_effectiveness") or {})
+        if isinstance(resp_eff.get("response_success_score"), (int, float)):
+            act_success.append(float(resp_eff["response_success_score"]))
+        if cm.get("execution_confirmed") is not None or a_act.get("countermeasure_applied") is not None:
+            executions.append({
+                **run_meta,
+                "countermeasure_type": a_act.get("countermeasure_type"),
+                "ssh_execution_success": a_act.get("ssh_execution_success"),
+                "pre_attack_pps_baseline": a_act.get("pre_attack_pps_baseline"),
+                "post_countermeasure_pps": a_act.get("post_countermeasure_pps"),
+                "post_countermeasure_blocked_pps": a_act.get("post_countermeasure_blocked_pps"),
+                "traffic_reduction_percent": a_act.get("traffic_reduction_percent"),
+                "soarca_excerpt": cm.get("soarca_excerpt"),
+                "execution_confirmed": cm.get("execution_confirmed"),
+            })
+
+        dq = metrics.get("detection_quality") or {}
+        detection_tp_total += int(dq.get("tp") or 0)
+        detection_fp_total += int(dq.get("fp") or 0)
+        detection_fn_total += int(dq.get("fn") or 0)
+        detection_tn_total += int(dq.get("tn") or 0)
+
+        sb = (metrics.get("article_e2e_ooda") or {}).get("stacked_bar_row") or {}
+        if sb:
+            exp_key = str(run.get("experiment") or sb.get("experiment") or "unknown")
+            stacked_bar_by_experiment.setdefault(exp_key, []).append(sb)
+
+        # Falco leaderboard: each traffic sample carries its own top-5 rules
+        # (falco_top_rules, /api/traffic), but nothing rolls those up across
+        # runs today. traffic_panel isn't persisted on the report, so this
+        # reads the same live TRAFFIC_SERIES the dashboard already samples
+        # from, keyed by this run's own run_id.
+        with LOCK:
+            run_series = list(TRAFFIC_SERIES.get(str(run.get("run_id") or ""), []))
+        for sample in run_series[-50:]:
+            for rule_hit in (sample.get("falco_top_rules") or []):
+                rule_name = str((rule_hit or {}).get("rule") or "").strip()
+                if not rule_name:
+                    continue
+                falco_rule_counts[rule_name] = falco_rule_counts.get(rule_name, 0) + int((rule_hit or {}).get("count") or 0)
+
+        sid = str(run.get("scenario_id") or "").strip()
+        if sid:
+            duration = None
+            started_at = run.get("started_at")
+            finished_at = run.get("finished_at")
+            if isinstance(started_at, (int, float)) and isinstance(finished_at, (int, float)) and finished_at >= started_at:
+                duration = float(finished_at) - float(started_at)
+            e2e = sb.get("e2e_s") if sb else None
+            # Every run of this scenario, not just the most recent — this
+            # used to overwrite scenario_rows[sid] each time a later-started
+            # run was seen, silently discarding all earlier runs of the same
+            # scenario. That made the Dashboard's scenario comparison show
+            # exactly one row per scenario no matter how many incidents it
+            # actually had, and made per-scenario run history/comparison
+            # impossible from this endpoint alone.
+            countermeasure_label = None
+            cm_sel = str((data.get("countermeasure") or {}).get("selected") or "").strip()
+            if cm_sel and cm_sel not in {"-", "Pending / no decision yet", "No new action (existing incident/countermeasure reused)"}:
+                countermeasure_label = cm_sel
+            scenario_runs_by_id.setdefault(sid, []).append({
+                "scenario_id": sid,
+                "run_id": run.get("run_id"),
+                "experiment": run.get("experiment"),
+                "duration_sec": e2e if e2e else duration,
+                "playbook_correct": a_decide.get("playbook_correct"),
+                "running": bool(run.get("running")),
+                "started_at": started_at,
+                "last_traffic_sample_at": run.get("last_traffic_sample_at"),
+                "countermeasure": countermeasure_label,
+            })
+
+    def _avg(vals: list[float]) -> float | None:
+        return float(statistics.mean(vals)) if vals else None
+
+    top_cpu = sorted(
+        ((name, _avg(vals)) for name, vals in resource_cpu_by_container.items() if vals),
+        key=lambda kv: kv[1] or 0,
+        reverse=True,
+    )[:5]
+
+    stacked_bar_avg_by_experiment = []
+    for exp_key, rows in sorted(stacked_bar_by_experiment.items()):
+        seg_keys = ["observe_s", "orient_s", "enrich_s", "decide_s", "act_s", "e2e_s"]
+        avg_row = {"experiment": exp_key}
+        for seg in seg_keys:
+            vals = [float(r.get(seg) or 0.0) for r in rows if isinstance(r.get(seg), (int, float))]
+            avg_row[seg] = round(_avg(vals) or 0.0, 3)
+        avg_row["sample_count"] = len(rows)
+        stacked_bar_avg_by_experiment.append(avg_row)
+
+    falco_leaderboard = sorted(
+        ({"rule": name, "count": count} for name, count in falco_rule_counts.items()),
+        key=lambda r: -r["count"],
+    )[:8]
+
+    # Flat, all-runs comparison table — kept for any consumer still reading
+    # the old scenario_comparison shape, but now includes EVERY run of every
+    # scenario (see scenario_runs_by_id's own comment above) instead of just
+    # the single most recent one.
+    scenario_comparison = sorted(
+        (run_row for rows in scenario_runs_by_id.values() for run_row in rows),
+        key=lambda r: str(r.get("run_id") or ""),
+        reverse=True,
+    )[:40]
+
+    # Per-scenario aggregate for the Dashboard's scenario summary cards: one
+    # entry per scenario (not per run), with the counts/timestamps/most
+    # recent countermeasure a card needs, plus its own full run list (already
+    # sorted latest-first) for the click-to-expand detail table.
+    scenario_summary = []
+    for sid, rows in scenario_runs_by_id.items():
+        rows_sorted = sorted(rows, key=lambda r: float(r.get("started_at") or 0), reverse=True)
+        latest = rows_sorted[0] if rows_sorted else {}
+        any_running = any(bool(r.get("running")) for r in rows_sorted)
+        last_activity_candidates = [
+            float(r.get("last_traffic_sample_at") or r.get("started_at") or 0) for r in rows_sorted
+        ]
+        scenario_summary.append({
+            "scenario_id": sid,
+            "runs_total": len(rows_sorted),
+            "running": any_running,
+            "last_activity_at": max(last_activity_candidates) if last_activity_candidates else None,
+            "latest_experiment": latest.get("experiment"),
+            "latest_countermeasure": latest.get("countermeasure"),
+            "runs": [{k: v for k, v in r.items() if k != "scenario_id"} for r in rows_sorted],
+        })
+    scenario_summary.sort(key=lambda s: float(s.get("last_activity_at") or 0), reverse=True)
+    scenario_summary = scenario_summary[:20]
+
+    # Repeat-offender rollup: group by attacker identity (attack_fp when
+    # available — a stable fingerprint of the actual attack pattern; falls
+    # back to the first source IP when a run's profile lacks one) across
+    # EVERY scenario in history, not just the current scope. The goal is
+    # spotting "this IP/fingerprint has hit multiple different victims" —
+    # something no per-scenario view can show by definition.
+    _offender_rollup: dict[str, dict[str, Any]] = {}
+    for _run in all_runs_unfiltered:
+        _report_id = str(_run.get("report_id") or "").strip()
+        if not _report_id:
+            continue
+        _rdata = _load_incident_report(_report_id)
+        if not _rdata:
+            continue
+        _actors = ((_rdata.get("tapcd") or {}).get("actor_profiles") or [])
+        if not _actors:
+            continue
+        _lead = _actors[0]
+        if not isinstance(_lead, dict):
+            continue
+        _fp_match = re.search(r"attack_fp=([0-9a-f]+)", str(_lead.get("raw_profile_line") or ""))
+        _src_ips = list(_lead.get("source_ips") or [])
+        _key = f"fp:{_fp_match.group(1)}" if _fp_match else (f"ip:{_src_ips[0]}" if _src_ips else None)
+        if not _key:
+            continue
+        _victim = str(_lead.get("target") or _lead.get("preferred_target") or "").strip()
+        _started = float(_run.get("started_at") or 0) or None
+        _entry = _offender_rollup.setdefault(_key, {
+            "display_ip": _src_ips[0] if _src_ips else _key.split(":", 1)[-1],
+            "victims": set(),
+            "incident_count": 0,
+            "first_seen": None,
+            "last_seen": None,
+        })
+        if _victim:
+            _entry["victims"].add(_victim)
+        _entry["incident_count"] += 1
+        if _started:
+            _entry["first_seen"] = _started if _entry["first_seen"] is None else min(_entry["first_seen"], _started)
+            _entry["last_seen"] = _started if _entry["last_seen"] is None else max(_entry["last_seen"], _started)
+    repeat_offenders = sorted(
+        (
+            {
+                "ip": v["display_ip"],
+                "victims": sorted(v["victims"]),
+                "incident_count": v["incident_count"],
+                "first_seen": v["first_seen"],
+                "last_seen": v["last_seen"],
+                "span_sec": (v["last_seen"] - v["first_seen"]) if (v["first_seen"] and v["last_seen"]) else None,
+            }
+            for v in _offender_rollup.values()
+            if len(v["victims"]) > 1 or v["incident_count"] > 1
+        ),
+        key=lambda o: (len(o["victims"]), o["incident_count"]),
+        reverse=True,
+    )[:15]
+
+    def _detector_quality(_stats: dict[str, int]) -> dict[str, Any]:
+        _tp, _fp, _fn = _stats["tp"], _stats["fp"], _stats["fn"]
+        return {
+            **_stats,
+            "precision": round(_tp / (_tp + _fp), 4) if (_tp + _fp) else None,
+            "recall": round(_tp / (_tp + _fn), 4) if (_tp + _fn) else None,
+            "fp_rate": round(_fp / (_tp + _fp), 4) if (_tp + _fp) else None,
+        }
+    detector_quality_by_channel = {
+        "network": _detector_quality(detector_stats["network"]),
+        "falco": _detector_quality(detector_stats["falco"]),
+    }
+
+    return jsonify({
+        "scenario_id": scenario_filter or None,
+        "runs_total": len(runs),
+        "reports_with_data": seen_reports,
+        "attack_timestamps": attack_timestamps,
+        "observe": {
+            "source_coverage_ratio_avg": _avg(observe_coverage),
+            "telemetry_signal_density_lps_avg": _avg(observe_density),
+            "telemetry_gap_count_avg": _avg(observe_gaps),
+            "top_cpu_containers": [{"container": n, "cpu_percent_avg": v} for n, v in top_cpu],
+            "events": observe_events,
+            "telemetry_series": sorted(observe_series, key=lambda p: float(p.get("ts") or 0))[-1500:],
+        },
+        "orient": {
+            "profile_completeness_ratio_avg": _avg(orient_completeness),
+            "time_to_orient_sec_avg": _avg(orient_time_to_orient),
+            "profiles": profiles,
+            "misp_events": misp_events,
+            "detector_quality_by_channel": detector_quality_by_channel,
+            "repeat_offenders": repeat_offenders,
+        },
+        "decide": {
+            "d3fend_alignment_score_avg": _avg(decide_alignment),
+            "time_to_decide_sec_avg": _avg(decide_time),
+            "decisions": decisions,
+        },
+        "act": {
+            "response_success_score_avg": _avg(act_success),
+            "response_error_count_avg": _avg(act_errors),
+            "traffic_reduction_percent_avg": _avg(act_traffic_reduction),
+            "executions": executions,
+        },
+        "detection_quality": (lambda _tp, _fp, _fn, _tn: {
+            "tp": _tp, "fp": _fp, "fn": _fn, "tn": _tn,
+            "precision_avg": round(_tp / (_tp + _fp), 4) if (_tp + _fp) else None,
+            "recall_avg": round(_tp / (_tp + _fn), 4) if (_tp + _fn) else None,
+            "f1_score_avg": (
+                round((2 * _tp) / (2 * _tp + _fp + _fn), 4) if (2 * _tp + _fp + _fn) else None
+            ),
+            "accuracy_avg": (
+                round((_tp + _tn) / (_tp + _tn + _fp + _fn), 4) if (_tp + _tn + _fp + _fn) else None
+            ),
+        })(detection_tp_total, detection_fp_total, detection_fn_total, detection_tn_total),
+        "stacked_bar_by_experiment": stacked_bar_avg_by_experiment,
+        "falco_leaderboard": falco_leaderboard,
+        "scenario_comparison": scenario_comparison,
+        "scenario_summary": scenario_summary,
+        "mitre_coverage": {
+            "attack_observed": attack_observed,
+            "attack_to_defend": {k: sorted(v) for k, v in attack_to_defend.items()},
+        },
+        "soarca_executions": soarca_execution_summaries,
+    })
+
+
 @app.get("/api/scenarios")
 def list_scenarios() -> Any:
     catalog = _load_scenario_catalog()
@@ -8672,7 +11408,16 @@ def list_scenarios() -> Any:
 @app.post("/api/scenarios")
 def create_scenario() -> Any:
     payload = request.get_json(silent=True) or {}
-    scenario_id = _sanitize_scenario_id(payload.get("scenario_id") or payload.get("id"))
+    scenario_id_raw = payload.get("scenario_id") or payload.get("id")
+    # Without an explicit scenario_id, _sanitize_scenario_id("") falls back to
+    # the literal token "run" (its generic empty-input default), which would
+    # make every scenario created from the GUI's "New scenario" form collide
+    # on the same catalog entry/containers. Auto-generate a unique id here,
+    # same pattern /api/run already uses when scenario_id is omitted.
+    if scenario_id_raw:
+        scenario_id = _sanitize_scenario_id(scenario_id_raw)
+    else:
+        scenario_id = _sanitize_scenario_id(f"auto-{uuid.uuid4().hex[:10]}")
     display_name = str(payload.get("display_name") or payload.get("name") or scenario_id).strip() or scenario_id
     template = str(payload.get("template") or "default").strip() or "default"
 
@@ -8700,6 +11445,45 @@ def stop_scenario(scenario_id: str) -> Any:
     entry = dict(catalog.get(sid) or {})
     if not entry:
         return jsonify({"ok": False, "error": "scenario_id not found"}), 404
+
+    # This endpoint tears down the scenario's victim/attacker containers
+    # unconditionally below (that IS its job — stop the whole scenario).
+    # But it used to do so WITHOUT marking any still-"running" run of this
+    # scenario as stopped first, unlike stop_run's own manual_stop/running/
+    # finished_at update. That left RUN_HISTORY with a run permanently
+    # showing running=True after its containers were already destroyed — a
+    # zombie state entry, not a container leak, but one that corrupts every
+    # KPI/report gate that reads run_item.get("running"). Mirror stop_run's
+    # own bookkeeping for every active run of this scenario before touching
+    # any container.
+    with LOCK:
+        active_run_ids = [
+            str(item.get("run_id") or "").strip()
+            for item in RUN_HISTORY
+            if str(item.get("scenario_id") or "").strip() == sid and item.get("running") and not item.get("deleted")
+        ]
+    for active_run_id in active_run_ids:
+        if not active_run_id:
+            continue
+        active_run_item = _history_item(active_run_id)
+        if not active_run_item:
+            continue
+        now = time.time()
+        _update_history(
+            active_run_id,
+            {
+                "manual_stop": True,
+                "running": False,
+                "stopped_at": now,
+                "finished_at": active_run_item.get("finished_at") or now,
+            },
+        )
+        try:
+            _signal_run_stop(active_run_item)
+            _stop_benign_noise(active_run_id)
+            _snapshot_run_logs(active_run_id)
+        except Exception:
+            pass
 
     victim = str(entry.get("victim_container_name") or "").strip()
     attacker = str(entry.get("attacker_container_name") or "").strip()
@@ -8836,7 +11620,43 @@ def delete_scenario(scenario_id: str) -> Any:
         except Exception:
             pass
 
+    def _discover_orphaned_report_ids() -> set[str]:
+        """Find report_ids that belong to this scenario but whose run is no
+        longer in RUN_HISTORY (e.g. the API process restarted mid-campaign,
+        which resets RUN_HISTORY in memory but leaves the report files and
+        the scenario's own artifacts/reports/<report_id>/ marker on disk).
+        related_runs below only catches runs the in-memory history still
+        knows about, so without this a scenario delete silently left those
+        reports as permanent orphans in REPORTS_DIR — this is what required
+        manually deleting report directories by hand earlier in this
+        session's cleanup steps. _persist_run_artifacts() writes exactly one
+        such marker directory per report this scenario ever produced, so
+        listing them here (BEFORE _purge_scenario_runtime_root deletes the
+        scenario tree they live in) recovers the full set even with no
+        RUN_HISTORY entry at all."""
+        found: set[str] = set()
+        try:
+            seed_run_id = _scenario_seed_run_id(sid)
+            scenario_root = SCENARIO_ROOT / f"novadef-{seed_run_id}"
+            reports_marker_dir = scenario_root / "artifacts" / "reports"
+            if reports_marker_dir.is_dir():
+                for child in reports_marker_dir.iterdir():
+                    if child.is_dir():
+                        found.add(child.name)
+        except Exception:
+            pass
+        return found
+
     def _cleanup_scenario_async() -> None:
+        orphaned_report_ids = _discover_orphaned_report_ids() - {
+            str(item.get("report_id") or "").strip() for item in related_runs
+        }
+        for report_id in orphaned_report_ids:
+            try:
+                _force_remove_tree(REPORTS_DIR / report_id)
+            except Exception:
+                pass
+
         for run_item in related_runs:
             rid = str(run_item.get("run_id") or "").strip()
             if not rid:
@@ -8983,8 +11803,12 @@ def delete_scenario(scenario_id: str) -> Any:
     _persist_runtime_state()
 
     def _background_cleanup() -> None:
-        _purge_scenario_runtime_root()
+        # _cleanup_scenario_async's orphaned-report discovery reads
+        # artifacts/reports/<report_id>/ markers under the scenario's own
+        # runtime tree -- it must run BEFORE _purge_scenario_runtime_root
+        # deletes that same tree, or it always finds an empty set.
         _cleanup_scenario_async()
+        _purge_scenario_runtime_root()
 
     threading.Thread(target=_background_cleanup, daemon=True).start()
 
@@ -9017,8 +11841,16 @@ def stop_run(run_id: str) -> Any:
     _snapshot_run_logs(run_id)
     print(f"[api] stop_run: appending stopped sample", flush=True)
     _append_stopped_run_sample(run_id, container_name=_run_container_name(run_item, "victim"))
-    print(f"[api] stop_run: cleaning up resources", flush=True)
-    _cleanup_run_resources(run_item, remove_containers=True, remove_network=False, remove_artifacts=False)
+    # A shared/persistent scenario's victim+attacker containers are meant to
+    # outlive any single incident (a scenario can host several incidents in
+    # sequence — see _ensure_persistent_scenario). Removing them here would
+    # tear down the very stack the scenario's NEXT run needs, forcing a full
+    # re-provision (and a real race window where that next run's attack
+    # launch can hit a container that is still mid-removal). Only a run that
+    # got its own dedicated, non-shared stack should have it torn down on stop.
+    stop_should_remove_containers = not bool(run_item.get("scenario_shared"))
+    print(f"[api] stop_run: cleaning up resources (remove_containers={stop_should_remove_containers})", flush=True)
+    _cleanup_run_resources(run_item, remove_containers=stop_should_remove_containers, remove_network=False, remove_artifacts=False)
     print(f"[api] stop_run: refreshing state", flush=True)
     _refresh_global_runtime_state(run_id)
     print(f"[api] stop_run: completed successfully for {run_id}", flush=True)
@@ -9038,10 +11870,17 @@ def delete_run(run_id: str) -> Any:
     _snapshot_run_logs(run_id)
     _purge_misp_events(event_ids)
     _purge_tapcd_actor_profiles(actor_ids)
+    # Same reasoning as stop_run's own stop_should_remove_containers guard:
+    # a shared/persistent scenario's victim+attacker containers can be in use
+    # by ANOTHER run of the same scenario (past or still active) — tearing
+    # them down here to delete just THIS run's history entry would destroy
+    # the stack a sibling run still needs. Only remove containers/network
+    # when this run had its own dedicated, non-shared stack.
+    delete_should_remove_infra = not bool(run_item.get("scenario_shared"))
     _cleanup_run_resources(
         run_item,
-        remove_containers=True,
-        remove_network=True,
+        remove_containers=delete_should_remove_infra,
+        remove_network=delete_should_remove_infra,
         remove_artifacts=True,
     )
     for run_root in _artifact_roots_for_run(run_id):
@@ -9049,6 +11888,20 @@ def delete_run(run_id: str) -> Any:
             _force_remove_tree(run_root)
         except Exception:
             pass
+    # _artifact_roots_for_run only covers the scenario runtime tree, not
+    # REPORTS_DIR — delete_scenario (below) already removes the report
+    # directory for every run it cleans up, but this single-run endpoint
+    # never did, so a deleted run's incident_report.json (and the MISP
+    # event_id/actor_id it records) stuck around on disk indefinitely even
+    # though _purge_misp_events above already used it and the run itself
+    # is now "forgotten". Remove it here too, after event_ids/actor_ids have
+    # already been read from it (order matters — see the same ordering in
+    # _cleanup_scenario_async's per-run loop).
+    try:
+        if report_id:
+            _force_remove_tree(REPORTS_DIR / report_id)
+    except Exception:
+        pass
     _forget_run_state(run_id, report_id=report_id)
     _persist_runtime_state()
     _refresh_global_runtime_state(None)
@@ -9125,7 +11978,7 @@ def progress() -> Any:
         profile_hit = detect_hit and any(k in logs["profile"].lower() for k in PROFILE_EVIDENCE_KEYWORDS)
         enrich_hit = profile_hit and any(k in logs["enrich"].lower() for k in ["nuevo evento misp", "event_id", "misp event", "publish", "created"])
         decide_hit = enrich_hit and any(k in logs["act"].lower() for k in ["d3fend", "playbook", "selected", "countermeasure"])
-        act_hit = decide_hit and any(k in logs["act"].lower() for k in ["playbook de aislamiento ejecutado", "playbook ejecutado", "done_block_ip", "iptables", "response applied", "response executed", "executor", "isolation", "terminate", "restor", "response"])
+        act_hit = decide_hit and any(k in logs["act"].lower() for k in ["playbook de aislamiento ejecutado", "isolation playbook executed", "playbook ejecutado", "playbook executed", "done_block_ip", "iptables", "response applied", "response executed", "executor", "isolation", "terminate", "restor", "response"])
     elif experiment == "exp3":
         observe_hit = observe_ready
         attack_has_started = attack_since_ts is not None
@@ -9136,7 +11989,7 @@ def progress() -> Any:
         profile_hit = detect_hit and any(k in logs["profile"].lower() for k in PROFILE_EVIDENCE_KEYWORDS)
         enrich_hit = profile_hit and any(k in logs["enrich"].lower() for k in ["nuevo evento misp", "event_id", "misp event", "publish", "created"])
         decide_hit = enrich_hit and any(k in logs["act"].lower() for k in ["d3fend", "playbook", "selected", "countermeasure"])
-        act_hit = decide_hit and any(k in logs["act"].lower() for k in ["playbook ejecutado", "done_block_ip", "iptables", "executor", "applied", "isolation", "terminate", "response"])
+        act_hit = decide_hit and any(k in logs["act"].lower() for k in ["playbook ejecutado", "playbook executed", "done_block_ip", "iptables", "executor", "applied", "isolation", "terminate", "response"])
     else:
         observe_hit = observe_ready
         attack_has_started = attack_since_ts is not None
@@ -9144,7 +11997,7 @@ def progress() -> Any:
         profile_hit = detect_hit and any(k in logs["profile"].lower() for k in PROFILE_EVIDENCE_KEYWORDS)
         enrich_hit = profile_hit and any(k in logs["enrich"].lower() for k in ["nuevo evento misp", "event_id", "misp event", "publish", "created"])
         decide_hit = enrich_hit and any(k in logs["act"].lower() for k in ["d3fend", "playbook", "selected", "countermeasure"])
-        act_hit = decide_hit and any(k in logs["act"].lower() for k in ["playbook ejecutado", "done_block_ip", "iptables", "executor", "applied", "block", "lock", "isolation", "response"])
+        act_hit = decide_hit and any(k in logs["act"].lower() for k in ["playbook ejecutado", "playbook executed", "done_block_ip", "iptables", "executor", "applied", "block", "lock", "isolation", "response"])
 
     # When SOARCA isolation is first detected (act_hit=True), stop the attacker
     # noise so that rx_packets drops visibly on the victim's Telegraf metrics.
@@ -9219,7 +12072,7 @@ def progress() -> Any:
             profile_done = bool((tapcd_panel.get("profile_details_extracted") or 0) > 0 or (tapcd_panel.get("profile_mentions") or 0) > 0)
             enrich_done = bool((misp_panel.get("event_details_extracted") or 0) > 0 or (misp_panel.get("event_ids_detected_in_logs") or []))
             decide_done = bool(cm_selected and cm_selected != "-")
-            act_done = bool(response_metrics.get("execution_present")) or any(k in cm_excerpt for k in ["playbook ejecutado", "applied", "executor", "response"])
+            act_done = bool(response_metrics.get("execution_present")) or any(k in cm_excerpt for k in ["playbook ejecutado", "playbook executed", "applied", "executor", "response"])
 
             for st in stages:
                 if st["key"] == "profile":
@@ -9231,6 +12084,277 @@ def progress() -> Any:
                 elif st["key"] == "act":
                     st["done"] = act_done
     return jsonify({"experiment": experiment, "stages": stages})
+
+
+def _resolve_run_and_victim(scenario_id: str, run_id: str) -> tuple[dict[str, Any] | None, str, str]:
+    """Shared by /api/observe_live and /api/observe_live_stream: find the run
+    for this scope, then its victim container name and REAL monitored-network
+    IP (see the caller's own comment on why run_item.victim_ip is the wrong
+    interface)."""
+    run_item = None
+    if run_id:
+        run_item = _history_item(run_id)
+    elif scenario_id:
+        with LOCK:
+            candidates = [
+                dict(item) for item in RUN_HISTORY
+                if not item.get("deleted") and str(item.get("scenario_id") or "") == scenario_id
+            ]
+        candidates.sort(key=lambda r: float(r.get("started_at") or 0), reverse=True)
+        run_item = candidates[0] if candidates else None
+    if not run_item:
+        with LOCK:
+            current_run_id = str(STATE.get("current_run_id") or "")
+        run_item = _history_item(current_run_id) if current_run_id else None
+    if not run_item:
+        return None, "", ""
+    victim_name = _run_container_name(run_item, "victim")
+    report_panel = run_item.get("report_panel") or {}
+    _actors = ((report_panel.get("tapcd") or {}).get("actor_profiles") or [])
+    _lead_actor = _actors[0] if _actors else {}
+    victim_ip = str(_lead_actor.get("target") or _lead_actor.get("preferred_target") or run_item.get("victim_ip") or "").strip()
+    return run_item, victim_name, victim_ip
+
+
+@app.get("/api/observe_live_stream")
+def observe_live_stream() -> Any:
+    """
+    True real-time packet streaming for the Observe tab, one line per
+    packet as tcpdump captures it — the polling-based /api/observe_live
+    (a fresh ~2s tcpdump snapshot every 3s) still looked like batches
+    arriving, not a live feed. Server-Sent Events keep one long-lived
+    tcpdump process running inside the victim container (docker-py's
+    exec_run(stream=True) yields output chunks as the process produces
+    them) and forward each captured line to the browser the moment it's
+    captured, with no polling interval in between.
+    """
+    scenario_id = request.args.get("scenario_id", "").strip()
+    run_id = request.args.get("run_id", "").strip()
+    run_item, victim_name, victim_ip = _resolve_run_and_victim(scenario_id, run_id)
+    if not run_item or not victim_name:
+        return jsonify({"ok": False, "error": "no run found for this scope"}), 404
+
+    def _generate():
+        try:
+            victim_cont = DOCKER_CLIENT.containers.get(victim_name)
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+            return
+        yield f"event: meta\ndata: {json.dumps({'victim_ip': victim_ip, 'victim_container': victim_name})}\n\n"
+        try:
+            victim_cont.exec_run(
+                ["sh", "-lc", "command -v tcpdump >/dev/null 2>&1 || apk add --no-cache tcpdump >/dev/null 2>&1 || true"],
+                stdout=True, stderr=True,
+            )
+            # -l: line-buffered stdout, so each packet line is flushed
+            # individually instead of tcpdump buffering a batch — required
+            # for this to actually stream line-by-line rather than in chunks.
+            # exec_run(stream=True) returns (exit_code_placeholder, generator);
+            # the generator itself yields raw stdout byte chunks as the
+            # process produces them (no socket=True needed for that).
+            _, output_gen = victim_cont.exec_run(
+                ["sh", "-lc", "tcpdump -i eth1 -n -l -tttt 2>/dev/null"],
+                stdout=True, stderr=False, stream=True,
+            )
+            buf = b""
+            deadline = time.time() + 120.0  # hard cap: one browser tab's EventSource reconnects on its own
+            for chunk in output_gen:
+                if time.time() > deadline:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="ignore").strip()
+                    if text:
+                        yield f"data: {json.dumps({'line': text})}\n\n"
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+
+    resp = Response(_generate(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
+@app.get("/api/observe_live")
+def observe_live() -> Any:
+    """
+    Raw, real-time evidence for the Hub's Observe tab: the actual packets
+    NOVADEF's own detector saw arrive at the victim (after the host's
+    iptables filter already ran — network_intrusion_detector_novadef only
+    ever sees a packet if iptables let it through the interface it's
+    listening on), recent Falco host events, and the victim container's
+    current CPU/memory. Everything here is read live, not from a frozen
+    report snapshot — this is the raw log tail the operator asked for
+    instead of an aggregated chart.
+    """
+    scenario_id = request.args.get("scenario_id", "").strip()
+    run_id = request.args.get("run_id", "").strip()
+    run_item, victim_name, victim_ip = _resolve_run_and_victim(scenario_id, run_id)
+    if not run_item:
+        return jsonify({"ok": False, "error": "no run found for this scope"}), 404
+
+    # Raw packets are now streamed live via /api/observe_live_stream (SSE) —
+    # a fresh short tcpdump snapshot here every poll still looked like
+    # batches arriving rather than a real-time feed, which is what the
+    # operator asked for. This endpoint keeps CPU/RAM/Falco/telemetry only.
+    falco_lines: list[str] = []
+    try:
+        falco_cont = DOCKER_CLIENT.containers.get("falco_novadef")
+        res = falco_cont.exec_run(
+            ["sh", "-lc", "tail -n 60 /var/log/falco_events.json 2>/dev/null || true"],
+            stdout=True, stderr=True,
+        )
+        raw = (res.output or b"").decode("utf-8", errors="ignore")
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            falco_lines.append({
+                "time": obj.get("time") or obj.get("output_fields", {}).get("evt.time"),
+                "rule": obj.get("rule"),
+                "priority": obj.get("priority"),
+                "output": obj.get("output"),
+            })
+    except Exception:
+        pass
+
+    host_stats: dict[str, Any] = {}
+    if victim_name:
+        try:
+            host_stats = (_docker_runtime_stats([victim_name]) or {}).get(victim_name) or {}
+        except Exception:
+            host_stats = {}
+
+    # Detection events for the unified timeline — network_intrusion_detector_
+    # novadef's own compact per-alert log lines, distinct from the raw
+    # tcpdump packet stream (that's every packet; this is only the lines
+    # where the detector itself flagged something).
+    detect_events: list[dict[str, Any]] = []
+    try:
+        detector_blob = _tail_logs("network_intrusion_detector_novadef", 200)
+        _detect_ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s*-\s*\w+\s*-\s*(.*)$")
+        for ln in detector_blob.splitlines():
+            ln = ln.strip()
+            if not ln or not (victim_ip and victim_ip in ln):
+                continue
+            m = _detect_ts_re.match(ln)
+            if not m:
+                continue
+            detect_events.append({"time": m.group(1), "message": m.group(2)})
+    except Exception:
+        pass
+
+    # Live telemetry series for the Observe tab's own chart — this endpoint
+    # already polls fast (every 3s) while the operator has this tab open, so
+    # the chart can redraw from THIS response instead of waiting on
+    # /api/ooda_summary's slower 8s refresh (which also only reflects the
+    # frozen, once-per-run report snapshot for older/finished runs).
+    try:
+        traffic_panel = _traffic_payload_for_run(str(run_item.get("run_id") or ""), run_item)
+        _full_series = list(traffic_panel.get("series") or [])
+        # A fixed POINT count (e.g. "last 180") of this series is unstable
+        # across polls: _traffic_payload_for_run anchors its window to the
+        # whole attack (which can run for 1800s) and the real sample cadence
+        # is uneven (dense right after the on-demand sampler fires, sparse
+        # otherwise), so "the last 180 points" can span anywhere from a few
+        # seconds to twenty minutes depending on exactly when this request
+        # landed — the chart's x-axis range jumped wildly between ticks
+        # because of this, not because the underlying data was actually
+        # changing that fast. Use a fixed TIME window instead (last 3
+        # minutes of real wall-clock time) so consecutive polls only differ
+        # by genuinely new samples sliding in, not by a different-sized
+        # slice of a highly variable-density series.
+        _window_sec = 180.0
+        _last_ts = float(_full_series[-1].get("ts") or 0.0) if _full_series else 0.0
+        _cutoff = _last_ts - _window_sec
+        telemetry_series = [
+            {
+                "ts": p.get("ts"),
+                "rx_packets": p.get("rx_packets"),
+                "falco_signal_delta": p.get("falco_signal_delta"),
+                "cpu_percent": p.get("cpu_percent"),
+                "memory_percent": p.get("memory_percent"),
+            }
+            for p in _full_series
+            if float(p.get("ts") or 0.0) >= _cutoff
+        ]
+    except Exception:
+        telemetry_series = []
+
+    return jsonify({
+        "ok": True,
+        "run_id": run_item.get("run_id"),
+        "scenario_id": run_item.get("scenario_id"),
+        "victim_container": victim_name,
+        "victim_ip": victim_ip,
+        "host_stats": host_stats,
+        "falco_events": falco_lines[-40:],
+        "detect_events": detect_events[-40:],
+        "telemetry_series": telemetry_series,
+    })
+
+
+@app.get("/api/observe_capture_pcap")
+def observe_capture_pcap() -> Any:
+    """
+    Capture N seconds of raw traffic on the victim's monitored interface to
+    a real .pcap file and return it for download — for offline analysis in
+    Wireshark, the same underlying tcpdump the raw packet log/stream already
+    use, just written to a file instead of parsed to text.
+    """
+    scenario_id = request.args.get("scenario_id", "").strip()
+    run_id = request.args.get("run_id", "").strip()
+    try:
+        duration = max(min(int(request.args.get("duration", "15")), 60), 5)
+    except ValueError:
+        duration = 15
+    run_item, victim_name, victim_ip = _resolve_run_and_victim(scenario_id, run_id)
+    if not run_item or not victim_name:
+        return jsonify({"ok": False, "error": "no run found for this scope"}), 404
+
+    try:
+        victim_cont = DOCKER_CLIENT.containers.get(victim_name)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    remote_path = "/tmp/novadef_observe_capture.pcap"
+    try:
+        victim_cont.exec_run(
+            ["sh", "-lc", "command -v tcpdump >/dev/null 2>&1 || apk add --no-cache tcpdump >/dev/null 2>&1 || true"],
+            stdout=True, stderr=True,
+        )
+        victim_cont.exec_run(["sh", "-lc", f"rm -f {remote_path}"], stdout=True, stderr=True)
+        exit_code, _ = victim_cont.exec_run(
+            ["sh", "-lc", f"timeout {duration + 1} tcpdump -i eth1 -w {remote_path} 2>/dev/null || true"],
+            stdout=True, stderr=True,
+        )
+        stream, _stat = victim_cont.get_archive(remote_path)
+        tar_bytes = b"".join(stream)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"capture failed: {exc}"}), 500
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tf:
+            member = tf.getmember(os.path.basename(remote_path))
+            pcap_bytes = tf.extractfile(member).read()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"could not read capture: {exc}"}), 500
+
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    filename = f"novadef_capture_{stamp}.pcap"
+    return send_file(
+        io.BytesIO(pcap_bytes),
+        mimetype="application/vnd.tcpdump.pcap",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 @app.get("/api/traffic")
@@ -9548,15 +12672,57 @@ def latest_report() -> Any:
             return jsonify({"ok": False, "error": f"final report not ready: {reason}"}), 409
         report_id = str(run_item.get("report_id") or "").strip()
         if not report_id:
-            try:
-                payload = _build_report_payload(run_id)
-                report_id = _persist_report(payload)
-                _update_history(run_id, {"report_id": report_id, "report_panel": _report_panel_from_latest_report(report_id)})
-                with LOCK:
-                    if str(STATE.get("current_run_id") or "") == str(run_id):
-                        STATE["last_report_id"] = report_id
-            except Exception as e:
-                return jsonify({"ok": False, "error": f"report generation failed: {e}"}), 500
+            if not _claim_report_generation(run_id):
+                # Another caller (the background auto-generation in
+                # _run_background, or a concurrent request) already owns
+                # generation for this run_id — wait briefly for its
+                # report_id to land in history instead of making our own.
+                for _ in range(30):
+                    time.sleep(0.5)
+                    report_id = str((_history_item(run_id) or {}).get("report_id") or "").strip()
+                    if report_id:
+                        break
+                if not report_id:
+                    return jsonify({"ok": False, "error": "report generation already in progress"}), 409
+            else:
+                try:
+                    payload = _build_report_payload(run_id)
+                    report_id = _persist_report(payload)
+                    _persist_run_artifacts(run_id, report_id, payload)
+                    _update_history(
+                        run_id,
+                        {
+                            "report_id": report_id,
+                            "summary": _runtime_experiment_summary(
+                                str(run_item.get("experiment") or ""),
+                                run_item.get("started_at"),
+                                str(run_item.get("output_tail") or ""),
+                            ),
+                            "report_panel": _report_panel_from_latest_report(report_id),
+                        },
+                    )
+                    with LOCK:
+                        if str(STATE.get("current_run_id") or "") == str(run_id):
+                            STATE["last_report_id"] = report_id
+                except Exception as e:
+                    return jsonify({"ok": False, "error": f"report generation failed: {e}"}), 500
+                finally:
+                    _release_report_generation(run_id)
+        elif run_item.get("summary") is None:
+            # report_id already existed (generated by some other path) but
+            # summary never got persisted alongside it — backfill it now so
+            # runsCacheGlobal-derived Dashboard widgets (countermeasureMix,
+            # fleet health, etc.) stop seeing this run as summary-less.
+            _update_history(
+                run_id,
+                {
+                    "summary": _runtime_experiment_summary(
+                        str(run_item.get("experiment") or ""),
+                        run_item.get("started_at"),
+                        str(run_item.get("output_tail") or ""),
+                    )
+                },
+            )
         return jsonify({"ok": True, "report_id": report_id, "download_url": f"/api/report/download/{report_id}"})
 
     with LOCK:
@@ -9566,9 +12732,30 @@ def latest_report() -> Any:
         fallback_last_run = dict(RUN_HISTORY[-1]) if RUN_HISTORY else None
     target_run_item = current_run_item or fallback_last_run
     target_run_id = str((target_run_item or {}).get("run_id") or current_run_id or "")
+    # A report_id may already be attached to the target run in history even
+    # though STATE["last_report_id"] is stale/empty (e.g. it was generated
+    # by the other branch of this endpoint, or by the automatic generation
+    # in _run_background) — reuse it instead of racing a new one into being.
+    existing_report_id = str((target_run_item or {}).get("report_id") or "").strip()
+    if not report_id and existing_report_id:
+        report_id = existing_report_id
+        with LOCK:
+            STATE["last_report_id"] = report_id
     if not report_id:
         ready, reason = _run_ready_for_final_report(target_run_item)
-        if ready:
+        if not ready:
+            return jsonify({"ok": False, "error": f"final report not ready: {reason}"}), 409
+        if not target_run_id or not _claim_report_generation(target_run_id):
+            for _ in range(30):
+                time.sleep(0.5)
+                report_id = str((_history_item(target_run_id) or {}).get("report_id") or "").strip() if target_run_id else ""
+                if report_id:
+                    with LOCK:
+                        STATE["last_report_id"] = report_id
+                    break
+            if not report_id:
+                return jsonify({"ok": False, "error": "report generation already in progress"}), 409
+        else:
             try:
                 payload = _build_report_payload(target_run_id or None)
                 report_id = _persist_report(payload)
@@ -9582,9 +12769,475 @@ def latest_report() -> Any:
                 with LOCK:
                     STATE["last_report_error"] = err
                 return jsonify({"ok": False, "error": err}), 500
-        else:
-            return jsonify({"ok": False, "error": f"final report not ready: {reason}"}), 409
+            finally:
+                _release_report_generation(target_run_id)
     return jsonify({"ok": True, "report_id": report_id, "download_url": f"/api/report/download/{report_id}"})
+
+
+
+# Raw log lines pulled into the report ("Detection Evidence", SOARCA
+# excerpts) come straight from container stdout — several backend services
+# (the network detector, MISP integrator, SOARCA trigger) still log in
+# Spanish. Rather than touching those live services, translate the handful
+# of recurring phrases only at report-render time, so the PDF/GUI report
+# text is English regardless of what the underlying container printed.
+_PDF_LOG_TRANSLATIONS: list[tuple[str, str]] = [
+    ("Evento TAPCD-compat publicado en", "TAPCD-compat event published on"),
+    ("Alerta por flows publicada (corroboración CICFlowMeter)", "Flow-based alert published (CICFlowMeter corroboration)"),
+    ("Escuchando", "Listening on"),
+    ("publicando alertas en", "publishing alerts to"),
+    ("Lanzando playbook", "Launching playbook"),
+    ("Playbook ejecutado", "Playbook executed"),
+    ("Selección defensiva", "Defensive selection"),
+    ("Perfil", "Profile"),
+    ("Motivación", "Motivation"),
+    ("Conocimiento", "Knowledge"),
+    ("Técnica D3FEND", "D3FEND technique"),
+    ("Playbook SOARCA", "SOARCA playbook"),
+    ("evento", "event"),
+    ("alerta", "alert"),
+    ("detectado", "detected"),
+    ("iniciando", "starting"),
+    ("conexión", "connection"),
+]
+
+
+def _pdf_translate_text(text: str) -> str:
+    """Best-effort translation of the recurring Spanish phrases still logged
+    by some backend services, applied only to text rendered into the report
+    — never to the underlying persisted/raw data."""
+    if not text:
+        return text
+    out = str(text)
+    for es, en in _PDF_LOG_TRANSLATIONS:
+        out = re.sub(re.escape(es), en, out, flags=re.IGNORECASE)
+    return out
+
+
+def _pdf_quality_chart(quality: dict[str, Any]) -> Drawing | None:
+    """Small horizontal-readable bar chart of the four OODA quality scores
+    (0-100) for this incident — gives the report a visual summary instead of
+    only text/tables, without inventing data: skipped entirely if none of
+    the four scores are present."""
+    labels = ["Observation", "Detection", "Profile", "Response"]
+    keys = ["observation_quality_score", "detection_quality_score", "profile_quality_score", "response_quality_score"]
+    values: list[float] = []
+    for k in keys:
+        v = quality.get(k)
+        try:
+            values.append(round(float(v) * 100, 1) if isinstance(v, (int, float)) and v <= 1.0 else round(float(v), 1))
+        except Exception:
+            values.append(0.0)
+    if not any(values):
+        return None
+    drawing = Drawing(420, 160)
+    chart = VerticalBarChart()
+    chart.x = 40
+    chart.y = 20
+    chart.height = 120
+    chart.width = 340
+    chart.data = [values]
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontSize = 8
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.valueMax = 100
+    chart.valueAxis.valueStep = 25
+    chart.valueAxis.labels.fontSize = 8
+    chart.bars[0].fillColor = colors.HexColor("#2f6fb0")
+    chart.barWidth = 10
+    drawing.add(chart)
+    return drawing
+
+
+def _pdf_fmt_ts(value: Any) -> str:
+    """ISO timestamp or epoch seconds -> a human-readable UTC string, or
+    an em dash if the phase never actually happened (no fabricated data)."""
+    if value is None or value == "":
+        return "—"
+    try:
+        if isinstance(value, (int, float)):
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(value)
+
+
+def _pdf_header_footer(canvas, doc) -> None:
+    """Draws the NOVADEF + CyberDataLab logo strip and page number on every
+    page, matching the source template's per-page corner logo + footer."""
+    canvas.saveState()
+    page_w, page_h = LETTER
+    novadef_logo = _GUI_DIR / "novadef-logo.png"
+    cyberlab_logo = _GUI_DIR / "logo_cyber_datalab.png"
+    try:
+        if novadef_logo.exists():
+            canvas.drawImage(
+                str(novadef_logo), page_w - 1.85 * inch, page_h - 0.85 * inch,
+                width=0.65 * inch, height=0.65 * inch, preserveAspectRatio=True, mask="auto",
+            )
+        if cyberlab_logo.exists():
+            canvas.drawImage(
+                str(cyberlab_logo), page_w - 1.1 * inch, page_h - 0.85 * inch,
+                width=0.65 * inch, height=0.65 * inch, preserveAspectRatio=True, mask="auto",
+            )
+    except Exception:
+        pass
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#5b6178"))
+    canvas.drawString(0.75 * inch, 0.5 * inch, "Classification: Internal — NOVADEF autonomous cyberdefense framework")
+    canvas.drawRightString(page_w - 0.75 * inch, 0.5 * inch, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def _incident_pdf_story(report_id: str, report: dict[str, Any]) -> list[Any]:
+    """
+    Build the reportlab "story" (flowable list) for one incident's PDF
+    section — the Purpose/Summary/Findings/Containment/.../Appendix content
+    that mirrors the reference "Technical Incident Response Report" template,
+    filled entirely from THIS incident's real, already-persisted report data
+    (a field with no real evidence renders as "—", never a placeholder
+    sentence). Factored out of _build_incident_pdf so a scenario-level PDF
+    can concatenate several incidents' stories (each starting on its own
+    page via NextPageTemplate/PageBreak, already appended at the end of this
+    story) into one combined document instead of duplicating this ~200-line
+    template per call site.
+    """
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("H1", parent=styles["Heading1"], textColor=colors.HexColor("#2f6fb0"), spaceBefore=14, spaceAfter=6)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], textColor=colors.HexColor("#2f6fb0"), fontSize=13, spaceBefore=10, spaceAfter=4)
+    body = ParagraphStyle("Body", parent=styles["Normal"], fontSize=9.5, leading=13)
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#5b6178"))
+    title_style = ParagraphStyle("Title", parent=styles["Title"], fontSize=24, spaceAfter=18)
+
+    execution = report.get("execution") or {}
+    countermeasure = report.get("countermeasure") or {}
+    misp = report.get("misp") or {}
+    tapcd = report.get("tapcd") or {}
+    metrics = report.get("novadef_metrics") or {}
+    phases = report.get("phases") or []
+    alerts = report.get("alerts") or []
+    actors = tapcd.get("actor_profiles") or []
+    lead_actor = actors[0] if actors else {}
+    event_object = (misp.get("event_object") or {}).get("event") or {}
+
+    experiment_names = {"exp1": "Distributed Password Spraying", "exp2": "Ransomware Emulation", "exp3": "Hybrid Lateral Movement"}
+    incident_name = experiment_names.get(str(report.get("experiment") or ""), str(report.get("experiment") or "Unknown"))
+
+    def para(text: str, style=body) -> Paragraph:
+        # Long unbroken tokens (IP:port pairs, log timestamps run together
+        # with no spaces) don't wrap on their own and push the row past the
+        # column/page edge. ReportLab's Paragraph recognizes the <wbr/> tag
+        # as an explicit break opportunity (unlike a raw zero-width-space
+        # character, which just renders as a missing-glyph box with this
+        # font) — insert one after punctuation commonly found in these
+        # tokens (":", "-", "_", ",") so wrapping can actually kick in.
+        safe = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe = _pdf_translate_text(safe)
+        safe = re.sub(r"([:_,-])(?=\S)", r"\1<wbr/>", safe)
+        return Paragraph(safe.replace("\n", "<br/>"), style)
+
+    small_bold = ParagraphStyle("SmallBold", parent=small, fontName="Helvetica-Bold")
+
+    def meta_table(rows: list[tuple[str, str]]) -> Table:
+        t = Table([[para(k, small_bold), para(v, body)] for k, v in rows], colWidths=[1.6 * inch, 4.9 * inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#cfe0f2")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#8891ab")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        return t
+
+    small_cell = ParagraphStyle("SmallCell", parent=styles["Normal"], fontSize=8, leading=10)
+    small_cell_header = ParagraphStyle("SmallCellHeader", parent=small_cell, fontName="Helvetica-Bold")
+
+    def data_table(header: list[str], rows: list[list[str]], col_widths: list[float]) -> Table:
+        # Cells are wrapped in Paragraph (via para()), not raw strings — a
+        # plain string in a Table cell can't wrap at all, so any long
+        # unbroken value (a log line, an IP:port pair) pushed the row past
+        # the column edge and off the page instead of wrapping onto new
+        # lines within the cell.
+        body_rows = rows or [["—"] * len(header)]
+        data = [[para(h, small_cell_header) for h in header]] + [[para(c, small_cell) for c in row] for row in body_rows]
+        t = Table(data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#cfe0f2")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#8891ab")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return t
+
+    story: list[Any] = []
+
+    # ── Cover page ──────────────────────────────────────────────────────
+    novadef_logo = _GUI_DIR / "novadef-logo.png"
+    cyberlab_logo = _GUI_DIR / "logo_cyber_datalab.png"
+    logo_cells = []
+    if novadef_logo.exists():
+        logo_cells.append(Image(str(novadef_logo), width=1.1 * inch, height=1.1 * inch, kind="proportional"))
+    if cyberlab_logo.exists():
+        logo_cells.append(Image(str(cyberlab_logo), width=1.1 * inch, height=1.1 * inch, kind="proportional"))
+    if logo_cells:
+        logo_row = Table([logo_cells], colWidths=[1.3 * inch] * len(logo_cells))
+        logo_row.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "LEFT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+        story.append(logo_row)
+    story.append(Spacer(1, 0.6 * inch))
+    story.append(Paragraph("Technical Incident Response Report", title_style))
+    story.append(Spacer(1, 0.4 * inch))
+    story.append(meta_table([
+        ("Date", _pdf_fmt_ts(report.get("generated_at"))),
+        ("Prepared By", "NOVADEF autonomous cyberdefense framework"),
+        ("Contributor(s)", "CyberDataLab"),
+        ("Department", "Security Operations"),
+        ("Incident Name", incident_name),
+        ("Incident Number", report_id),
+    ]))
+    story.append(NextPageTemplate("body"))
+    story.append(PageBreak())
+
+    # ── Purpose ─────────────────────────────────────────────────────────
+    story.append(Paragraph("Purpose", h1))
+    story.append(para(
+        "This report documents the technical detail of one NOVADEF incident (a single simulated "
+        "attack run) across every phase of its automated OODA response cycle — observation, "
+        "detection, threat profiling, decision, and response execution — using only data captured "
+        "and persisted by NOVADEF for this specific run."
+    ))
+
+    # ── Incident Summary ────────────────────────────────────────────────
+    story.append(Paragraph("Incident Summary", h1))
+    attack_started = execution.get("attack_started_at")
+    detect_phase = next((p for p in phases if p.get("phase") == "detect"), {})
+    story.append(meta_table([
+        ("Detected", _pdf_fmt_ts(detect_phase.get("timestamp")) if detect_phase.get("confirmed") else "Not confirmed for this run"),
+        ("Attack started", _pdf_fmt_ts(attack_started)),
+        ("Source (attacker IPs)", ", ".join(lead_actor.get("source_ips") or []) or "—"),
+        ("Target", str(event_object.get("info") or "—")),
+        ("Motivation (TAPCD)", str(lead_actor.get("motivation") or "—")),
+        ("Threat profile (TAPCD)", str(lead_actor.get("profile") or "—")),
+        ("MITRE ATT&CK techniques", ", ".join(lead_actor.get("techniques") or []) or "—"),
+    ]))
+
+    # ── Information Exposure ────────────────────────────────────────────
+    story.append(Paragraph("Information Exposure", h1))
+    story.append(para(
+        "This incident was generated inside a controlled NOVADEF lab scenario against an isolated "
+        "victim container — no production data, credentials, or real user information was exposed. "
+        f"Observed telemetry source coverage for this run: "
+        f"{', '.join((metrics.get('observation_quality') or {}).get('observed_sources') or []) or '—'}."
+    ))
+
+    # ── Investigative Findings ──────────────────────────────────────────
+    story.append(Paragraph("Investigative Findings", h1))
+    story.append(Paragraph("Incident Timeline", h2))
+    timeline_rows = [
+        [str(p.get("phase", "")).capitalize(), _pdf_fmt_ts(p.get("timestamp")) if p.get("confirmed") else "Not confirmed", str(p.get("detector_or_component") or "—")]
+        for p in phases
+    ]
+    story.append(data_table(["Phase", "Timestamp", "Detector / Component"], timeline_rows, [1.1 * inch, 1.8 * inch, 3.6 * inch]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Detection Evidence", h2))
+    alert_rows = [[str(a.get("container") or "—"), str(a.get("line") or "—")[:140]] for a in alerts[:12]]
+    story.append(data_table(["Source", "Log line"], alert_rows, [1.6 * inch, 4.9 * inch]))
+
+    # ── Containment ──────────────────────────────────────────────────────
+    story.append(Paragraph("Containment", h1))
+    story.append(meta_table([
+        ("Selected countermeasure", str(countermeasure.get("selected") or "—")),
+        ("D3FEND basis", str(countermeasure.get("d3fend_basis") or "—")),
+        ("Justification", str(countermeasure.get("justification") or "—")),
+        ("Execution confirmed", "Yes" if countermeasure.get("execution_confirmed") else "No"),
+    ]))
+
+    # ── Preservation of evidence ─────────────────────────────────────────
+    story.append(Paragraph("Preservation of evidence", h1))
+    story.append(para(
+        "- TAPCD threat actor profile persisted in the graph database.\n"
+        "- MISP event created/reused with full attribute set (see Investigative Findings).\n"
+        "- Raw detector, TAPCD, and SOARCA log excerpts captured in this incident's report bundle.\n"
+        "- Chart data (network/host telemetry series) preserved alongside this report for recreation."
+    ))
+
+    # ── Eradication ───────────────────────────────────────────────────────
+    story.append(Paragraph("Eradication", h1))
+    story.append(para(
+        f"SOARCA execution evidence:\n{str(countermeasure.get('soarca_excerpt') or '—')}"
+    ))
+
+    # ── Recovery ──────────────────────────────────────────────────────────
+    story.append(Paragraph("Recovery", h1))
+    quality = metrics.get("quality_metrics") or {}
+    story.append(meta_table([
+        ("Observation quality score", f"{quality.get('observation_quality_score', '—')}"),
+        ("Detection quality score", f"{quality.get('detection_quality_score', '—')}"),
+        ("Profile quality score", f"{quality.get('profile_quality_score', '—')}"),
+        ("Response quality score", f"{quality.get('response_quality_score', '—')}"),
+    ]))
+    quality_chart = _pdf_quality_chart(quality)
+    if quality_chart is not None:
+        story.append(Spacer(1, 8))
+        story.append(quality_chart)
+
+    # ── Lessons learned ────────────────────────────────────────────────
+    story.append(Paragraph("Lessons learned", h1))
+    obs_quality = metrics.get("observation_quality") or {}
+    gap_count = obs_quality.get("telemetry_gap_count")
+    coverage = obs_quality.get("source_coverage_ratio")
+    lessons: list[str] = []
+    if isinstance(coverage, (int, float)) and coverage < 1.0:
+        lessons.append(f"Telemetry source coverage was {coverage:.0%} — some expected sources did not report for this run.")
+    if isinstance(gap_count, (int, float)) and gap_count > 0:
+        lessons.append(f"{int(gap_count)} telemetry gap(s) were recorded during observation.")
+    if not countermeasure.get("execution_confirmed"):
+        lessons.append("Countermeasure execution was not confirmed — review SOARCA connectivity for this scenario.")
+    if not lessons:
+        lessons.append("No anomalies recorded — this incident's OODA cycle completed within expected parameters.")
+    story.append(para("\n".join(f"- {line}" for line in lessons)))
+
+    # ── Appendix ──────────────────────────────────────────────────────────
+    story.append(Paragraph("Appendix", h1))
+    story.append(Paragraph("Version History", h2))
+    story.append(data_table(
+        ["Date", "Name", "Version", "Comments"],
+        [[_pdf_fmt_ts(report.get("generated_at")), "NOVADEF", str((report.get("report_meta") or {}).get("schema_version") or "—"), "Auto-generated incident report"]],
+        [1.6 * inch, 1.6 * inch, 1.0 * inch, 2.3 * inch],
+    ))
+
+    return story
+
+
+def _build_incident_pdf(report_id: str, report: dict[str, Any]) -> Path:
+    """Render one incident's report to its own standalone PDF file."""
+    pdf_path = REPORTS_DIR / report_id / "incident_report.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    story = _incident_pdf_story(report_id, report)
+    doc = BaseDocTemplate(str(pdf_path), pagesize=LETTER, topMargin=0.9 * inch, bottomMargin=0.75 * inch, leftMargin=0.75 * inch, rightMargin=0.75 * inch)
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="body")
+    doc.addPageTemplates([
+        PageTemplate(id="cover", frames=[frame], onPage=_pdf_header_footer),
+        PageTemplate(id="body", frames=[frame], onPage=_pdf_header_footer),
+    ])
+    doc.build(story)
+    return pdf_path
+
+
+def _build_scenario_pdf(scenario_id: str, report_ids: list[str]) -> Path:
+    """
+    Concatenate several incidents' PDF stories (_incident_pdf_story) into one
+    combined document for a scenario — a cover page listing every incident,
+    then each incident's own full report section back-to-back (each already
+    starts on its own page via the per-incident story's own NextPageTemplate/
+    PageBreak). Written to a scenario-scoped path so it survives independent
+    of any single incident's report directory.
+    """
+    scenario_reports_dir = REPORTS_DIR / "_scenarios" / _sanitize_run_token(scenario_id)
+    scenario_reports_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = scenario_reports_dir / "scenario_incidents_report.pdf"
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("ScenarioTitle", parent=styles["Title"], fontSize=24, spaceAfter=18)
+    h2 = ParagraphStyle("ScenarioH2", parent=styles["Heading2"], textColor=colors.HexColor("#2f6fb0"), fontSize=13, spaceBefore=10, spaceAfter=4)
+    body = ParagraphStyle("ScenarioBody", parent=styles["Normal"], fontSize=9.5, leading=13)
+
+    story: list[Any] = []
+    story.append(Spacer(1, 0.6 * inch))
+    story.append(Paragraph("NOVADEF Scenario Incident Report", title_style))
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(Paragraph(f"Scenario: {scenario_id}", h2))
+    story.append(Paragraph(f"Incidents included: {len(report_ids)}", body))
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(Paragraph("This document combines the full technical incident report for every run "
+                            "recorded in this scenario, in the order they occurred. Each incident's own "
+                            "report section below is identical to its individually-downloadable PDF.", body))
+    story.append(NextPageTemplate("body"))
+    story.append(PageBreak())
+
+    for rid in report_ids:
+        try:
+            report_json_path = REPORTS_DIR / rid / "incident_report.json"
+            report = json.loads(report_json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        story.extend(_incident_pdf_story(rid, report))
+
+    doc = BaseDocTemplate(str(pdf_path), pagesize=LETTER, topMargin=0.9 * inch, bottomMargin=0.75 * inch, leftMargin=0.75 * inch, rightMargin=0.75 * inch)
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="body")
+    doc.addPageTemplates([
+        PageTemplate(id="cover", frames=[frame], onPage=_pdf_header_footer),
+        PageTemplate(id="body", frames=[frame], onPage=_pdf_header_footer),
+    ])
+    doc.build(story)
+    return pdf_path
+
+
+@app.get("/api/soarca/playbook/<path:playbook_id>")
+def get_soarca_playbook(playbook_id: str) -> Any:
+    """
+    Returns the real CACAO 2.0 playbook JSON for the given playbook_id (the
+    "id" field inside the .json, e.g. "playbook--9c7d4e5f-..." — NOT the
+    filename, since those don't match 1:1). Optional query params
+    (ip_range_start, ip_range_end, isolation_comment, victim_ip) substitute
+    the SAME playbook_variables/target_definitions values misp_to_soarca.py
+    injects at trigger time, so the viewer sees exactly what was sent to
+    SOARCA for a specific real execution rather than the generic template
+    with placeholder values still in it.
+    """
+    try:
+        candidates = list(SOARCA_PLAYBOOKS_DIR.glob("*.json"))
+    except Exception:
+        candidates = []
+    playbook = None
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(data.get("id") or "") == playbook_id:
+            playbook = data
+            break
+    if playbook is None:
+        return jsonify({"ok": False, "error": "playbook not found"}), 404
+
+    ip_range_start = request.args.get("ip_range_start")
+    ip_range_end = request.args.get("ip_range_end")
+    isolation_comment = request.args.get("isolation_comment")
+    victim_ip = request.args.get("victim_ip")
+
+    pb_vars = playbook.get("playbook_variables") or {}
+    if ip_range_start and "__ip_range_start__" in pb_vars:
+        pb_vars["__ip_range_start__"]["value"] = ip_range_start
+    if ip_range_end and "__ip_range_end__" in pb_vars:
+        pb_vars["__ip_range_end__"]["value"] = ip_range_end
+    if isolation_comment and "__isolation_comment__" in pb_vars:
+        pb_vars["__isolation_comment__"]["value"] = isolation_comment
+    if victim_ip:
+        for target in (playbook.get("target_definitions") or {}).values():
+            if target.get("type") in {"linux", "ssh"}:
+                target["address"] = {"ipv4": [victim_ip]}
+
+    return jsonify({"ok": True, "playbook": playbook})
+
+
+@app.get("/api/report/pdf/<report_id>")
+def download_report_pdf(report_id: str) -> Any:
+    report_json_path = REPORTS_DIR / report_id / "incident_report.json"
+    if not report_json_path.exists():
+        return jsonify({"ok": False, "error": "report not found"}), 404
+    try:
+        report = json.loads(report_json_path.read_text(encoding="utf-8"))
+        pdf_path = _build_incident_pdf(report_id, report)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"pdf generation failed: {e}"}), 500
+    return send_file(pdf_path, as_attachment=True, download_name=f"novadef_incident_report_{report_id}.pdf")
 
 
 @app.get("/api/report/download/<report_id>")
@@ -9618,6 +13271,57 @@ def get_report_chart_data(report_id: str) -> Any:
     except Exception as e:
         return jsonify({"ok": False, "error": f"could not read chart data: {e}"}), 500
     return jsonify({"ok": True, "report_id": report_id, "chart_data": data})
+
+
+def _scenario_report_ids(scenario_id: str) -> list[str]:
+    """report_ids for every non-deleted run in this scenario that actually
+    has a persisted report, oldest first (so a combined PDF/zip reads in the
+    order the incidents really happened)."""
+    with LOCK:
+        runs = [dict(r) for r in RUN_HISTORY if str(r.get("scenario_id") or "").strip() == scenario_id and not r.get("deleted")]
+    runs.sort(key=lambda r: float(r.get("started_at") or 0.0))
+    return [str(r["report_id"]) for r in runs if str(r.get("report_id") or "").strip()]
+
+
+@app.get("/api/scenario/<scenario_id>/download")
+def download_scenario_bundle(scenario_id: str) -> Any:
+    """
+    Zip together every incident's own already-persisted report bundle
+    (incident_report_bundle.zip, or its constituent files if the bundle zip
+    itself is missing) for this scenario into one archive — the scenario-level
+    equivalent of /api/report/download/<report_id>, covering every incident
+    instead of just one.
+    """
+    report_ids = _scenario_report_ids(scenario_id)
+    if not report_ids:
+        return jsonify({"ok": False, "error": "no incident reports found for this scenario"}), 404
+
+    scenario_reports_dir = REPORTS_DIR / "_scenarios" / _sanitize_run_token(scenario_id)
+    scenario_reports_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = scenario_reports_dir / "scenario_incidents_bundle.zip"
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rid in report_ids:
+            report_dir = REPORTS_DIR / rid
+            if not report_dir.exists():
+                continue
+            for f in report_dir.iterdir():
+                if f.is_file():
+                    zf.write(f, arcname=f"{rid}/{f.name}")
+    return send_file(zip_path, as_attachment=True, download_name=f"novadef_scenario_{scenario_id}_incidents.zip")
+
+
+@app.get("/api/scenario/<scenario_id>/pdf")
+def download_scenario_pdf(scenario_id: str) -> Any:
+    """Combined PDF covering every incident's report for this scenario, in order."""
+    report_ids = _scenario_report_ids(scenario_id)
+    if not report_ids:
+        return jsonify({"ok": False, "error": "no incident reports found for this scenario"}), 404
+    try:
+        pdf_path = _build_scenario_pdf(scenario_id, report_ids)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"pdf generation failed: {e}"}), 500
+    return send_file(pdf_path, as_attachment=True, download_name=f"novadef_scenario_{scenario_id}_incidents_report.pdf")
 
 
 @app.get("/api/debug")
@@ -9675,6 +13379,32 @@ def run() -> Any:
     experiment = payload.get("experiment") or request.form.get("experiment") or request.values.get("experiment")
     if experiment not in {"exp1", "exp2", "exp3"}:
         return jsonify({"ok": False, "error": "experiment must be exp1, exp2 or exp3"}), 400
+
+    # Attack duration / intensity are only meaningful for exp1 and exp3 (the
+    # network-based attacks driven by distributed_password_spraying.sh /
+    # hybrid_lateral_remote_execution.sh, both of which read these as env
+    # vars). exp2 (ransomware) is a local emulation on the victim with no
+    # equivalent knobs, so these are silently ignored for it.
+    attack_duration_seconds = _clamp_int(
+        payload.get("attack_duration_seconds"), lo=60, hi=3600, default=1800
+    )
+    attacker_intensity = _clamp_int(
+        payload.get("attacker_intensity"), lo=2, hi=16, default=16
+    )
+    # Ground-truth negative runs for statistical validation (precision/recall/
+    # FPR need real true negatives, not just attack runs): the victim,
+    # detectors, TAPCD, SOARCA and benign background noise all start exactly
+    # as usual, but the attack script itself is never launched. Defaults to
+    # True so every existing caller (GUI, prior sessions) is unaffected.
+    attack_enabled = bool(payload.get("attack_enabled", True))
+    # Diagnostic/figure-only knob: distributed_password_spraying.sh's own
+    # default (1.5s) staggers exp1's attack into 3 ramping waves so a live
+    # dashboard viewer sees distinct steps. Passing 0 here collapses that gap
+    # so the full-intensity burst lands in well under a second instead of
+    # ~5-6s. None (the default — no key in the payload) leaves the script's
+    # own default completely untouched, so the already-collected N=30
+    # statistical campaign runs are unaffected by this existing.
+    surge_wave_gap_seconds = payload.get("surge_wave_gap_seconds")
 
     scenario_id_raw = payload.get("scenario_id") or request.form.get("scenario_id") or request.values.get("scenario_id")
     scenario_id = _sanitize_scenario_id(str(scenario_id_raw)) if scenario_id_raw else ""
@@ -9768,6 +13498,10 @@ def run() -> Any:
                 "scenario_log_dir": str((selected_scenario or {}).get("log_dir") or ""),
                 "scenario_telemetry_dir": str((selected_scenario or {}).get("telemetry_dir") or ""),
                 "scenario_reports_dir": str((selected_scenario or {}).get("reports_dir") or ""),
+                "attack_duration_seconds": attack_duration_seconds,
+                "attacker_intensity": attacker_intensity,
+                "attack_enabled": attack_enabled,
+                "surge_wave_gap_seconds": surge_wave_gap_seconds,
             }
         )
         STATE["running"] = True
@@ -9812,9 +13546,6 @@ def debug_detection():
         "snort_logs_sample": snort_logs.splitlines()[-5:] if snort_logs else [],
         "alert_logs_sample": alert_logs.splitlines()[-5:] if alert_logs else [],
     })
-
-
-_GUI_DIR = Path(os.getenv("NOVADEF_GUI_DIR", "/gui"))
 
 
 @app.get("/")

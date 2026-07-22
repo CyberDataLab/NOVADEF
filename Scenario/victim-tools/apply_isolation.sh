@@ -18,7 +18,7 @@ pkill -f 'novadef_akira'      2>/dev/null || true
 # multi-line heredoc through setsid (ash/busybox does not handle that well).
 cat > /tmp/_novadef_isolate.sh << 'ISOLATION_EOF'
 #!/bin/sh
-sleep 2
+sleep 0
 iptables -F INPUT  2>/dev/null || true
 iptables -F OUTPUT 2>/dev/null || true
 iptables -A INPUT  -i lo -j ACCEPT 2>/dev/null || true

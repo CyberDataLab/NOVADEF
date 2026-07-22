@@ -27,6 +27,12 @@ services:
       - ${PFD}/Results/Alerts:/home/Alert_Module/Alerts
       - ${PFD}/Alert_Module/Configuration_Files/Rules:/home/Alert_Module/Snort_configuration/Rules
     restart: unless-stopped
+    # entrypoint_alert_module.py runs as PID 1 and spawns Snort3 (start_snort_live)
+    # as a direct subprocess. Same zombie-reaping risk as flow_module_novadef/
+    # falco_novadef (see their compose comments): a plain script as PID 1 never
+    # reaps orphaned descendants it didn't spawn itself. `init: true` runs tini
+    # as PID 1 instead, so it happens automatically regardless of cause.
+    init: true
 
   network_intrusion_detector:
     image: network_intrusion_detector_novadef:latest
@@ -55,6 +61,12 @@ services:
       - DETECTOR_FAST_PATH_FIRST_FAILURE=true
       - DETECTOR_POLL_TIMEOUT_SECONDS=0.001
       - DETECTOR_IMMEDIATE_AUTH_CAMPAIGN_ALERT=true
+      # Run the Isolation Forest alongside the fast fan-in detector so its
+      # anomaly_score is captured for the rule-based-vs-ML detection quality
+      # comparison in the article. The fan-in path remains primary for
+      # DETECTION latency (fires first, unaffected) -- this only adds a
+      # parallel, slower ML alert with its own score for measurement.
+      - DETECTOR_ISOLATION_FOREST_ENABLED=true
       # TTL del dedup por ataque: alto para garantizar UNA sola alerta durante
       # toda la duración del ataque (~600s). Entre experimentos el API limpia el
       # estado del detector explícitamente (_reset_detector_runtime_state), así

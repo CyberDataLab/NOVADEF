@@ -3,4 +3,4 @@ pymisp==2.4.176
 requests
 schedule
 PyMySQL
-kafka-python==2.0.2
+confluent-kafka==2.6.1

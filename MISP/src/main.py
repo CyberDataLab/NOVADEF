@@ -695,22 +695,23 @@ def process_alert_to_misp(misp, topic, alert_data):
                 f"[DETECT] FALCO: Host Ransomware Emulation Detected [{_victim_ip_now}]"
                 f" - alerta Falco recibida, creando evento MISP..."
             )
-            # Publish a single combined profile directly to profiles_out.
-            # The profile includes attacker IPs accumulated from any prior
-            # network-phase alerts for the same campaign, so soarca-trigger
-            # sees ONE correlated profile (network + host) and applies isolation.
-            _falco_vkey = (
-                f"campaign:{_falco_campaign_id}"
-                if _falco_campaign_id and _falco_campaign_id not in ("<N/A>", "N/A", "none", "null")
-                else str(_resolve_victim_ip())
-            )
-            _net_src_ips = list(_campaign_src_ips.get(_falco_vkey, []))
-            _publish_falco_ransomware_to_tapcd(
-                _resolve_victim_ip(), rule, evt_time,
-                victim_key=_falco_vkey,
-                src_ips=_net_src_ips,
-                campaign_id=_falco_campaign_id,
-            )
+            # This module used to ALSO publish a degraded stub profile
+            # directly to profiles_out here (bypassing Alert Manager
+            # entirely), with every ML field (Profile/Motivation/Skills/
+            # RiskLevel/etc) left blank — that stub landed first and is what
+            # soarca-trigger decided/acted on, permanently starving exp2 of a
+            # real actor profile. Alert Manager ALREADY independently
+            # consumes this same falco_events topic (see its TOPIC_FALCO
+            # consumer thread) and routes it through snort_alerts_am ->
+            # stream_low -> prep_pred exactly like exp1/exp3's network path —
+            # querying the victim/attacker host's own real network flows and
+            # running it through the same 8 ML models, since the compromised
+            # host IS the attacker here. That path is the sole source of
+            # profiles_out for ransomware now, so the decision waits for and
+            # uses a REAL ML profile (~3-4s total, same order of magnitude as
+            # exp1/exp3's detect->act) instead of firing instantly on an
+            # empty one. See misp_to_soarca.py's is_ransomware_profile branch,
+            # which already handles this real profile correctly.
         else:
             event_title = f"FALCO: {rule} ({priority})"
 
@@ -901,6 +902,36 @@ def process_alert_to_misp(misp, topic, alert_data):
 
     existing_event_id = _active_event_by_victim.get(_victim_key)
 
+    # Both recovery paths below search MISP's DB directly (attribute/event
+    # search), completely bypassing _active_event_by_victim — which means
+    # they used to find and re-adopt an event that belongs to a DIFFERENT,
+    # earlier scenario against the same victim_ip, even right after /reset
+    # had correctly wiped the in-memory cache for a brand new scenario. A
+    # victim_ip is routinely reused across many separate scenarios (fixed
+    # lab IPs), so without this check every scenario after the first one to
+    # touch that IP silently kept enriching/reusing the FIRST scenario's
+    # event forever — its own event was never created, so the GUI's
+    # Orient/MISP panel for that later scenario had nothing to show,
+    # correctly reflecting that no event tagged for THIS scenario existed
+    # (the profile itself is unrelated to this — see the TAPCD/profiles_out
+    # path, which does not depend on MISP events at all).
+    def _event_belongs_to_current_scenario(_evt_id) -> bool:
+        try:
+            r = requests.get(
+                f"{MISP_URL}/events/view/{_evt_id}",
+                headers={"Authorization": MISP_KEY, "Accept": "application/json"},
+                verify=os.getenv('MISP_VERIFY_CERT', 'True').lower() not in ('false', '0', 'no'),
+                timeout=8,
+            )
+            if r.status_code != 200:
+                return False
+            ev = (r.json() or {}).get("Event", {})
+            tags = ev.get("Tag") or []
+            wanted = f"scenario:{_ACTIVE_SCENARIO_ID}"
+            return any(str(t.get("name") or "") == wanted for t in tags)
+        except Exception:
+            return False
+
     # If the in-memory cache missed (e.g. integrator restarted between network
     # and Falco phases of exp3), try to recover the existing event from MISP DB
     # by searching for the campaign_id attribute we wrote when the first alert
@@ -928,7 +959,7 @@ def process_alert_to_misp(misp, topic, alert_data):
                 limit=1,
                 pythonify=True,
             )
-            if recovered and hasattr(recovered[0], 'event_id'):
+            if recovered and hasattr(recovered[0], 'event_id') and _event_belongs_to_current_scenario(recovered[0].event_id):
                 _adopt_event(recovered[0].event_id, f"campaign_id={_explicit_campaign_id}")
         except Exception as _rec_err:
             logger.debug(f"[DEDUP-LINK] No se pudo recuperar evento por campaign_id: {_rec_err}")
@@ -987,7 +1018,7 @@ def process_alert_to_misp(misp, topic, alert_data):
                 except Exception:
                     return False
 
-            _recent = [_ev for _ev in (recovered_ev or []) if _ev_recent(_ev)]
+            _recent = [_ev for _ev in (recovered_ev or []) if _ev_recent(_ev) and _event_belongs_to_current_scenario(getattr(_ev, "id", None))]
             if _recent:
                 # Prefer the network/spraying event so both phases merge into it.
                 _chosen = None
@@ -1046,6 +1077,20 @@ def process_alert_to_misp(misp, topic, alert_data):
                 logger.info(f"[MISP] Título actualizado en evento #{existing_event_id}: {new_title[:120]}")
             except Exception as e:
                 logger.warning(f"[MISP] No se pudo actualizar título del evento #{existing_event_id}: {e}")
+        # Re-tag with the CURRENT scenario every time this event is reused.
+        # _tag_event_with_scenario() is only ever called once, at event
+        # creation time, with whatever scenario was active THEN. A victim_ip
+        # is not unique per scenario — the same MISP event keeps getting
+        # reused across every later scenario that reuses that victim_ip
+        # (this is by design, see _active_event_by_victim above), but its
+        # scenario:<id> tag never followed along. misp_to_soarca.py's own
+        # _enrich_misp_with_profile() searches restSearch filtered on
+        # tags=[f"scenario:{scenario_id}"] for THIS run's scenario — an
+        # event still only wearing an OLDER scenario's tag can never match
+        # that search, so enrichment (and therefore the TAPCD/MISP panel
+        # ever leaving "Pending" in the GUI) silently never happens for any
+        # scenario after the first one to touch this victim_ip.
+        _tag_event_with_scenario(misp, existing_event_id, _ACTIVE_SCENARIO_ID)
         logger.info(f"[MISP] Enriqueciendo evento #{existing_event_id} (victim={_victim_key}) con alerta de {topic}")
 
     event_id = existing_event_id
@@ -1064,6 +1109,17 @@ def process_alert_to_misp(misp, topic, alert_data):
     for attr in attributes_to_add:
         try:
             new_attr = misp.add_attribute(event_id, attr, pythonify=True)
+            # pymisp's add_attribute(..., pythonify=True) does not raise on a
+            # 403 "similar attribute already exists" rejection (a routine,
+            # expected case on a reused victim_ip/event across many alerts) —
+            # it returns a plain dict of the error body instead of a real
+            # MISPAttribute. Reading .uuid off that dict raised a generic
+            # AttributeError that this same try/except swallowed under the
+            # unhelpful "Error añadiendo atributo: 'dict' object has no
+            # attribute 'uuid'", hiding the actual, benign 403 reason.
+            if isinstance(new_attr, dict):
+                logger.info(f"  [~] {attr['type']}: {attr['value'][:60]} (ya existía, omitido)")
+                continue
             logger.info(f"  [+] {attr['type']}: {attr['value'][:60]}")
             if attr['type'] in ('ip-src', 'ip-dst'):
                 enrich_attribute(misp, new_attr.uuid, new_attr.type, attr['value'])

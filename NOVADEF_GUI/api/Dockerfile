@@ -6,8 +6,8 @@ WORKDIR /app
 COPY api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY api/app.py /app/app.py
-COPY index.html experiments.html experiment_live.html login.html /gui/
-COPY header-bg.jpg novadef-logo.png bg-login.jpg /gui/
+COPY index.html experiment_live.html login.html i18n.js /gui/
+COPY header-bg.jpg novadef-logo.png bg-login.jpg logo_cyber_datalab.png /gui/
 
 ENV NOVADEF_GUI_DIR=/gui
 

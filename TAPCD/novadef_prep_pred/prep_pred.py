@@ -18,13 +18,14 @@ SQL Injection (sin patrones de texto):
       * RiskLevel = modelo ± bump suave (cap [1..10])
 """
 from __future__ import annotations
-import argparse, csv, io, json, logging, math, os, re, sys, signal, time, datetime as _dt
+import argparse, csv, io, json, logging, math, os, re, sys, signal, threading, time, datetime as _dt
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from hashlib import md5
 from pathlib import Path
 from statistics import mean
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -42,6 +43,18 @@ try:
 except Exception:
     print("❌ Falta joblib (pip install joblib)", flush=True)
     sys.exit(2)
+
+# ───────────────────────── Explainability (optional) ─────
+# SHAP is only used for the "Profile" model's explanation (the field the
+# dashboard cares about — "why was this actor classified as crime-syndicate,
+# not nation-state"). If the package is missing, prep_pred still runs and
+# simply skips this field entirely — Explainability was appended as the
+# LAST column of PROFILE_COLUMNS specifically so its absence never shifts
+# any of the other 27 positional fields app.py already parses.
+try:
+    import shap
+except Exception:
+    shap = None
 
 # ───────────────────────── GeoIP (optional) ─────────────
 try:
@@ -352,6 +365,20 @@ PROFILE_COLUMNS = [
     "DetectionAlert","DetectionType","DetectionAttack","DetectionStage","DetectionTs",
     "Motivation","Knowledge","Attitude","Affiliation",
     "ThreatGroup","Campaigns","Comments",
+    # Appended LAST (index 27) so existing 0-26 positional parsing in
+    # app.py's _native_actor_profile_from_line never shifts. Compact
+    # "feature:+contribution" pipe-separated string — the top SHAP
+    # contributors toward the predicted Profile class, computed once per
+    # profile in build_hl_record via _explain_profile_prediction().
+    "Explainability",
+    # Appended LAST (index 28), same reasoning as Explainability above: SHAP
+    # explainability for EVERY ML-predicted field (Motivation/Knowledge/
+    # Attitude/Affiliation/Skills/RiskLevel/AutomationLevel), not just
+    # Profile — each has its own independent RandomForest pipeline (see
+    # ML_KEYS/collect_models), so each can be explained the same way.
+    # Compact "Field1=feat:+val|feat:+val;Field2=feat:+val|..." string, one
+    # segment per field that had a usable prediction + explainer.
+    "ExplainabilityAllFields",
 ]
 ML_KEYS = ["AutomationLevel","RiskLevel","Profile","Motivation","Knowledge","Attitude","Affiliation","Skills"]
 TARGET_CANON = {
@@ -592,6 +619,121 @@ def predict_with_pipeline(pipe, X_df: pd.DataFrame):
             raise RuntimeError("Pipeline sin estimador final.")
         return est.predict(Xt)
 
+# ───────────────────── Explainability (SHAP) ─────────────
+# One TreeExplainer per model, built once (lazily, on first use) and reused
+# for every subsequent prediction — construction takes ~0.15s but computing
+# shap_values() on an already-built explainer is what actually matters per
+# message (~0.5s for the 300-tree, 273-feature Profile model, measured), well
+# inside the cadence profiles are generated at (per-incident, not per-packet).
+_SHAP_EXPLAINERS: Dict[str, Any] = {}
+# _get_or_build_explainer is called from the per-message background thread
+# (_publish_explainability, one thread per Kafka message) since explainability
+# was moved off the critical path -- concurrent calls for the SAME model_key
+# used to race on the check-then-act "cached is None" read: several threads
+# would all see no cached entry at once (each shap.TreeExplainer(...) build
+# takes long enough for that window to be real under Falco's burst traffic),
+# each build its OWN ~25MB explainer, and each overwrite the dict in turn.
+# The extra copies are real Python objects some other thread still holds a
+# local reference to until its own request finishes, so they don't get
+# GC'd promptly -- measured at +183MB of TreeExplainer internals for just 10
+# messages, which is what was driving prep_pred's RSS from ~900MB to ~2.7GB+
+# over a long session (and, since predict_with_pipeline shares the same
+# process heap, degraded page/cache locality enough to slow down the FAST
+# ml_preds loop too, from ~0.5s to ~2.7s within a single run). A lock makes
+# the build-and-cache atomic so at most one explainer per model_key is ever
+# constructed for the lifetime of the process.
+_SHAP_EXPLAINERS_LOCK = threading.Lock()
+
+def _get_or_build_explainer(model_key: str, rf_estimator):
+    if shap is None:
+        return None
+    cached = _SHAP_EXPLAINERS.get(model_key)
+    if cached is not None:
+        return cached
+    with _SHAP_EXPLAINERS_LOCK:
+        # Re-check inside the lock: another thread may have finished
+        # building this exact model_key's explainer while we were waiting.
+        cached = _SHAP_EXPLAINERS.get(model_key)
+        if cached is not None:
+            return cached
+        try:
+            explainer = shap.TreeExplainer(rf_estimator)
+        except Exception:
+            return None
+        _SHAP_EXPLAINERS[model_key] = explainer
+        return explainer
+
+def _transform_features_for_pipeline(pipe, X_df: pd.DataFrame):
+    """Same fe/pre column-alignment logic predict_with_pipeline() falls back
+    to on a raw pipe.predict() failure — factored out here so explainability
+    can transform the SAME way without duplicating that alignment logic, and
+    so both stay correct together if the pipeline's column handling changes."""
+    steps = getattr(pipe, "named_steps", {})
+    fe = steps.get("fe", None)
+    prep = steps.get("pre") or steps.get("prep")
+    X = X_df.copy()
+    if fe is not None:
+        X = fe.transform(X)
+    if prep is None:
+        return X.values
+    if hasattr(prep, "transformers_"):
+        exp = []
+        for _, _, cols in prep.transformers_:
+            if isinstance(cols, (list, tuple)):
+                exp.extend(list(cols))
+        seen = set()
+        exp = [c for c in exp if not (c in seen or seen.add(c))]
+        for c in exp:
+            if c not in X.columns:
+                X[c] = np.nan
+        X = X[exp]
+    return prep.transform(X)
+
+def explain_profile_prediction(model_key: str, pipe, X_df: pd.DataFrame, predicted_class: str, top_n: int = 5) -> Optional[str]:
+    """Returns the top_n features whose SHAP contribution pushed the
+    prediction TOWARD predicted_class the most, as a compact pipe-separated
+    string like "total_flows:+0.142|avg_flow_duration:+0.089|...". Returns
+    None on any failure (missing shap, unsupported pipeline shape, class not
+    found in the model's classes_) — explainability is best-effort and must
+    never block a profile from being emitted.
+    """
+    if shap is None or not predicted_class:
+        return None
+    steps = getattr(pipe, "named_steps", {})
+    rf_estimator = steps.get("rf")
+    prep = steps.get("pre") or steps.get("prep")
+    if rf_estimator is None or not hasattr(rf_estimator, "feature_importances_"):
+        return None
+    explainer = _get_or_build_explainer(model_key, rf_estimator)
+    if explainer is None:
+        return None
+    try:
+        classes = list(getattr(rf_estimator, "classes_", []))
+        if predicted_class not in classes:
+            return None
+        class_idx = classes.index(predicted_class)
+        Xt = _transform_features_for_pipeline(pipe, X_df)
+        shap_values = explainer.shap_values(Xt)
+        # shap.__version__ 0.44.1 (pinned in requirements.txt) returns, for a
+        # multiclass RandomForestClassifier, a LIST of n_classes arrays each
+        # shaped (n_samples, n_features) — NOT a single (n_samples,
+        # n_features, n_classes) array. Newer shap releases (>=0.46 or so)
+        # changed this to the single-array form. Handle both so this keeps
+        # working if the pin above is ever bumped.
+        if isinstance(shap_values, list):
+            row_values = np.asarray(shap_values[class_idx])[0, :]
+        else:
+            arr = np.asarray(shap_values)
+            row_values = arr[0, :, class_idx] if arr.ndim == 3 else arr[0, :]
+        feature_names = list(prep.get_feature_names_out()) if prep is not None and hasattr(prep, "get_feature_names_out") else [f"f{i}" for i in range(len(row_values))]
+        # Strip the ColumnTransformer's "num__"/"cat__" prefix for a name a
+        # human reads directly (e.g. "avg_flow_duration", not "num__avg_flow_duration").
+        clean_names = [n.split("__", 1)[1] if "__" in n else n for n in feature_names]
+        pairs = sorted(zip(clean_names, row_values), key=lambda kv: -abs(kv[1]))[:top_n]
+        return "|".join(f"{name}:{val:+.3f}" for name, val in pairs)
+    except Exception:
+        return None
+
 # ───────────────────── HL assembly per row ──────────────
 def coerce_raw_df_types(df: pd.DataFrame) -> pd.DataFrame:
     keep_str = {
@@ -753,10 +895,11 @@ def build_hl_record(df_raw_row: pd.DataFrame,
                     maps: Dict[str,pd.DataFrame],
                     pt_store: PTStore,
                     models: Dict[str,Any],
-                    feat_row: Dict[str, float]) -> Optional[Dict[str, Any]]:
+                    feat_row: Dict[str, float]) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], pd.DataFrame]]:
     if df_raw_row.shape[0] != 1:
         return None
 
+    _t0 = time.time()
     X_feat = pd.DataFrame([feat_row])
     ml_preds: Dict[str, Any] = {}
     for k in ML_KEYS:
@@ -768,7 +911,9 @@ def build_hl_record(df_raw_row: pd.DataFrame,
             ml_preds[k] = yhat[0] if isinstance(yhat, (list, np.ndarray, pd.Series)) else yhat
         except Exception:
             continue
+    print(f"[TIMING] ml_preds loop: {time.time()-_t0:.3f}s", flush=True)
 
+    _t1 = time.time()
     try:
         raw_row = df_raw_row.iloc[0]
     except Exception:
@@ -776,6 +921,24 @@ def build_hl_record(df_raw_row: pd.DataFrame,
 
     if _is_attack_sqli(raw_row):
         ml_preds = _sqli_overrides(raw_row, feat_row, ml_preds)
+    print(f"[TIMING] sqli check: {time.time()-_t1:.3f}s", flush=True)
+
+    # SHAP explainability (Profile + 8 other ML-predicted fields) used to be
+    # computed HERE, synchronously — measured at ~4.1s total (9
+    # TreeExplainer.shap_values() calls, ~0.5s each, consistently, not just on
+    # first use) on top of the <1ms this function otherwise takes. That put
+    # the full explainability cost directly in the detect->decide->act
+    # critical path: SOARCA cannot apply a countermeasure until a profile
+    # record reaches profiles_out, so every incident's response was gated on
+    # 9 SHAP computations it doesn't need to decide anything (the
+    # countermeasure only reads Profile/DetectionAttack/IPs/Target — plain
+    # ml_preds values, already known here). Both fields are left None on the
+    # fast record returned by this function; compute_explainability_fields()
+    # below computes them separately, and the Kafka loop publishes them in a
+    # follow-up record (same actor_id) from a background thread so the fast
+    # record is never delayed by this.
+    explainability = None
+    explainability_all_fields = None
 
     flows = df_raw_row.copy()
     for col in ["attack","stage","threat","threat_type","protocol_distribution","ports_dst"]:
@@ -783,11 +946,13 @@ def build_hl_record(df_raw_row: pd.DataFrame,
     if "most_frequent_dst_port" in flows:
         flows["most_frequent_dst_port"] = pd.to_numeric(flows["most_frequent_dst_port"], errors="coerce").fillna(0)
 
+    _t2 = time.time()
     ttp_map = maps["ttp"]; tool_map=maps["tool"]; ev_map=maps["ev"]
     ttp_sets, _supp = build_ttps_sets(flows, ttp_map)
     ev_sets  = build_evasion_sets(flows, ev_map)
     tools_col= build_tools_column(flows, tool_map)
     kc_lookup= build_kc_lookup(ttp_map)
+    print(f"[TIMING] ttp/evasion/tools/kc build: {time.time()-_t2:.3f}s", flush=True)
 
     row = flows.iloc[0]
     tool = tools_col.iloc[0] if len(tools_col)>0 else "Unclassified"
@@ -814,9 +979,14 @@ def build_hl_record(df_raw_row: pd.DataFrame,
         actor_id = f"campaign_{_campaign}_{dst}"
     else:
         actor_id = f"profile_{df_raw_row.iloc[0].get('id')}"
+    _t3 = time.time()
     pref_targets_str = update_preferred_targets(actor_id, dst, bytes_sent, str(df_raw_row.iloc[0].get("first_seen","")), pt_store)
+    print(f"[TIMING] update_preferred_targets: {time.time()-_t3:.3f}s", flush=True)
 
+    _t4 = time.time()
     country_list = countries_from_ips(ips)
+    print(f"[TIMING] countries_from_ips: {time.time()-_t4:.3f}s", flush=True)
+    print(f"[TIMING] TOTAL build_hl_record: {time.time()-_t0:.3f}s", flush=True)
 
     rec = {
         "Id": actor_id,
@@ -852,8 +1022,88 @@ def build_hl_record(df_raw_row: pd.DataFrame,
             f" stage={str(df_raw_row.iloc[0].get('stage', '') or '').strip()}"
         ),
         "AutomationLevel": ml_preds.get("AutomationLevel"),
+        "Explainability": explainability,
+        "ExplainabilityAllFields": explainability_all_fields,
     }
-    return {k: rec.get(k, None) for k in PROFILE_COLUMNS}
+    fast_rec = {k: rec.get(k, None) for k in PROFILE_COLUMNS}
+    # ml_preds/X_feat are returned alongside the fast record purely so a
+    # caller can compute SHAP explainability afterwards (in a background
+    # thread, off the critical path) without needing to re-run the ML models
+    # — see compute_explainability_fields below.
+    return fast_rec, ml_preds, X_feat
+
+
+def compute_explainability_fields(models: Dict[str, Any], ml_preds: Dict[str, Any], X_feat: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+    """
+    The ~4.1s SHAP cost this repo used to pay synchronously inside
+    build_hl_record, factored out so it can run in a background thread AFTER
+    the fast record (Profile/DetectionAttack/IPs/Target — everything SOARCA
+    actually needs to decide and act) is already published. Pure function of
+    the same models/ml_preds/X_feat build_hl_record already computed; no
+    Kafka/network I/O here, so it's safe to call from any thread.
+    """
+    explainability = None
+    _profile_model = models.get("Profile")
+    _final_profile = ml_preds.get("Profile")
+    if _profile_model is not None and _final_profile:
+        explainability = explain_profile_prediction("Profile", _profile_model["model"], X_feat, str(_final_profile))
+
+    _explain_all_parts: List[str] = []
+    for _field_key in ML_KEYS:
+        if _field_key == "Profile":
+            continue  # already covered by `explainability` above
+        _field_model = models.get(_field_key)
+        _field_pred = ml_preds.get(_field_key)
+        if _field_model is None or not _field_pred:
+            continue
+        _field_expl = explain_profile_prediction(_field_key, _field_model["model"], X_feat, str(_field_pred))
+        if _field_expl:
+            _explain_all_parts.append(f"{_field_key}={_field_expl}")
+    explainability_all_fields = ";".join(_explain_all_parts) if _explain_all_parts else None
+    return explainability, explainability_all_fields
+
+
+# ─────────────── SHAP worker pool (separate processes) ───────────────
+# Running compute_explainability_fields() in a plain threading.Thread (the
+# first fix for this) got the fast record published quickly, but SHAP's
+# numpy/sklearn work still holds Python's GIL for most of its ~4s -- with
+# Falco's burst traffic spawning several of these threads close together,
+# each one starves the MAIN thread's own ml_preds loop (the 8 fast
+# RandomForest predictions every incoming message needs) of the GIL, measured
+# driving that loop from ~0.5s up to 5s+ within a single run even though no
+# single SHAP computation got any slower. A thread cannot fix this — only a
+# separate process, with its own GIL, actually runs SHAP truly in parallel
+# with the main loop. Workers load their own copy of the models directly
+# from disk (via _shap_worker_init, run once per process) instead of having
+# the main process pickle the whole MODELS dict through IPC on every call.
+_SHAP_WORKER_MODELS: Dict[str, Any] = {}
+_SHAP_WORKER_POOL: "ProcessPoolExecutor | None" = None
+
+
+def _shap_worker_init(models_dir: str, glob_pattern: str) -> None:
+    global _SHAP_WORKER_MODELS
+    _SHAP_WORKER_MODELS = collect_models(Path(models_dir), glob_pattern)
+
+
+def _shap_worker_compute(ml_preds: Dict[str, Any], X_feat: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+    return compute_explainability_fields(_SHAP_WORKER_MODELS, ml_preds, X_feat)
+
+
+def get_shap_worker_pool(models_dir: str, glob_pattern: str) -> ProcessPoolExecutor:
+    global _SHAP_WORKER_POOL
+    if _SHAP_WORKER_POOL is None:
+        # A small fixed pool (not one process per message): each worker's
+        # models are loaded once at process start and reused for that
+        # worker's whole lifetime, and 2 workers are enough to keep the
+        # explainability backlog from piling up behind the main loop without
+        # spending real CPU/memory on processes that would mostly sit idle
+        # between Falco bursts.
+        _SHAP_WORKER_POOL = ProcessPoolExecutor(
+            max_workers=2,
+            initializer=_shap_worker_init,
+            initargs=(models_dir, glob_pattern),
+        )
+    return _SHAP_WORKER_POOL
 
 # ───────────────────── CSV emitter ──────────────────────
 def rows_to_csv(rows: List[Dict[str, Any]], columns: List[str]) -> str:
@@ -945,6 +1195,11 @@ def main():
     if not MODELS:
         LOG.info("⚠️ Ignorado"); sys.exit(2)
 
+    # Warm the SHAP worker pool now (at startup, not on the first message) so
+    # the first real incident doesn't pay process-spawn + model-load latency
+    # on top of everything else.
+    shap_pool = get_shap_worker_pool(str(mdir), args.glob)
+
     try:
         consumer = make_consumer(args.bootstrap, args.topic_in, args.group_id, args.from_beginning)
         producer = make_producer(args.bootstrap, linger_ms=args.linger_ms)
@@ -990,9 +1245,31 @@ def main():
             LOG.info("🧮 Features listas")
 
             df_raw = pd.DataFrame([row_dict]); df_raw = coerce_raw_df_types(df_raw)
-            rec = build_hl_record(df_raw, maps, pt_store, MODELS, feats)
-            if not rec:
+            built = build_hl_record(df_raw, maps, pt_store, MODELS, feats)
+            if not built:
                 LOG.info("⚠️ Ignorado"); continue
+            rec, _ml_preds, _X_feat = built
+            # Structured, single-line dump of the exact inputs the ML models
+            # saw (raw_row + the 90-feature vector) and what they predicted
+            # for the 8 ML_KEYS attributes, so a rule-based re-run of
+            # High-Level.py's calc_automation_level/infer_skill/
+            # calc_risk_level_num/score_profiles/infer_knowledge/
+            # infer_attitude/infer_motivation/infer_affiliation against the
+            # SAME inputs can be diffed against these real ML predictions
+            # per-run, without needing DB credentials or reconstructing
+            # inputs after the fact. Container has no host mount, so stdout
+            # (captured via `docker logs`) is the only durable sink.
+            try:
+                _ml_vs_hl_dump = {
+                    "actor_id": rec.get("Id"),
+                    "campaign_id": rec.get("CampaignId"),
+                    "raw_row": {k: (None if pd.isna(v) else v) for k, v in row_dict.items()},
+                    "X_feat": {k: (None if (isinstance(v, float) and pd.isna(v)) else v) for k, v in feats.items()},
+                    "ml_preds": {k: _ml_preds.get(k) for k in ML_KEYS},
+                }
+                LOG.info("🔬 ML_VS_HL_DUMP %s", json.dumps(_ml_vs_hl_dump, default=str, ensure_ascii=False))
+            except Exception as _dump_exc:
+                LOG.info("⚠️ ML_VS_HL_DUMP failed: %s", _dump_exc)
 
             # Drop ransomware profiles whose Target is a public IP — these are
             # Isolation Forest false positives on outbound traffic (e.g. apk/apt
@@ -1017,14 +1294,74 @@ def main():
                 except Exception:
                     pass
                 producer.flush(5)
+                # explainability AND ttps appended here too (not just to the
+                # CSV sent to Kafka) because the GUI's log-line parser
+                # (_native_actor_profile_from_line in app.py) picks up
+                # WHICHEVER of this short "Enviado" summary or
+                # misp_to_soarca's own richer "TAPCD_PROFILE_READY" line it
+                # happens to capture first as "profile evidence" — depending
+                # on that ordering being fixed elsewhere would be fragile, so
+                # every log line that carries the Profile field also carries
+                # its explanation and its MITRE ATT&CK techniques (both are
+                # consumed by app.py's _kv() parser, semicolon-joined same as
+                # the CSV's own TTPs column).
                 LOG.info(
-                    "📤 Enviado actor_id=%s profile=%s attack=%s",
+                    "📤 Enviado actor_id=%s profile=%s attack=%s explainability=%s ttps=%s",
                     rec.get("Id", "?"),
                     rec.get("Profile", "?"),
                     rec.get("DetectionAttack", "?"),
+                    rec.get("Explainability") or "-",
+                    rec.get("TTPs") or "-",
                 )
             except Exception:
                 LOG.info("⚠️ Ignorado"); continue
+
+            # SHAP explainability (~4.1s for 9 models) runs in a SEPARATE
+            # PROCESS from the pool above — a thread was tried first, but
+            # SHAP's numpy/sklearn work holds the GIL long enough to starve
+            # the main loop's own fast ml_preds predictions under Falco's
+            # burst traffic (measured: 0.5s -> 5s+ within one run). A
+            # different process has its own GIL, so it genuinely doesn't
+            # block the main loop. This thread here is now just a thin
+            # waiter: it blocks on the process's future (which does NOT hold
+            # this process's GIL while waiting on IPC) and publishes the
+            # result — SOARCA/misp_to_soarca.py already dedups on
+            # (victim_ip, actor_id) and only ever fires ONE countermeasure per
+            # campaign (see its NETWORK_CM_DEDUP_SECONDS/ISOLATION_DEDUP_SECONDS
+            # guards), so this follow-up record — same actor_id, now carrying
+            # Explainability/ExplainabilityAllFields — only enriches the
+            # already-acted-on profile for the GUI/report instead of
+            # triggering a second action.
+            def _publish_explainability(rec=rec, ml_preds=_ml_preds, X_feat=_X_feat):
+                try:
+                    future = shap_pool.submit(_shap_worker_compute, ml_preds, X_feat)
+                    expl, expl_all = future.result(timeout=30)
+                    if not expl and not expl_all:
+                        return
+                    enriched = dict(rec)
+                    enriched["Explainability"] = expl
+                    enriched["ExplainabilityAllFields"] = expl_all
+                    out_csv2 = rows_to_csv([enriched], PROFILE_COLUMNS)
+                    fut2 = producer.send(args.topic_out, out_csv2)
+                    try:
+                        fut2.get(timeout=10)
+                    except Exception:
+                        pass
+                    producer.flush(5)
+                    # Both fields go into the log line now (ExplainabilityAllFields
+                    # was previously only published to Kafka, never logged) — the
+                    # GUI's log-tail parser (app.py's _native_actor_profile_from_line)
+                    # reads app.py-visible container logs, not the Kafka topic
+                    # directly, so a field missing from THIS line was invisible to
+                    # it regardless of being on the CSV record sent to Kafka.
+                    LOG.info(
+                        "📤 Enriquecido (explainability) actor_id=%s profile=%s explainability=%s explainability_fields=%s",
+                        enriched.get("Id", "?"), enriched.get("Profile", "?"), expl or "-", expl_all or "-",
+                    )
+                except Exception as exc:
+                    LOG.debug("Explainability enrichment failed (non-fatal): %s", exc)
+
+            threading.Thread(target=_publish_explainability, daemon=True).start()
 
         except Exception:
             LOG.info("⚠️ Ignorado"); continue

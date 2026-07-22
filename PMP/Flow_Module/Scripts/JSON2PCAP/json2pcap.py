@@ -767,7 +767,15 @@ if args.python == False:
                 d = [i for i in range(len(s1)) if s1[i] != s2[i]]
                 #print(d)
 
-        new_packet = scapy.Packet(bytes(bytearray.fromhex(frame_raw)))
+        # scapy.Packet() is the abstract base class -- it stores the raw
+        # bytes but has no dissector, so on read-back scapy can't recognize
+        # the link-layer framing and falls back to opaque Raw packets. Every
+        # frame captured off the wire here is Ethernet, so build an Ether()
+        # instance instead: that's what actually enables layer dissection
+        # (IP/TCP/UDP) downstream in CICFlowMeter, which filters on the IP
+        # layer to build flows -- with plain Packet() objects it recognizes
+        # zero packets as IP, silently producing an empty flow CSV every time.
+        new_packet = scapy.Ether(bytes(bytearray.fromhex(frame_raw)))
         if frame_time:
             new_packet.time = float(frame_time)
         #print(type(new_packet))

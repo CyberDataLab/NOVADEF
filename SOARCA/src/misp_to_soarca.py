@@ -14,7 +14,7 @@ import threading
 import sys
 import urllib3
 from pymisp import PyMISP
-from kafka import KafkaConsumer
+from confluent_kafka import Consumer as KafkaConsumer, KafkaError
 
 # Suppress urllib3 InsecureRequestWarning (requests are made with verify=False
 # intentionally in lab environments; the warning only pollutes the logs).
@@ -61,6 +61,35 @@ def _read_active_scenario() -> str:
     return _ACTIVE_SCENARIO_ID
 
 
+# Per-experiment "floor" epoch. The experiments API writes the start time of
+# the current experiment (as a unix epoch, seconds) here, right after it has
+# killed any leftover attack from the previous run and reset the pipeline.
+# The trigger reads it fresh on every message and rejects any profile whose
+# most-recent activity predates it (minus a small grace). This is the ONLY
+# reliable discriminator between "the attack happening right now" and "stale
+# backlog from the previous experiment", because the victim IP is the SAME
+# fixed address across every experiment in a reused scenario — neither the
+# per-victim recency high-water mark nor the process-startup cutoff can tell
+# a 10-minutes-ago profile apart from a live one when both target the same IP.
+_EXPERIMENT_FLOOR_FILE = "/app/state/experiment_floor_epoch.txt"
+# Grace (seconds) subtracted from the floor. TAPCD's LastActivity is a max()
+# over a flow-aggregation window that can lag real time by a few seconds, so
+# a live profile can carry a LastActivity slightly before the floor. Keep this
+# comfortably above that lag but well under the inter-experiment gap.
+_EXPERIMENT_FLOOR_GRACE_SECS = float(os.getenv("SOARCA_EXPERIMENT_FLOOR_GRACE_SECS", "45"))
+
+
+def _read_experiment_floor_epoch() -> float | None:
+    """Return the current experiment's floor epoch (seconds), or None if unset."""
+    try:
+        val = open(_EXPERIMENT_FLOOR_FILE).read().strip()
+        if val:
+            return float(val)
+    except Exception:
+        pass
+    return None
+
+
 def _parse_ipv4_octets(ip: str) -> list[int] | None:
     try:
         parts = [int(x) for x in str(ip or "").strip().split(".")]
@@ -73,12 +102,29 @@ def _parse_ipv4_octets(ip: str) -> list[int] | None:
         return None
 
 
+# Per-scenario static IPs the GUI API assigns to victim/attacker containers on
+# launcher_default (see _scenario_static_launcher_ip in NOVADEF_GUI/api/app.py)
+# live in this /24 — it exists ONLY to give each scenario's VICTIM a unique
+# address; the real attacker traffic still arrives from launcher_default's
+# main 172.18.0.0/24 block (where ATTACKER_IP_RANGE_START/END already point).
+# A victim IP inside this block must never cause the "different /24, remap to
+# victim's subnet" branch below to fire — that remap exists for genuinely
+# different scenario subnets where attacker and victim share the same /24,
+# and would otherwise block a range with zero actual attacker traffic in it.
+VICTIM_STATIC_IP_PREFIX = os.getenv("SOARCA_VICTIM_STATIC_IP_PREFIX", "172.18.100.")
+
+
 def _effective_ip_range(victim_ip: str | None) -> tuple[str, str]:
     """
     Build an effective blocking range aligned with the active scenario subnet.
     If configured range is on a different /24 than victim_ip, reuse victim /24
-    and keep configured host octets.
+    and keep configured host octets — UNLESS the victim_ip is one of the
+    per-scenario static addresses in VICTIM_STATIC_IP_PREFIX, in which case the
+    attacker's real subnet is always the configured one (see comment above).
     """
+    if str(victim_ip or "").startswith(VICTIM_STATIC_IP_PREFIX):
+        return ATTACKER_IP_RANGE_START, ATTACKER_IP_RANGE_END
+
     start_cfg = _parse_ipv4_octets(ATTACKER_IP_RANGE_START)
     end_cfg = _parse_ipv4_octets(ATTACKER_IP_RANGE_END)
     victim = _parse_ipv4_octets(str(victim_ip or ""))
@@ -99,6 +145,37 @@ def _effective_ip_range(victim_ip: str | None) -> tuple[str, str]:
 PROCESSED_EVENTS_FILE = '/app/state/processed_events.txt'
 LAST_ISOLATION_BY_VICTIM = {}
 ISOLATION_DEDUP_SECONDS = int(os.getenv('SOARCA_ISOLATION_DEDUP_SECONDS', '300'))
+# Guards the network (non-ransomware) block_ip_range countermeasure the same
+# way LAST_ISOLATION_BY_VICTIM guards the ransomware isolation one. TAPCD
+# emits one profile per aggregated FLOW (by design — flow_conditional_agg is
+# a per-flow topic, not a per-incident one), so a single sustained attack
+# naturally produces several TAPCD_PROFILE_READY messages as new source IPs
+# join. Each one that passed the incident_key dedup used to spawn its own
+# independent _delayed_network_countermeasure thread with no check for an
+# already-pending/already-applied countermeasure for that victim — so 3-4
+# concurrent 20s-delay threads would all fire trigger_soarca_playbook for the
+# same block, redundantly re-applying it (and hammering MISP with duplicate
+# enrichment calls, some erroring 403 "attribute already exists"). Superseded
+# by APPLIED_NETWORK_CM_RANGES below (keyed on victim+ip_range, permanent —
+# see that guard's own comment for why a time-based TTL here caused a
+# sustained attack to re-trigger the same countermeasure every ~30 minutes).
+# High-water mark of the most recent profile "recency" timestamp (LastActivity
+# or DetectionTs) seen per victim — see its usage site for why this is needed
+# on top of the 24h-grace staleness guard: TAPCD's periodic re-emission of a
+# victim's consolidated profile can hand this trigger an OLD backlog entry
+# right after a restart, and without this monotonic check that old entry can
+# win the incident-key dedup race and trigger a countermeasure for a stale
+# attack instead of the current one.
+# Persisted to disk (like PROCESSED_INCIDENTS below) — kept in-memory only,
+# this HWM reset to empty on every container recreate/restart, so the FIRST
+# message received after a restart always passed unconditionally (nothing to
+# compare it against yet) even when that first message was itself the stale
+# backlog entry — which is exactly the case that mattered, since a restart
+# racing a live attack is when a backlog is most likely to exist.
+PROFILE_RECENCY_HWM_FILE = '/app/state/profile_recency_hwm.json'
+# Populated below, once load_profile_recency_hwm() is defined (see near
+# PROCESSED_INCIDENTS for the same load-then-assign pattern).
+LAST_PROFILE_RECENCY_BY_VICTIM: dict[str, float]
 NETWORK_INCIDENT_DEDUP_SECONDS = int(os.getenv('SOARCA_NETWORK_INCIDENT_DEDUP_SECONDS', '1800'))
 PROCESSED_INCIDENTS_FILE = '/app/state/processed_incidents.json'
 TIMING_FILE = '/app/state/novadef_phase_timing.json'
@@ -123,6 +200,41 @@ def _write_phase_timing(key: str, ts: float | None = None) -> None:
         ts = time.time()
     with _TIMING_LOCK:
         _TIMING[key] = ts
+        try:
+            tmp = TIMING_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(_TIMING, f)
+            os.replace(tmp, TIMING_FILE)
+        except Exception as exc:
+            logger.warning("Could not write timing file: %s", exc)
+
+
+# Max SOARCA executions kept in the shared timing file — a single run can
+# trigger more than one countermeasure (exp3 fires network + host isolation
+# independently), and old executions from prior runs must not accumulate
+# forever in a file that gets read on every /api/ooda_summary call.
+_MAX_RECORDED_EXECUTIONS = 20
+
+
+def _record_soarca_execution(execution_id: str, playbook_id: str, victim_ip: str) -> None:
+    """Persist the real execution_id SOARCA returned from POST /trigger/playbook
+    so app.py can later call GET /reporter/{execution_id} on soarca-core for the
+    full structured execution report (steps, real commands run, SSH results) —
+    instead of the keyword-grep-over-logs approach used until now. Best-effort:
+    a failure here must never block the countermeasure itself, which has
+    already been applied by the time this is called."""
+    if not execution_id:
+        return
+    with _TIMING_LOCK:
+        executions = _TIMING.setdefault("soarca_executions", [])
+        executions.append({
+            "execution_id": execution_id,
+            "playbook_id": playbook_id,
+            "victim_ip": victim_ip,
+            "recorded_at": time.time(),
+        })
+        if len(executions) > _MAX_RECORDED_EXECUTIONS:
+            del executions[: len(executions) - _MAX_RECORDED_EXECUTIONS]
         try:
             tmp = TIMING_FILE + ".tmp"
             with open(tmp, "w") as f:
@@ -176,18 +288,29 @@ def ensure_state_dir():
     pathlib.Path('/app/state').mkdir(parents=True, exist_ok=True)
 
 
-def _enrich_misp_with_profile(profile_row: dict, victim_ip: str, actor_id: str, scenario_id: str | None = None) -> None:
+def _enrich_misp_with_profile(profile_row: dict, victim_ip: str, actor_id: str, scenario_id: str | None = None) -> bool:
     """Add TAPCD actor profile as a MISP attribute on the most recent event for victim_ip.
 
     Called after the profile is known (profiles_out) so the enrichment is always
     available — unlike the integrator which queries Neo4j while creating the event,
     before prep_pred has had a chance to run.
+
+    Returns True only when an attribute was actually added to a real MISP
+    event, False on every early-return path (no MISP connection, no recent
+    event, bad response, exception). Callers use this to gate their own
+    enrich_at phase-timing write — that timing used to be written
+    unconditionally right after calling this function, so a run whose
+    profile arrived with no matching MISP event yet (a real, non-error
+    case — see the "No hay eventos MISP recientes" branch below) still
+    recorded an enrich_at timestamp for enrichment that never happened,
+    which then fed a downstream latency stage (Profile→Enrich) with a
+    timestamp that didn't reflect real work.
     """
     try:
         misp = init_misp()
         if not misp:
             logger.warning("[MISP-ENRICH] No se pudo conectar a MISP para enriquecer el perfil.")
-            return
+            return False
 
         # Find the most recent MISP event mentioning the victim IP for THIS scenario.
         from datetime import datetime, timedelta
@@ -210,20 +333,20 @@ def _enrich_misp_with_profile(profile_row: dict, victim_ip: str, actor_id: str, 
         )
         if r.status_code != 200:
             logger.warning("[MISP-ENRICH] restSearch devolvió %s", r.status_code)
-            return
+            return False
 
         events = r.json()
         if isinstance(events, dict):
             events = events.get("response", [])
         if not events:
             logger.info("[MISP-ENRICH] No hay eventos MISP recientes para %s (scenario=%s) — se omite enriquecimiento.", victim_ip, scenario_id or _read_active_scenario())
-            return
+            return False
 
         # Most recent event first (MISP returns sorted by timestamp desc by default).
         event_id = str(events[0].get("id") or events[0].get("Event", {}).get("id", ""))
         if not event_id:
             logger.warning("[MISP-ENRICH] No se pudo obtener event_id del resultado de MISP.")
-            return
+            return False
 
         def _pf(key: str, default: str = "N/A") -> str:
             v = str(profile_row.get(key) or "").strip()
@@ -268,8 +391,10 @@ def _enrich_misp_with_profile(profile_row: dict, victim_ip: str, actor_id: str, 
             pythonify=True,
         )
         logger.info("[MISP-ENRICH] ✅ Perfil TAPCD añadido al evento MISP %s (victim=%s profile=%s)", event_id, victim_ip, _pf('Profile'))
+        return True
     except Exception as e:
         logger.warning("[MISP-ENRICH] No se pudo enriquecer evento MISP: %s", e)
+        return False
 
 
 def _merge_profiles(net_row: dict, ransomware_row: dict) -> dict:
@@ -372,6 +497,52 @@ def _enrich_misp_with_d3fend(victim_ip: str, d3fend_technique: str, playbook_nam
         logger.warning("[MISP-ENRICH] No se pudo añadir D3FEND a MISP: %s", e)
 
 
+def _enrich_misp_with_retry(
+    profile_row: dict,
+    victim_ip: str,
+    actor_id: str,
+    d3fend_technique: str,
+    playbook_name: str,
+    scenario_id: str | None = None,
+    max_attempts: int = 5,
+    delay_seconds: float = 3.0,
+) -> None:
+    """
+    Retry _enrich_misp_with_profile + _enrich_misp_with_d3fend a few times
+    with a short delay instead of firing once immediately after the
+    countermeasure decision.
+
+    Both call sites (network block_ip_range and ransomware isolation) used to
+    call these two enrichments exactly once, right as the countermeasure was
+    applied. But the MISP event for this victim is created by a SEPARATE
+    process (the misp-integrator, consuming its own detection pipeline) that
+    can genuinely still be a few seconds behind the countermeasure decision —
+    SOARCA reacts to a TAPCD profile fast enough that "no hay eventos MISP
+    recientes" (see _enrich_misp_with_profile's own early-return) was a real,
+    reproducible race, not a rare edge case: the countermeasure and its
+    D3FEND/profile enrichment could both silently no-op forever if the event
+    simply hadn't landed yet on that one attempt. Since this already runs on
+    its own background thread (never blocking Decide/Act), a few retries
+    across several seconds costs nothing critical and closes that race in
+    the common case where the event shows up moments later.
+    """
+    for attempt in range(max_attempts):
+        profile_enriched = _enrich_misp_with_profile(profile_row, victim_ip, actor_id, scenario_id=scenario_id)
+        if profile_enriched:
+            _write_phase_timing("enrich_at")
+        _enrich_misp_with_d3fend(
+            victim_ip,
+            d3fend_technique=d3fend_technique,
+            playbook_name=playbook_name,
+            status="applied",
+            scenario_id=scenario_id,
+        )
+        if profile_enriched:
+            return
+        if attempt < max_attempts - 1:
+            time.sleep(delay_seconds)
+
+
 def init_misp():
     try:
         return PyMISP(MISP_URL, MISP_KEY, MISP_VERIFY_CERT, debug=False)
@@ -412,6 +583,70 @@ def save_processed_incidents(data: dict[str, int]) -> None:
 
 
 PROCESSED_INCIDENTS = load_processed_incidents()
+
+
+APPLIED_NETWORK_CM_RANGES_FILE = '/app/state/applied_network_cm_ranges.json'
+
+
+def load_applied_network_cm_ranges() -> set[tuple[str, str, str, str]]:
+    """
+    Persists which (scenario_id, victim_ip, ip_range_start, ip_range_end)
+    block_ip_range countermeasures have already been applied, surviving a
+    trigger restart — without this, a container restart mid-attack would
+    forget the countermeasure was already up and could re-fire it again
+    once a new campaign_id rotation looked like a fresh incident.
+
+    scenario_id is part of the key (added after this file's first version,
+    which only kept victim_ip+range — see that version's own comment on why
+    a brand new scenario reusing a previously-attacked victim_ip needs its
+    OWN act_at/execution evidence, not silently zero countermeasure history
+    because some earlier scenario already touched the same victim). Old
+    3-element entries from that earlier format are dropped on load rather
+    than crashing or being misread as a 4-element key with a missing field.
+    """
+    ensure_state_dir()
+    if not os.path.exists(APPLIED_NETWORK_CM_RANGES_FILE):
+        return set()
+    try:
+        with open(APPLIED_NETWORK_CM_RANGES_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return {tuple(item) for item in data if isinstance(item, list) and len(item) == 4}
+    except Exception:
+        pass
+    return set()
+
+
+def save_applied_network_cm_ranges(data: set[tuple[str, str, str, str]]) -> None:
+    ensure_state_dir()
+    with open(APPLIED_NETWORK_CM_RANGES_FILE, 'w', encoding='utf-8') as f:
+        json.dump([list(item) for item in data], f)
+
+
+APPLIED_NETWORK_CM_RANGES = load_applied_network_cm_ranges()
+
+
+def load_profile_recency_hwm() -> dict[str, float]:
+    ensure_state_dir()
+    if not os.path.exists(PROFILE_RECENCY_HWM_FILE):
+        return {}
+    try:
+        with open(PROFILE_RECENCY_HWM_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): float(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def save_profile_recency_hwm(data: dict[str, float]) -> None:
+    ensure_state_dir()
+    with open(PROFILE_RECENCY_HWM_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f)
+
+
+LAST_PROFILE_RECENCY_BY_VICTIM = load_profile_recency_hwm()
 
 
 def _extract_attack_fingerprint(event_info: str) -> str | None:
@@ -468,39 +703,39 @@ def trigger_soarca_playbook(attacker_ip, victim_ip, threat_info):
             ip_range_end = parts[-1].strip()
     
     playbook_file = '/app/playbooks/block_ip_range.json' if is_range else PLAYBOOK_PATH
-    action_msg = f"rango {ip_range_start}-{ip_range_end}" if is_range else f"IP {attacker_ip}"
-    logger.info(f"🚀 Lanzando playbook: bloquear {action_msg} en {victim_ip}")
+    action_msg = f"range {ip_range_start}-{ip_range_end}" if is_range else f"IP {attacker_ip}"
+    logger.info(f"🚀 Launching playbook: block {action_msg} on {victim_ip}")
 
-    # Cargar plantilla del playbook
+    # Load the playbook template
     try:
         with open(playbook_file, 'r') as f:
             playbook = json.load(f)
     except Exception as e:
-        logger.error(f"❌ No se pudo leer el playbook desde {playbook_file}: {e}")
+        logger.error(f"❌ Could not read playbook from {playbook_file}: {e}")
         return
 
-    # Trabajamos sobre una copia para no mutar la plantilla en memoria
+    # Work on a copy so the in-memory template is never mutated
     playbook = copy.deepcopy(playbook)
 
-    # 1. Inyectar victim_ip en todos los target_definitions SSH/Linux
+    # 1. Inject victim_ip into every SSH/Linux target_definition
     for target in playbook.get('target_definitions', {}).values():
         if target.get('type') in {'linux', 'ssh'}:
             target['address'] = {'ipv4': [victim_ip]}
-            logger.info(f"   🎯 Target SSH dinámico → {victim_ip}")
+            logger.info(f"   🎯 Dynamic SSH target → {victim_ip}")
 
-    # 2. Inyectar variables según sea IP individual o rango
+    # 2. Inject variables depending on single IP vs range
     if is_range:
         if '__ip_range_start__' in playbook.get('playbook_variables', {}):
             playbook['playbook_variables']['__ip_range_start__']['value'] = ip_range_start
         if '__ip_range_end__' in playbook.get('playbook_variables', {}):
             playbook['playbook_variables']['__ip_range_end__']['value'] = ip_range_end
-        logger.info(f"   📋 Variables de rango: {ip_range_start} - {ip_range_end}")
+        logger.info(f"   📋 Range variables: {ip_range_start} - {ip_range_end}")
     else:
         if '__target_ip__' in playbook.get('playbook_variables', {}):
             playbook['playbook_variables']['__target_ip__']['value'] = attacker_ip
-        logger.info(f"   📋 Variable de IP: {attacker_ip}")
+        logger.info(f"   📋 IP variable: {attacker_ip}")
 
-    # 3. Enviar a SOARCA para ejecución inmediata
+    # 3. Send to SOARCA for immediate execution
     url = f"{SOARCA_API}/trigger/playbook"
     logger.info(
         "SOARCA_COUNTERMEASURE_REQUESTED source=tapcd_or_misp victim_ip=%s attacker_scope=%s threat=%s",
@@ -512,12 +747,25 @@ def trigger_soarca_playbook(attacker_ip, victim_ip, threat_info):
         response = requests.post(url, json=playbook, timeout=45)
         if response.status_code == 200:
             _write_phase_timing("act_at")
-            logger.info(f"✅ Playbook ejecutado: {action_msg} bloqueado en {victim_ip}")
+            logger.info(f"✅ Playbook executed: {action_msg} blocked on {victim_ip}")
             logger.info(
                 "SOARCA_COUNTERMEASURE_APPLIED source=tapcd_or_misp victim_ip=%s attacker_scope=%s d3fend=D3-NetworkTrafficFiltering",
                 victim_ip,
                 attacker_ip,
             )
+            # SOARCA's own response body is {"execution_id": "...", "payload":
+            # "playbook--..."} — confirmed live against soarca-core. Persist
+            # it so the GUI can later fetch this execution's real step-by-step
+            # report (GET /reporter/{execution_id}) instead of grepping logs.
+            try:
+                resp_body = response.json()
+                _record_soarca_execution(
+                    execution_id=str(resp_body.get("execution_id") or ""),
+                    playbook_id=playbook.get("id", ""),
+                    victim_ip=victim_ip,
+                )
+            except Exception as exc:
+                logger.warning("Could not parse/record SOARCA execution_id: %s", exc)
         else:
             logger.warning(f"⚠️ SOARCA respondió {response.status_code}: {response.text[:300]}")
     except Exception as e:
@@ -538,32 +786,54 @@ def _consume_tapcd_profile_events() -> None:
     # Record startup time (ms) — messages produced before this moment are from
     # prior experiment runs and must be skipped to avoid false positive actions.
     _startup_ts_ms = int(time.time() * 1000)
-    consumer = KafkaConsumer(
-        SOARCA_TAPCD_PROFILE_TOPIC,
-        bootstrap_servers=[KAFKA_BOOTSTRAP],
-        auto_offset_reset="latest",
-        enable_auto_commit=True,
-        group_id=os.getenv("SOARCA_TAPCD_GROUP_ID", "soarca-tapcd-trigger"),
-        value_deserializer=lambda v: v,
-        # Allow long processing (SSH + SOARCA calls can take 30-60s each).
-        # Default is 300000ms (5 min); we extend to 10 min to prevent the
-        # consumer group from dying mid-playbook and reprocessing stale messages.
-        max_poll_interval_ms=600000,
-        session_timeout_ms=60000,
-        heartbeat_interval_ms=20000,
-        max_poll_records=1,  # process one message at a time to avoid batching delays
-    )
+    # Migrated from kafka-python's KafkaConsumer to confluent-kafka (rdkafka) —
+    # the same library alert_manager.py already uses successfully. rdkafka
+    # sends group heartbeats from a background thread independent of poll(),
+    # so session.timeout.ms (how fast the broker notices a dead member) and
+    # max.poll.interval.ms (how long a single message may take to process)
+    # are decoupled: this lets session.timeout.ms be kept low (fast rejoin on
+    # container restart) while max.poll.interval.ms stays high (a slow
+    # SSH/SOARCA call never gets the consumer evicted mid-playbook).
+    # kafka-python's heartbeat, by contrast, is only sent between poll()
+    # calls, so a single session_timeout_ms had to cover BOTH concerns at
+    # once — set high (60s) to tolerate 30-60s SOARCA calls, this meant every
+    # container restart (one per experiment launch, see
+    # _reset_detector_runtime_state() in app.py) left the broker waiting up
+    # to 60s to expire the old member before the reconnecting consumer could
+    # rejoin, confirmed via `kafka-consumer-groups.sh --describe` showing
+    # "Warning: Consumer group is rebalancing" for 15-30+s after restart —
+    # directly inflating attack→countermeasure latency for exp2/exp3 (the
+    # ransomware/host detection path that consumes this topic).
+    consumer = KafkaConsumer({
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "group.id": os.getenv("SOARCA_TAPCD_GROUP_ID", "soarca-tapcd-trigger"),
+        "enable.auto.commit": True,
+        "auto.offset.reset": "latest",
+        "session.timeout.ms": 6000,
+        "max.poll.interval.ms": 600000,
+        "socket.keepalive.enable": True,
+        "enable.partition.eof": False,
+    })
+    consumer.subscribe([SOARCA_TAPCD_PROFILE_TOPIC])
     try:
-        for message in consumer:
+        while True:
+            msg = consumer.poll(timeout=1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() != KafkaError._PARTITION_EOF:
+                    logger.warning("Kafka consumer error: %s", msg.error())
+                continue
             try:
                 # Skip messages produced before this process started (stale Kafka backlog).
-                if message.timestamp and message.timestamp < _startup_ts_ms:
+                _msg_ts = msg.timestamp()[1] if msg.timestamp() else None
+                if _msg_ts and _msg_ts < _startup_ts_ms:
                     logger.debug(
                         "⏭️ Mensaje Kafka ignorado (anterior al arranque): ts=%d startup=%d",
-                        message.timestamp, _startup_ts_ms,
+                        _msg_ts, _startup_ts_ms,
                     )
                     continue
-                raw = (message.value or b"").decode("utf-8", errors="replace")
+                raw = (msg.value() or b"").decode("utf-8", errors="replace")
                 rows = list(csv.DictReader(io.StringIO(raw)))
                 if not rows:
                     continue
@@ -593,6 +863,7 @@ def _consume_tapcd_profile_events() -> None:
                 # attack is happening RIGHT NOW — using it here wrongly dropped live
                 # spraying profiles and suppressed their countermeasure.
                 _recency_ts = str(profile_row.get("LastActivity") or "").strip() or detection_ts
+                _rts_epoch: float | None = None
                 if _recency_ts:
                     try:
                         _rts_str = _recency_ts.replace("Z", "").replace("T", " ").split(".")[0]
@@ -605,10 +876,22 @@ def _consume_tapcd_profile_events() -> None:
                         # messages produced before this process started (cross-session);
                         # this guard only eliminates genuinely old cross-day records.
                         _cutoff_epoch = (_startup_ts_ms / 1000.0) - 86400  # 24h grace window
+                        # Per-experiment floor: the previous 24h cutoff is far too
+                        # loose to separate consecutive experiments in a REUSED
+                        # scenario (same victim IP, minutes apart) — a profile from
+                        # the prior run 10 minutes ago sails right through it and
+                        # fires the countermeasure BEFORE the current attack even
+                        # starts. If the experiments API has published a floor for
+                        # the current run, use the tighter of the two cutoffs.
+                        _floor_epoch = _read_experiment_floor_epoch()
+                        if _floor_epoch is not None:
+                            _cutoff_epoch = max(_cutoff_epoch, _floor_epoch - _EXPERIMENT_FLOOR_GRACE_SECS)
                         if _rts_epoch < _cutoff_epoch:
                             logger.info(
-                                "⏭️ Perfil ignorado por LastActivity anterior al arranque: profile=%s last_activity=%s",
+                                "⏭️ Perfil ignorado por LastActivity anterior al inicio del experimento: "
+                                "profile=%s last_activity=%s floor=%s",
                                 profile_row.get("Profile", "?"), _recency_ts,
+                                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_cutoff_epoch)),
                             )
                             continue
                     except Exception:
@@ -687,6 +970,35 @@ def _consume_tapcd_profile_events() -> None:
                     logger.warning("TAPCD evento sin víctima válida. target=%s", victim_candidate)
                     continue
 
+                # Reject profiles whose recency timestamp is OLDER than the most
+                # recent one already processed for this victim (regardless of
+                # Kafka message ordering/timestamp). This is a stronger guard
+                # than the 24h-grace one above: this trigger consumer restarting
+                # (recreated for a code deploy, or crashing) loses any
+                # in-memory campaign-progress state (APPLIED_NETWORK_CM_RANGES
+                # itself is persisted to disk and survives this — see its own
+                # comment), but TAPCD re-emits a victim's CONSOLIDATED
+                # profile periodically — carrying whatever LastActivity/
+                # DetectionTs it had — rather than only on fresh detections, and
+                # that re-emission's Kafka delivery timestamp is fresh enough to
+                # pass the startup guard. On restart, this trigger then replays
+                # a backlog of such messages and can act on the OLDEST one in
+                # that backlog (whichever happens to satisfy the incident-key
+                # dedup first) instead of the most recent, live attack — which
+                # is exactly backwards. Tracking a monotonic high-water mark per
+                # victim closes that gap without touching the 24h guard's own
+                # purpose (dropping genuinely old cross-day records).
+                if _rts_epoch is not None:
+                    _victim_hwm = LAST_PROFILE_RECENCY_BY_VICTIM.get(victim_ip)
+                    if _victim_hwm is not None and _rts_epoch < _victim_hwm:
+                        logger.info(
+                            "⏭️ Perfil descartado por ser más antiguo que el último visto para %s (last_activity=%s, hwm=%s)",
+                            victim_ip, _recency_ts, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_victim_hwm)),
+                        )
+                        continue
+                    LAST_PROFILE_RECENCY_BY_VICTIM[victim_ip] = max(_victim_hwm or 0.0, _rts_epoch)
+                    save_profile_recency_hwm(LAST_PROFILE_RECENCY_BY_VICTIM)
+
                 # Campaign consolidation: once a victim has been fully isolated
                 # (ransomware/host countermeasure), ALL later profiles for that
                 # victim are redundant — the host is already cut off from the
@@ -714,7 +1026,7 @@ def _consume_tapcd_profile_events() -> None:
                         "automation=%s ttps=%s kill_chain=%s tools=%s evasion=%s "
                         "threat_group=%s campaigns=%s country=%s "
                         "target=%s preferred_target=%s first_seen=%s last_activity=%s "
-                        "is_ransomware=%s",
+                        "is_ransomware=%s explainability=%s explainability_fields=%s",
                         actor_id or "-", profile_name, victim_ip, ",".join(attacker_ips[:10]),
                         detection_alert, detection_type, detection_attack, detection_stage, detection_ts,
                         _pv("Motivation"), _pv("Knowledge"), _pv("Attitude"), _pv("Affiliation"),
@@ -722,6 +1034,17 @@ def _consume_tapcd_profile_events() -> None:
                         _pv("KillChainPhase"), _pv("Tools"), _pv("Evasion"), _pv("ThreatGroup"),
                         _pv("Campaigns"), _pv("Country"), _pv("Target"), _pv("PreferredTarget"),
                         _pv("FirstSeen"), _pv("LastActivity"), is_ransomware_profile,
+                        # SHAP top-contributor string from prep_pred (e.g.
+                        # "total_flows:+0.142|avg_flow_duration:+0.089") — no
+                        # internal spaces, safe for this space-separated kv log
+                        # line and app.py's \S+ key=value parser.
+                        _pv("Explainability"),
+                        # Same SHAP explanation, but per-field, for every OTHER
+                        # ML-predicted field too (Motivation/Knowledge/Attitude/
+                        # Affiliation/Skills/RiskLevel/AutomationLevel) — see
+                        # prep_pred.py's ExplainabilityAllFields for the format
+                        # ("Field1=feat:+val|...;Field2=..."), also space-free.
+                        _pv("ExplainabilityAllFields"),
                     )
 
                 # If a ransomware (host) profile has already been received for
@@ -747,11 +1070,26 @@ def _consume_tapcd_profile_events() -> None:
                     # network profiles from stream_low are suppressed.
                     RANSOMWARE_RECEIVED_FOR_VICTIM[victim_ip] = time.time()
 
-                # Dedup by victim + attack + time bucket (5-min windows).
-                # Using wall-clock time (not dataset timestamps) ensures that
-                # consecutive experiments on the same victim_ip get distinct keys.
+                # Dedup by victim + attack + time bucket (5-min windows) + the
+                # profile's own detection_ts. The wall-clock bucket alone used
+                # to let a STALE re-emission collide with a genuinely NEW
+                # detection: TAPCD periodically re-emits a victim's
+                # consolidated profile (carrying its ORIGINAL detection_ts,
+                # possibly hours old) rather than only on fresh detections,
+                # and that re-emission's Kafka message timestamp is fresh
+                # enough to pass the startup-backlog filter above. When such
+                # a stale re-emission landed first in a given 5-min bucket, it
+                # occupied the (victim, attack, profile, bucket) key and every
+                # later message with the same attack/profile in that bucket —
+                # including the real, live attack's own detection — was
+                # dropped as "already mitigated" until some other field
+                # combination happened to produce an unseen key. Folding
+                # detection_ts into the key means a repeat of the SAME old
+                # profile still collapses to the same key (still correctly
+                # deduped), but a NEW detection (different detection_ts) gets
+                # its own key and is never blocked by an older one.
                 _time_bucket = int(time.time() // 300)  # 5-minute bucket
-                incident_key = f"tapcd:{victim_ip}|attack:{detection_attack.lower()}|profile:{profile_name.lower()}|t:{_time_bucket}"
+                incident_key = f"tapcd:{victim_ip}|attack:{detection_attack.lower()}|profile:{profile_name.lower()}|ts:{detection_ts}|t:{_time_bucket}"
                 if not should_process_network_incident(incident_key):
                     logger.info("⏭️ Incidente TAPCD ya mitigado recientemente (%s)", incident_key)
                     continue
@@ -776,7 +1114,24 @@ def _consume_tapcd_profile_events() -> None:
 
                 t_profile_ready = time.time()
                 _emit_profile_ready()
-                _write_phase_timing("profile_at", t_profile_ready)
+                # profile_at/decide_at used to be written HERE, unconditionally,
+                # for every profile that reaches this point — including a
+                # re-detection of the SAME already-mitigated campaign that will
+                # go on to hit the network-CM dedup guard below and `continue`
+                # without ever triggering a real decision/action. A sustained
+                # attack script keeps generating fresh detections after its own
+                # countermeasure already fired, so this kept overwriting the
+                # real, original profile_at/decide_at with a much later
+                # re-detection's timestamp — producing negative
+                # decide_at-enrich_at / act_at-decide_at deltas that the GUI
+                # clamped to 0 (the OODA waterfall/clock showing every stage at
+                # 0.0s despite a normal, fast cycle). Only record these once we
+                # know this specific profile leads to a REAL decision: for the
+                # ransomware branch that's unconditional (trigger_soarca_
+                # isolation has its own internal dedup and no-ops silently), for
+                # the network branch it's only once the dedup guard is passed.
+                if is_ransomware_profile:
+                    _write_phase_timing("profile_at", t_profile_ready)
 
                 threat_info = (
                     f"tapcd_profile={profile_name}; actor_id={actor_id}; target={victim_ip}; "
@@ -785,69 +1140,120 @@ def _consume_tapcd_profile_events() -> None:
                     f"detection_stage={detection_stage}; detection_ts={detection_ts}"
                 )
 
-                # Decide: trigger SOARCA immediately — do NOT wait for MISP
-                # enrichment. MISP enrichment is purely observational and can
-                # run in the background without delaying the countermeasure.
-                _write_phase_timing("decide_at")
-
                 if is_ransomware_profile:
+                    # Decide: trigger SOARCA immediately — do NOT wait for MISP
+                    # enrichment. MISP enrichment is purely observational and can
+                    # run in the background without delaying the countermeasure.
+                    _write_phase_timing("decide_at")
                     # Merge with the network profile if we have one cached for this victim
                     _net_cached = _NETWORK_PROFILE_FOR_VICTIM.get(victim_ip)
                     _profile_to_enrich = _merge_profiles(_net_cached, profile_row) if _net_cached else profile_row
                     _merged_actor_id = actor_id + (f"+{_net_cached.get('Id','')}" if _net_cached else "")
                     trigger_soarca_isolation(victim_ip, threat_info)
                     _sc = current_scenario
+                    def _enrich_ransomware_profile_bg(pr=_profile_to_enrich, aid=_merged_actor_id, sc=_sc, vip=victim_ip):
+                        _enrich_misp_with_retry(
+                            pr, vip, aid,
+                            d3fend_technique="Network Isolation (D3-NetworkIsolation) + Execution Isolation (D3-ExecutionIsolation)",
+                            playbook_name="isolate_lab_host",
+                            scenario_id=sc,
+                        )
                     threading.Thread(
-                        target=lambda pr=_profile_to_enrich, aid=_merged_actor_id, sc=_sc: (
-                            _enrich_misp_with_profile(pr, victim_ip, aid, scenario_id=sc),
-                            _write_phase_timing("enrich_at"),
-                            _enrich_misp_with_d3fend(
-                                victim_ip,
-                                d3fend_technique="Network Isolation (D3-NetworkIsolation) + Execution Isolation (D3-ExecutionIsolation)",
-                                playbook_name="isolate_lab_host",
-                                status="applied",
-                                scenario_id=sc,
-                            ),
-                        ),
+                        target=_enrich_ransomware_profile_bg,
                         daemon=True,
                         name="misp-enrich-bg",
                     ).start()
                 else:
                     # Cache this network profile so the ransomware profile can merge it
                     _NETWORK_PROFILE_FOR_VICTIM[victim_ip] = profile_row
-                    # For network-only profiles, wait briefly before applying
-                    # block_ip_range. If a ransomware profile arrives in that
-                    # window (RANSOMWARE_RECEIVED_FOR_VICTIM gets set), skip the
-                    # block_ip — isolation will handle the whole campaign instead.
+                    # One TAPCD_PROFILE_READY per sustained attack keeps arriving as
+                    # new source IPs join — guard here, BEFORE spawning the
+                    # 20s-delay thread, so only the first message for a given
+                    # victim+ip_range schedules a countermeasure; later ones
+                    # for the SAME range just register/enrich without
+                    # spawning a redundant thread (see APPLIED_NETWORK_CM_
+                    # RANGES's own comment below for the full guard logic).
+                    #
+                    # Guard keyed on (scenario_id, victim_ip, ip_range) —
+                    # NOT (victim_ip, actor_id) with a time-based TTL.
+                    # actor_id embeds Alert Manager's campaign_id, which
+                    # rotates every CAMPAIGN_WINDOW_SECS (1800s) for a
+                    # sustained attack whenever the fan-in detector's own
+                    # alert cooldown (also 1800s) leaves a gap longer than
+                    # that between alerts — a real, continuous attack
+                    # against the same victim then looks like a "new
+                    # campaign" every ~30 minutes and kept re-triggering
+                    # this exact same block_ip_range countermeasure, even
+                    # though iptables already had the rule (the playbook's
+                    # own `iptables -C ... || -A ...` check made this a
+                    # harmless no-op at the firewall level, but it still
+                    # inflated the SOARCA execution history with duplicate-
+                    # looking entries for a countermeasure that was never
+                    # actually removed). A countermeasure already applied
+                    # for this exact victim+range is never relaunched
+                    # WITHIN THE SAME SCENARIO, no matter how much time
+                    # passes or how many times the campaign_id rotates.
+                    # scenario_id IS part of the key, though: this lab
+                    # reuses the same handful of victim IPs across many
+                    # DIFFERENT scenarios, and each new scenario is a
+                    # genuinely new incident that must get its own
+                    # act_at/execution evidence for its own report — without
+                    # scenario_id here, a brand new scenario against a
+                    # previously-used victim_ip silently never recorded
+                    # decide_at/act_at at all (the guard treated it as
+                    # "already handled" forever), leaving that scenario's
+                    # own incident permanently stuck with no Act evidence.
+                    _eff_start, _eff_end = _effective_ip_range(victim_ip)
+                    _net_guard_key = (current_scenario or "", victim_ip, _eff_start, _eff_end)
+                    if _net_guard_key in APPLIED_NETWORK_CM_RANGES:
+                        logger.info(
+                            "⏭️ block_ip_range ya aplicado para %s rango %s-%s en este escenario (campaña %s); perfil registrado sin relanzar la contramedida.",
+                            victim_ip, _eff_start, _eff_end, actor_id,
+                        )
+                        continue
+                    APPLIED_NETWORK_CM_RANGES.add(_net_guard_key)
+                    save_applied_network_cm_ranges(APPLIED_NETWORK_CM_RANGES)
+                    # Only now do we know this profile leads to a real decision
+                    # (see the comment above t_profile_ready for why these can't
+                    # be written earlier, unconditionally).
+                    _write_phase_timing("profile_at", t_profile_ready)
+                    _write_phase_timing("decide_at")
+                    # Apply block_ip_range IMMEDIATELY on a network profile — no
+                    # artificial wait. This used to sleep(5) "in case a ransomware
+                    # profile arrives" so a single isolation could cover the whole
+                    # hybrid campaign instead of two separate actions, but that was
+                    # a time-based guess standing in for something the Alert
+                    # Manager already does correctly: it correlates every alert
+                    # for a victim (network AND Falco/ransomware alike) into the
+                    # SAME campaign_id, so the profile arriving here is already
+                    # known to be part of the right campaign — there is nothing
+                    # left to "wait and see". If a ransomware profile for this
+                    # victim arrives later, the branch above (RANSOMWARE_RECEIVED_
+                    # FOR_VICTIM) still fires the isolation on its own; applying
+                    # block_ip_range first does not conflict with it (the blocked
+                    # range is a strict subset of what a full host isolation
+                    # blocks) and reflects the real OODA timeline — each
+                    # detection triggers its own action the moment it happens,
+                    # instead of every action waiting on a fixed clock.
                     _net_victim_ip = victim_ip
                     _net_profile_row = profile_row
                     _net_actor_id = actor_id
                     _net_threat_info = threat_info
                     _net_scenario = current_scenario
-                    def _delayed_network_countermeasure(
+                    def _apply_network_countermeasure(
                         vip=_net_victim_ip, pr=_net_profile_row,
                         aid=_net_actor_id, ti=_net_threat_info, sc=_net_scenario,
                     ):
-                        time.sleep(20)
-                        if vip in RANSOMWARE_RECEIVED_FOR_VICTIM:
-                            logger.info(
-                                "⏭️ block_ip_range cancelado para %s — perfil ransomware recibido durante la espera; la isolación cubre la campaña.",
-                                vip,
-                            )
-                            return
                         eff_start, eff_end = _effective_ip_range(vip)
                         ip_range = f"{eff_start},{eff_end}"
                         trigger_soarca_playbook(ip_range, vip, ti)
-                        _enrich_misp_with_profile(pr, vip, aid, scenario_id=sc)
-                        _write_phase_timing("enrich_at")
-                        _enrich_misp_with_d3fend(
-                            vip,
+                        _enrich_misp_with_retry(
+                            pr, vip, aid,
                             d3fend_technique="Inbound Traffic Filtering (D3-InboundTrafficFiltering) + Network Traffic Filtering (D3-NetworkTrafficFiltering)",
                             playbook_name="block_ip_range",
-                            status="applied",
                             scenario_id=sc,
                         )
-                    threading.Thread(target=_delayed_network_countermeasure, daemon=True, name="net-cm-delay").start()
+                    threading.Thread(target=_apply_network_countermeasure, daemon=True, name="net-cm-apply").start()
             except Exception as e:
                 logger.warning("Error procesando evento TAPCD profiles_out: %s", e)
                 continue
@@ -914,16 +1320,16 @@ def trigger_soarca_isolation(victim_ip, threat_info):
     now = time.time()
     last = LAST_ISOLATION_BY_VICTIM.get(victim_ip, 0)
     if now - last < ISOLATION_DEDUP_SECONDS:
-        logger.info(f"⏭️ Aislamiento ya aplicado recientemente para {victim_ip}, se omite relanzar.")
+        logger.info(f"⏭️ Isolation already applied recently for {victim_ip}, skipping relaunch.")
         return
 
-    logger.info(f"🚀 Lanzando playbook de aislamiento en {victim_ip}")
+    logger.info(f"🚀 Launching isolation playbook on {victim_ip}")
 
     try:
         with open(ISOLATION_PLAYBOOK_PATH, 'r') as f:
             playbook = json.load(f)
     except Exception as e:
-        logger.error(f"❌ No se pudo leer el playbook de aislamiento desde {ISOLATION_PLAYBOOK_PATH}: {e}")
+        logger.error(f"❌ Could not read isolation playbook from {ISOLATION_PLAYBOOK_PATH}: {e}")
         return
 
     playbook = copy.deepcopy(playbook)
@@ -931,7 +1337,7 @@ def trigger_soarca_isolation(victim_ip, threat_info):
     for target in playbook.get('target_definitions', {}).values():
         if target.get('type') in {'linux', 'ssh'}:
             target['address'] = {'ipv4': [victim_ip]}
-            logger.info(f"   🎯 Target SSH dinámico (aislamiento) → {victim_ip}")
+            logger.info(f"   🎯 Dynamic SSH target (isolation) → {victim_ip}")
 
     if '__isolation_comment__' in playbook.get('playbook_variables', {}):
         playbook['playbook_variables']['__isolation_comment__']['value'] = 'novadef-ransomware-lab'
@@ -941,8 +1347,17 @@ def trigger_soarca_isolation(victim_ip, threat_info):
         response = requests.post(url, json=playbook, timeout=45)
         if response.status_code == 200:
             _write_phase_timing("act_at")
-            logger.info(f"✅ Playbook de aislamiento ejecutado en {victim_ip}")
+            logger.info(f"✅ Isolation playbook executed on {victim_ip}")
             LAST_ISOLATION_BY_VICTIM[victim_ip] = now
+            try:
+                resp_body = response.json()
+                _record_soarca_execution(
+                    execution_id=str(resp_body.get("execution_id") or ""),
+                    playbook_id=playbook.get("id", ""),
+                    victim_ip=victim_ip,
+                )
+            except Exception as exc:
+                logger.warning("Could not parse/record SOARCA execution_id (isolation): %s", exc)
         else:
             logger.warning(f"⚠️ SOARCA respondió {response.status_code} (aislamiento): {response.text[:300]}")
     except Exception as e:

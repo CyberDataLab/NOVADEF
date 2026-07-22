@@ -56,9 +56,28 @@ class CICWorker:
         self.rotate_size = rotate_size_mb
         self.file_index = 0
         self.c2k_producer = c2k_producer
-        self.tmp_csv = os.path.join(self.cic_results, "flow_tmp.csv")
+        # Guards self.global_csv/self.file_index, which are shared mutable
+        # state across concurrent run_cic_on_pcap() threads (one per pcap
+        # rotation) — everything else in that method now uses a
+        # per-invocation temp file instead of a shared one (see there).
+        self._global_csv_lock = threading.Lock()
         self.global_csv = os.path.join(self.cic_results, f"flow_global_{self.file_index:02d}.csv")
         self.flow_collection = db_collection
+        # Every pcap rotation (every ROTATE_TIME_SEC=3s) spawns its own
+        # daemon thread that runs a fresh CICFlowMeter JVM process to
+        # completion — with NO cap on how many of those can be running at
+        # once. Each JVM start + pcap parse routinely takes longer than the
+        # 3s rotation interval under real traffic, so instances piled up
+        # completely unbounded: observed 98 processes / 230% CPU in this
+        # container at idle, all fighting for the same CPU, which is what
+        # actually produced the "silence for ~40s, then a burst of 8+ pcaps
+        # finishing in the same instant" pattern — CPU contention, not I/O
+        # contention on a shared file (that part was already fixed by giving
+        # each invocation its own temp CSV). Cap it at 2 concurrent
+        # CICFlowMeter processes: enough to absorb one rotation finishing
+        # slightly late without stalling the next one, but bounded so the
+        # queue-of-JVMs effect can't happen again.
+        self._cic_concurrency = threading.Semaphore(2)
 
     def _rotate_global(self):
         """
@@ -79,64 +98,102 @@ class CICWorker:
         Save the flows in the historical database.
         [OPTIONAL] Publish in Kafka topic the flows.
         """
-        CICFLOWMETER_COMMAND = [CIC_LAUNCHER, pcap_path, self.tmp_csv]
-        print(f"⚡ Running CICFlowMeter in {pcap_path}")
-        proc = subprocess.Popen(
-            CICFLOWMETER_COMMAND,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        # Each rotation (every ROTATE_TIME_SEC=3s) spawns its OWN daemon thread
+        # running this method concurrently with any prior rotation's thread
+        # still in flight — _new_file()/close() never wait for the previous
+        # CICFlowMeter run to finish before starting the next one. Under
+        # attack-level traffic a single pcap can take longer than 3s for
+        # CICFlowMeter to process, so multiple instances end up running at
+        # once. They used to all target the SAME self.tmp_csv: whichever
+        # instance finished first would read/rotate/clear that file out from
+        # under the others mid-write, corrupting output and serializing the
+        # threads on that shared file's I/O — this is what caused an
+        # observed ~40s stall where nothing rotated, followed by 8+ pcaps'
+        # worth of flows all appearing to finish in the same instant once
+        # unblocked (they'd been queued behind the shared-file contention,
+        # not actually taking 40s each). A per-invocation temp file (keyed on
+        # the source pcap's own name, which the rotation logic already makes
+        # unique) removes that shared mutable state entirely.
+        tmp_csv = os.path.join(self.cic_results, f"flow_tmp_{os.path.basename(pcap_path)}.csv")
+        CICFLOWMETER_COMMAND = [CIC_LAUNCHER, pcap_path, tmp_csv]
+        # Cap concurrent CICFlowMeter (JVM) processes at 2 — see the
+        # semaphore's own comment in __init__ for why this is needed. A
+        # rotation that arrives while 2 are already running blocks HERE
+        # (before spawning a 3rd JVM) instead of piling on unbounded CPU
+        # contention; it resumes as soon as one of the two finishes.
+        with self._cic_concurrency:
+            print(f"⚡ Running CICFlowMeter in {pcap_path}")
+            proc = subprocess.Popen(
+                CICFLOWMETER_COMMAND,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
 
-        '''Only for debugging
-        def log_output(stream, prefix):
-            for line in stream:
-                print(f"[{prefix}] {line.strip()}")
+            '''Only for debugging
+            def log_output(stream, prefix):
+                for line in stream:
+                    print(f"[{prefix}] {line.strip()}")
 
-        threading.Thread(target=log_output, args=(proc.stdout, f"CIC-out-{os.path.basename(pcap_path)}"), daemon=True).start()
-        threading.Thread(target=log_output, args=(proc.stderr, f"CIC-err-{os.path.basename(pcap_path)}"), daemon=True).start()
-        '''
-        proc.wait()
-        print(f"✅ CICFlowMeter ended with  {pcap_path}")
+            threading.Thread(target=log_output, args=(proc.stdout, f"CIC-out-{os.path.basename(pcap_path)}"), daemon=True).start()
+            threading.Thread(target=log_output, args=(proc.stderr, f"CIC-err-{os.path.basename(pcap_path)}"), daemon=True).start()
+            '''
+            proc.wait()
+            print(f"✅ CICFlowMeter ended with  {pcap_path}")
 
-        if os.path.exists(self.tmp_csv):
-            self._rotate_global()
-            with open(self.tmp_csv, "r") as tmpf:
-                lines = tmpf.readlines()
-
-            if not lines:
-                print(f"⚠️ Temporary CSV file empty for  {pcap_path}")
+        try:
+            if not os.path.exists(tmp_csv):
+                print(f"⚠️ Flow file not found: {tmp_csv}")
                 return
 
-            header, data = lines[0], lines[1:]
-            if not os.path.exists(self.global_csv):
-                with open(self.global_csv, "w") as gf:
-                    gf.write(header)
+            # Global CSV rotation/append still needs to be serialized across
+            # threads (self.global_csv/self.file_index are shared state),
+            # unlike the per-invocation tmp_csv, which is only ever touched
+            # by this one thread.
+            with self._global_csv_lock:
+                with open(tmp_csv, "r") as tmpf:
+                    lines = tmpf.readlines()
 
-            with open(self.global_csv, "a") as gf:
-                gf.writelines(data)
+                if not lines:
+                    print(f"⚠️ Temporary CSV file empty for  {pcap_path}")
+                    return
 
-            print(f"📊 {len(data)} flows added to {self.global_csv}")
+                header, data = lines[0], lines[1:]
+                self._rotate_global()
+                if not os.path.exists(self.global_csv):
+                    with open(self.global_csv, "w") as gf:
+                        gf.write(header)
 
-        # Publicar flujos en Kafka como JSON (Logstash → OpenSearch → Grafana)
-        if data and header:
-            import io
-            reader = csv.DictReader(io.StringIO("".join([header] + data)))
-            json_lines = []
-            for row in reader:
-                doc = {k.strip(): v.strip() for k, v in row.items() if k}
-                doc["@timestamp"] = doc.get("timestamp", "")
-                doc["kafka_topic"] = "cic_flow"
-                json_lines.append(json.dumps(doc, ensure_ascii=False))
-            if json_lines:
-                self.c2k_producer.produce_lines(json_lines)
-                print(f"📤 {len(json_lines)} flujos publicados en Kafka (cic_flow)")
+                with open(self.global_csv, "a") as gf:
+                    gf.writelines(data)
 
-        # Read flows and upload them to MongoDB
-        if not os.path.exists(self.tmp_csv):
-            print(f"⚠️ Flow file not found: {self.tmp_csv}")
-            return
+                print(f"📊 {len(data)} flows added to {self.global_csv}")
 
+            # Publicar flujos en Kafka como JSON (Logstash → OpenSearch → Grafana)
+            if data and header:
+                import io
+                reader = csv.DictReader(io.StringIO("".join([header] + data)))
+                json_lines = []
+                for row in reader:
+                    doc = {k.strip(): v.strip() for k, v in row.items() if k}
+                    doc["@timestamp"] = doc.get("timestamp", "")
+                    doc["kafka_topic"] = "cic_flow"
+                    json_lines.append(json.dumps(doc, ensure_ascii=False))
+                if json_lines:
+                    self.c2k_producer.produce_lines(json_lines)
+                    print(f"📤 {len(json_lines)} flujos publicados en Kafka (cic_flow)")
+
+            self._insert_flows_to_mongo(tmp_csv, pcap_path)
+        finally:
+            # Per-invocation temp file — nothing else references it, so it
+            # must be cleaned up here instead of relying on a shared file
+            # that outlived (or was reused across) multiple runs.
+            try:
+                os.remove(tmp_csv)
+            except Exception:
+                pass
+
+    def _insert_flows_to_mongo(self, tmp_csv: str, pcap_path: str) -> None:
         def _smart_cast(val: str):
             """
             Assign the correct format to the different types of data that appear in the streams.
@@ -173,7 +230,7 @@ class CICWorker:
         inserted, duplicates, _errors = 0, 0, 0
 
         docs = []
-        with open(self.tmp_csv, "r", newline="") as f:
+        with open(tmp_csv, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 # convert types
@@ -184,7 +241,7 @@ class CICWorker:
                 docs.append(doc)
 
         if not docs:
-            print(f"⚠️ File {self.tmp_csv} empty")
+            print(f"⚠️ File {tmp_csv} empty")
             return
 
         try:

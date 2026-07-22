@@ -156,7 +156,7 @@ ensure_kafka_topic() {
     local elapsed=0
     echo "  ⏳ Asegurando topic Kafka '${topic}'..."
     while [ "$elapsed" -lt "$timeout" ]; do
-        if docker exec kafka_novadef sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic ${topic} --partitions 1 --replication-factor 1" >/dev/null 2>&1; then
+        if docker exec kafka_novadef sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka_novadef:29092 --create --if-not-exists --topic ${topic} --partitions 1 --replication-factor 1" >/dev/null 2>&1; then
             echo "  ✅ Topic '${topic}' disponible"
             return 0
         fi
@@ -217,9 +217,16 @@ fi
 
 # Alert Manager
 cd "$PFD/Alert_Manager/Docker"
-echo "  [6/6] Construyendo alert_manager_novadef:latest..."
+echo "  [6/7] Construyendo alert_manager_novadef:latest..."
 if docker build -t alert_manager_novadef:latest -f Dockerfiles/alert_manager.dockerfile "$PFD" 2>&1 | grep -E "(Successfully|error|Error)" | tail -1; then
     echo "       ✅ alert_manager_novadef construido"
+fi
+
+# Scenario attacker image (usada por la GUI/API al lanzar experimentos on demand)
+cd "$NOVADEF_ROOT/Scenario/attacker-image"
+echo "  [7/7] Construyendo novadef-scenario-attacker:latest..."
+if docker build -t novadef-scenario-attacker:latest -f Dockerfile . 2>&1 | grep -E "(Successfully|error|Error)" | tail -1; then
+    echo "       ✅ novadef-scenario-attacker construido"
 fi
 
 echo ""
@@ -233,7 +240,7 @@ echo ""
 echo ""
 echo "🎭 FASE 2: Scenario on demand"
 echo "  ℹ️  No se arranca ningún escenario por defecto."
-echo "  ℹ️  Cada experimento creará su propia víctima y atacante al lanzarse desde la GUI/API."
+echo "  ℹ️  Imagen novadef-scenario-attacker ya construida; cada experimento crea su propia víctima y atacante al lanzarse desde la GUI/API."
 echo "✅ Scenario configurado para creación bajo demanda"
 
 # ============================================================================
@@ -326,7 +333,7 @@ echo "  🧹 Limpiando estado persistente de SOARCA trigger..."
 docker rm -f pmp-misp-soarca-trigger pmp-soarca-core pmp-soarca-executor-ssh pmp-soarca-db >/dev/null 2>&1 || true
 docker volume rm -f soarca_trigger_state >/dev/null 2>&1 || true
 
-docker-compose up -d
+docker compose up -d
 sleep 45
 
 echo "✅ SOARCA iniciado"
@@ -340,7 +347,7 @@ echo "📊 FASE 7: Iniciando Grafana (visualización)..."
 ensure_launcher_network
 cd "$NOVADEF_ROOT/Grafana"
 
-docker-compose up -d
+docker compose up -d
 sleep 30
 
 echo "✅ Grafana iniciado"
@@ -374,7 +381,7 @@ echo "  • Kafka (PMP):       localhost:9092"
 echo "  • MongoDB (PMP):     localhost:27017"
 echo "  • Neo4j (TAPCD):     http://localhost:7474 (user: neo4j, pass: password)"
 echo "  • MISP:              https://localhost:8443 (user: admin@admin.test, pass: admin)"
-echo "  • SOARCA:            http://localhost:8000"
+echo "  • SOARCA:            http://localhost:8001"
 echo "  • Grafana:           http://localhost:3000"
 echo "  • GUI NOVADEF:       http://localhost:${EXPERIMENTS_API_PORT}/login.html  (admin@novadef.local / novadef2024)"
 echo "  • Docker Log Hub:    http://localhost:${DOZZLE_PORT}"
@@ -386,7 +393,7 @@ docker ps --format "table {{.Names}}\t{{.Status}}" | head -20
 echo ""
 echo "📝 Próximos pasos:"
 echo "  1. Verificar que MISP está listo:  curl -k https://localhost:8443/attributes/statistics"
-echo "  2. Verificar que SOARCA está listo: curl http://localhost:8000/health"
+echo "  2. Verificar que SOARCA está listo: curl http://localhost:8001/status/ping"
 echo "  3. Lanzar ataques del escenario:    python3 Experiments/run_scenario_integrated_experiments.py"
 echo "     La detección, MISP, TAPCD y SOARCA deben recorrer el flujo interno de NOVADEF"
 echo ""

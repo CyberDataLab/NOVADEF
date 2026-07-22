@@ -65,13 +65,46 @@ _SCENARIO_VICTIM_HOSTNAME = os.getenv("SCENARIO_VICTIM_HOSTNAME", "scenario_vict
 _SCENARIO_VICTIM_IP_FALLBACK = os.getenv("SCENARIO_VICTIM_IP_FALLBACK", "172.18.0.29")
 
 
-def _resolve_victim_ip() -> str:
+def _resolve_victim_ip_uncached() -> str:
     if _SCENARIO_VICTIM_IP_ENV:
         return _SCENARIO_VICTIM_IP_ENV
     try:
         return socket.gethostbyname(_SCENARIO_VICTIM_HOSTNAME)
     except Exception:
         return _SCENARIO_VICTIM_IP_FALLBACK
+
+
+# _parse_falco_event() calls this for EVERY host-level Falco event (they carry
+# no IP of their own — see its comment). The scenario_victim alias is bound to
+# the current run's victim container via app.py's
+# _ensure_launcher_network_alias(), which disconnects+reconnects the container
+# on Docker's launcher_default network on every experiment launch; Docker's
+# embedded DNS takes a few seconds to propagate that rebind, so an uncached
+# gethostbyname() here would occasionally pay that full resolution delay on
+# the very first host event of a run (measured up to ~10s in this
+# environment) and then repeat the (cheap, cached-by-OS-resolver) lookup on
+# every subsequent event. Cache the resolved IP for a short TTL instead of
+# per-import or per-call: short enough to pick up a new run's victim IP
+# shortly after _ensure_launcher_network_alias() rebinds it, long enough that
+# a burst of host events (hundreds/sec during ransomware) all reuse one
+# resolution instead of hammering the resolver.
+_victim_ip_cache_lock = threading.Lock()
+_victim_ip_cache_value: str = ""
+_victim_ip_cache_at: float = 0.0
+_VICTIM_IP_CACHE_TTL_SECS = 30.0
+
+
+def _resolve_victim_ip() -> str:
+    global _victim_ip_cache_value, _victim_ip_cache_at
+    now = time.time()
+    with _victim_ip_cache_lock:
+        if _victim_ip_cache_value and (now - _victim_ip_cache_at) < _VICTIM_IP_CACHE_TTL_SECS:
+            return _victim_ip_cache_value
+    resolved = _resolve_victim_ip_uncached()
+    with _victim_ip_cache_lock:
+        _victim_ip_cache_value = resolved
+        _victim_ip_cache_at = now
+    return resolved
 
 
 # Window in seconds within which two events on the same victim IP are considered
@@ -191,25 +224,35 @@ def _gc_expired_campaigns():
 # Kafka helpers
 # ---------------------------------------------------------------------------
 
-def _build_consumer() -> Consumer:
+def _build_consumer(topics: list[str], group_suffix: str) -> Consumer:
+    # Each topic gets its OWN consumer (own group.id) so a burst on one topic
+    # can never delay the others — see _consume_topic()'s docstring for why
+    # this replaced a single shared consumer across all three topics.
     cfg = {
         "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "group.id": GROUP_ID,
+        "group.id": f"{GROUP_ID}-{group_suffix}",
         "enable.auto.commit": False,
         "auto.offset.reset": "latest",
         "allow.auto.create.topics": True,
-        "session.timeout.ms": 10000,
+        # Kept low deliberately: each topic has its own single-member group,
+        # so there is no risk of a false eviction under normal load. A high
+        # session.timeout.ms instead means that on container restart (which
+        # happens on every experiment launch, see _reset_detector_runtime_
+        # state() in app.py), the broker takes up to that long to expire the
+        # previous member's session before it will assign partitions to the
+        # freshly-subscribed consumer — this showed up as a flat ~10s delay
+        # on the FIRST falco_events message of a run (network/snort topics,
+        # which had continuous traffic and re-triggered rebalancing sooner,
+        # did not show the same stall).
+        "session.timeout.ms": 6000,
         "max.poll.interval.ms": 300000,
         "socket.keepalive.enable": True,
         "partition.assignment.strategy": "cooperative-sticky",
         "enable.partition.eof": False,
     }
     consumer = Consumer(cfg)
-    consumer.subscribe([TOPIC_NETWORK_ALERTS, TOPIC_FALCO, TOPIC_SNORT_IN])
-    log.info(
-        "Subscribed to topics: %s, %s, %s",
-        TOPIC_NETWORK_ALERTS, TOPIC_FALCO, TOPIC_SNORT_IN,
-    )
+    consumer.subscribe(topics)
+    log.info("Subscribed to topics: %s (group=%s)", ", ".join(topics), cfg["group.id"])
     return consumer
 
 
@@ -458,16 +501,39 @@ def _build_pmp_alert(parsed: dict, campaign_id: str) -> dict:
 def _build_snort_am_alert(parsed: dict, campaign_id: str) -> Optional[dict]:
     """
     Build a TAPCD-compat (snort_alerts_am) event with campaign_id injected.
-    Only generated for network_intrusion_alerts and snort_alerts — not Falco
-    (Falco goes to MISP only via pmp_alerts).
+    Generated for network_intrusion_alerts, snort_alerts, AND falco_events.
+
+    Falco used to be MISP-only here (never reached stream_low/prep_pred), on
+    the assumption that a host-only ransomware attack has no network phase to
+    profile — but the compromised host can still have real network activity
+    (C2 callbacks, exfiltration, or just ordinary flows captured for that
+    victim IP) that TAPCD's ML model could characterize if it ever looked.
+    Routing Falco through the same snort_alerts_am path lets stream_low query
+    MongoDB for that host's own flows and build a real profile when there's
+    something to find, instead of unconditionally skipping the lookup and
+    leaving the actor stuck on the DetectionAlert-only stub from
+    misp_to_soarca._publish_falco_ransomware_to_tapcd.
     """
     src = parsed["source"]
-    if src == "falco_events":
-        return None  # Falco → MISP only, not TAPCD snort path
 
     orig = parsed["original"]
     now = datetime.now()
     snort_ts = now.strftime("%m/%d-%H:%M:%S.") + f"{now.microsecond:06d}"
+
+    if src == "falco_events":
+        # The compromised host is both the "attacker" (it's the one running
+        # the ransomware) and the victim from a network standpoint — there is
+        # no separate attacker IP the way a network-phase alert has one.
+        victim_ip = parsed["victim_ip"]
+        return {
+            "timestamp": snort_ts,
+            "msg": f"Ransomware host activity on {victim_ip}",
+            "src_ap": f"{victim_ip}:0",
+            "dst_ap": f"{victim_ip}:0",
+            "src_ip": victim_ip,
+            "dst_ip": victim_ip,
+            "campaign_id": campaign_id,
+        }
 
     if src == "network_intrusion_alerts":
         # Full campaign-accumulated attacker IP set — falls back to this
@@ -503,99 +569,137 @@ def _build_snort_am_alert(parsed: dict, campaign_id: str) -> Optional[dict]:
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run():
-    consumer = _build_consumer()
-    producer = _build_producer()
-    last_gc = time.time()
+_PARSERS = {
+    TOPIC_NETWORK_ALERTS: _parse_network_intrusion_alert,
+    TOPIC_FALCO: _parse_falco_event,
+    TOPIC_SNORT_IN: _parse_snort_alert,
+}
 
-    log.info(
-        "Alert Manager started — correlating by victim IP within %ds window → "
-        "publishing to %s and %s",
-        CAMPAIGN_WINDOW_SECS, TOPIC_PMP_ALERTS, TOPIC_SNORT_OUT,
-    )
+
+def _consume_topic(topic: str, group_suffix: str):
+    """Run a dedicated consumer+producer loop for a SINGLE topic.
+
+    This used to be one shared consumer subscribed to all three topics with
+    a single poll() loop. Kafka doesn't guarantee round-robin delivery across
+    topics for one consumer, so whichever topic had the higher message
+    volume at a given moment (network_intrusion_alerts/snort_alerts, which
+    fire continuously while an attack is in flight) could starve the others
+    for many seconds even though their messages were already sitting in
+    Kafka — this is exactly what delayed a real-time Falco ransomware
+    detection by ~10s in a hybrid (exp3) run: the shared consumer was busy
+    draining a burst of network alerts and didn't get back to falco_events
+    until the network burst let up. Giving each topic its own consumer
+    (own Kafka consumer group) and producer, each in its own thread, means a
+    burst on one topic can never delay processing on another — Falco events
+    are read and published the moment they land in Kafka, regardless of how
+    busy the network-alert stream is. _campaigns state is still shared and
+    protected by _state_lock (already used by _infer_campaign/
+    _accumulate_attacker_ips/_gc_expired_campaigns), so campaign correlation
+    across topics still works exactly the same as before.
+    """
+    consumer = _build_consumer([topic], group_suffix)
+    producer = _build_producer()
+    parse_fn = _PARSERS[topic]
+
+    # Commit/flush are deferred to a periodic interval instead of happening
+    # synchronously on every message. A ransomware run's file-activity burst
+    # (encryption touching hundreds of files/sec) can queue 10k+ Falco events
+    # in a few seconds; producer.flush() blocks for a broker ack and
+    # consumer.commit(asynchronous=False) blocks for a commit ack, and paying
+    # both round-trips (~8ms measured here) on EVERY single message serialized
+    # the whole burst — an 11k-message flood took ~95s to drain, so the one
+    # real detection buried in it (the attack's first file write, itself
+    # ingested within ~1s of the attack starting) didn't reach TAPCD/SOARCA
+    # until the burst finished, turning a sub-5s countermeasure into a 96s
+    # one. producer.poll(0) (inside _produce) still services delivery-report
+    # callbacks on every message without blocking; batching the actual
+    # flush+commit to this interval lets librdkafka's own internal batching
+    # (linger.ms/batch.size) do the work at line rate while still committing
+    # offsets at least every _COMMIT_INTERVAL_SECS, so a crash mid-burst only
+    # replays a bounded, small amount of at-least-once work.
+    _COMMIT_INTERVAL_SECS = 0.25
+    _last_commit = time.time()
+    _dirty_msg = None
 
     while not _closing:
         msg = consumer.poll(timeout=1.0)
-
-        # Periodic GC
-        if time.time() - last_gc > 300:
-            _gc_expired_campaigns()
-            last_gc = time.time()
-
         if msg is None:
+            if _dirty_msg is not None and (time.time() - _last_commit) >= _COMMIT_INTERVAL_SECS:
+                producer.flush(5)
+                consumer.commit(message=_dirty_msg, asynchronous=False)
+                _dirty_msg = None
+                _last_commit = time.time()
             continue
         if msg.error():
             err = msg.error()
             if err.code() != KafkaError._PARTITION_EOF:
-                log.warning("Kafka consumer error: %s", err)
+                log.warning("[%s] Kafka consumer error: %s", topic, err)
             continue
-
-        topic = msg.topic()
 
         try:
             raw = msg.value().decode("utf-8", errors="replace")
             obj = json.loads(raw)
         except Exception as exc:
-            log.warning("Cannot parse message from %s: %s", topic, exc)
-            consumer.commit(message=msg, asynchronous=False)
+            log.warning("[%s] Cannot parse message: %s", topic, exc)
+            _dirty_msg = msg
             continue
 
-        # Parse by source topic
         try:
-            if topic == TOPIC_NETWORK_ALERTS:
-                parsed = _parse_network_intrusion_alert(obj)
-            elif topic == TOPIC_FALCO:
-                parsed = _parse_falco_event(obj)
-            elif topic == TOPIC_SNORT_IN:
-                parsed = _parse_snort_alert(obj)
-            else:
-                parsed = None
+            parsed = parse_fn(obj)
         except Exception as exc:
-            log.warning("Parser error for topic %s: %s", topic, exc)
+            log.warning("[%s] Parser error: %s", topic, exc)
             parsed = None
 
         if not parsed:
-            consumer.commit(message=msg, asynchronous=False)
-            continue
+            _dirty_msg = msg
+        else:
+            victim_ip = parsed["victim_ip"]
+            event_time = parsed["event_time"]
 
-        victim_ip = parsed["victim_ip"]
-        event_time = parsed["event_time"]
+            campaign_id = _infer_campaign(victim_ip, event_time)
 
-        campaign_id = _infer_campaign(victim_ip, event_time)
+            # Accumulate attacker source IPs across every alert seen for this
+            # campaign — the network detector now emits one alert per newly-seen
+            # attacker IP, so this set grows incrementally as a distributed
+            # attack unfolds. Falco/ransomware events carry no source IPs of
+            # their own; passing an empty list here just returns whatever was
+            # already accumulated from the network phase.
+            accumulated_ips = sorted(_accumulate_attacker_ips(victim_ip, parsed.get("src_ips") or []))
+            parsed["accumulated_src_ips"] = accumulated_ips
 
-        # Accumulate attacker source IPs across every alert seen for this
-        # campaign — the network detector now emits one alert per newly-seen
-        # attacker IP, so this set grows incrementally as a distributed
-        # attack unfolds. Falco/ransomware events carry no source IPs of
-        # their own; passing an empty list here just returns whatever was
-        # already accumulated from the network phase.
-        accumulated_ips = sorted(_accumulate_attacker_ips(victim_ip, parsed.get("src_ips") or []))
-        parsed["accumulated_src_ips"] = accumulated_ips
+            log.info(
+                "[%s] victim=%s → campaign=%s source=%s accumulated_ips=%d",
+                topic, victim_ip, campaign_id, parsed["source"], len(accumulated_ips),
+            )
 
-        log.info(
-            "[%s] victim=%s → campaign=%s source=%s accumulated_ips=%d",
-            topic, victim_ip, campaign_id, parsed["source"], len(accumulated_ips),
-        )
+            # Publish to pmp_alerts (MISP consumes this)
+            try:
+                pmp = _build_pmp_alert(parsed, campaign_id)
+                _produce(producer, TOPIC_PMP_ALERTS, pmp)
+            except Exception as exc:
+                log.error("[%s] Failed to produce to %s: %s", topic, TOPIC_PMP_ALERTS, exc)
 
-        # Publish to pmp_alerts (MISP consumes this)
-        try:
-            pmp = _build_pmp_alert(parsed, campaign_id)
-            _produce(producer, TOPIC_PMP_ALERTS, pmp)
-        except Exception as exc:
-            log.error("Failed to produce to %s: %s", TOPIC_PMP_ALERTS, exc)
+            # Publish to snort_alerts_am (TAPCD stream_low consumes this)
+            try:
+                snort_am = _build_snort_am_alert(parsed, campaign_id)
+                if snort_am is not None:
+                    _produce(producer, TOPIC_SNORT_OUT, snort_am)
+            except Exception as exc:
+                log.error("[%s] Failed to produce to %s: %s", topic, TOPIC_SNORT_OUT, exc)
 
-        # Publish to snort_alerts_am (TAPCD stream_low consumes this)
-        try:
-            snort_am = _build_snort_am_alert(parsed, campaign_id)
-            if snort_am is not None:
-                _produce(producer, TOPIC_SNORT_OUT, snort_am)
-        except Exception as exc:
-            log.error("Failed to produce to %s: %s", TOPIC_SNORT_OUT, exc)
+            _dirty_msg = msg
 
-        producer.flush()
-        consumer.commit(message=msg, asynchronous=False)
+        if (time.time() - _last_commit) >= _COMMIT_INTERVAL_SECS:
+            producer.flush(5)
+            consumer.commit(message=_dirty_msg, asynchronous=False)
+            _dirty_msg = None
+            _last_commit = time.time()
 
-    log.info("Closing consumer and producer")
+    if _dirty_msg is not None:
+        producer.flush(5)
+        consumer.commit(message=_dirty_msg, asynchronous=False)
+
+    log.info("[%s] Closing consumer and producer", topic)
     try:
         consumer.close()
     except Exception:
@@ -604,6 +708,32 @@ def run():
         producer.flush(5)
     except Exception:
         pass
+
+
+def run():
+    log.info(
+        "Alert Manager started — correlating by victim IP within %ds window → "
+        "publishing to %s and %s (one dedicated consumer thread per source topic)",
+        CAMPAIGN_WINDOW_SECS, TOPIC_PMP_ALERTS, TOPIC_SNORT_OUT,
+    )
+
+    threads = [
+        threading.Thread(target=_consume_topic, args=(TOPIC_NETWORK_ALERTS, "net"), daemon=True, name="am-net"),
+        threading.Thread(target=_consume_topic, args=(TOPIC_FALCO, "falco"), daemon=True, name="am-falco"),
+        threading.Thread(target=_consume_topic, args=(TOPIC_SNORT_IN, "snort"), daemon=True, name="am-snort"),
+    ]
+    for t in threads:
+        t.start()
+
+    last_gc = time.time()
+    while not _closing:
+        time.sleep(1.0)
+        if time.time() - last_gc > 300:
+            _gc_expired_campaigns()
+            last_gc = time.time()
+
+    for t in threads:
+        t.join(timeout=10)
 
 
 if __name__ == "__main__":

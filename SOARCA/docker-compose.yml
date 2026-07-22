@@ -3,7 +3,7 @@ version: "3.9"
 services:
   # Base de datos Documental para Playbooks de SOARCA
   soarca-db:
-    image: mongo:5.0
+    image: mongo:4.4
     container_name: pmp-soarca-db
     restart: on-failure
     environment:
@@ -19,7 +19,7 @@ services:
     platform: linux/amd64
     restart: on-failure
     ports:
-      - "8000:8080"
+      - "8001:8080"
     environment:
       - DB_URL=mongodb://soarca:soarca@soarca-db:27017/
       - LOG_LEVEL=debug

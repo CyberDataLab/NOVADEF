@@ -52,16 +52,12 @@ filebeat.inputs:
     close.on_state_change.renamed: true    # closes when it detects that the file has been renamed
     clean_removed: true                    # clears the status when the file is no longer present
   
-  - type: filestream #log
-    id: falco_events
-    enable: true
-    paths:
-      - "/falco/logs/falco_events.json"
-    tags: ["falco_events"]
-    fields:
-      kafka_topic: "falco_events"
-    fields_under_root: true
-    scan_frequency: 100ms
+  # falco_events is handled by a DEDICATED Filebeat instance (see
+  # filebeat-falco.yml / the filebeat_falco container) so a tshark_traces
+  # volume burst during an attack can never delay Falco detection events —
+  # see filebeat-falco.yml's header comment for the full story. Do not
+  # re-add a falco_events input here: two Filebeat processes tailing the
+  # same file would double-publish every Falco event to Kafka.
 
   - type: filestream
     id: network_auth_events

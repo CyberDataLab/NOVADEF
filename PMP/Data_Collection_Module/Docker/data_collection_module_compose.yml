@@ -99,6 +99,14 @@ services:
       - ${PFD}/Results/falco/logs:/var/log/falco/
       - /var/run/falco:/var/run/falco # Falco-exporter read from falco socket
     restart: unless-stopped
+    # Falco (PID 1 in this container) probes each enabled container_engines
+    # socket (see falco.yaml) for every container it observes; failed probes
+    # against a nonexistent engine's socket left zombie processes behind that
+    # Falco itself never reaped (observed: ~11,500 after 7.5h uptime). Even
+    # with only docker enabled now, `init: true` runs real tini as PID 1 so
+    # ANY orphaned descendant gets reaped regardless of cause — a general,
+    # robust fix rather than depending on Falco's own internal cleanup.
+    init: true
 
   falco-exporter:
     image: falcosecurity/falco-exporter:0.8.7

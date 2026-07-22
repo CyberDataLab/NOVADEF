@@ -11,6 +11,15 @@ services:
     container_name: flow_module_novadef
     profiles: ["flow_module.flow_module"]
     restart: unless-stopped
+    # entrypoint_flow_module.py runs as PID 1 in this container. CICFlowMeter
+    # (via scapy) spawns tcpdump as a helper subprocess internally; when that
+    # grandchild's immediate parent exits without reaping it, it re-parents to
+    # PID 1 — and a plain Python script as PID 1 never reaps processes it
+    # didn't launch itself, so those tcpdump children stay zombie forever
+    # (observed: 185 accumulated over ~30min of a single scenario's traffic).
+    # `init: true` runs the real tini as PID 1 instead, which reaps any
+    # orphaned/zombie descendant regardless of which process spawned it.
+    init: true
     depends_on:
       kafka_novadef:
         condition: service_healthy

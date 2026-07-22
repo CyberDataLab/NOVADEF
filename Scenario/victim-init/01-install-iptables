@@ -2,6 +2,13 @@
 # Instalar iptables y openssl en la víctima (Alpine base no los incluye)
 apk add --no-cache iptables ip6tables openssl sudo bash 2>/dev/null && echo "[victim-init] iptables+openssl+sudo+bash instalados" || echo "[victim-init] WARN: fallo instalando paquetes"
 
+# Fijar policy INPUT=ACCEPT explícitamente. El resto de este script (cadena de
+# conteo NOVADEF_NET_IN, "effective" packets) asume que el tráfico de ataque
+# es aceptado hasta que SOARCA aplique el aislamiento; si el kernel/host trae
+# policy DROP por defecto, la víctima arranca ya "aislada" y la gráfica de
+# tráfico de la GUI nunca refleja el ataque.
+iptables -P INPUT ACCEPT 2>/dev/null || true
+
 # Configurar sudo sin contraseña para novadef.
 # sudo -n (non-interactive) falla si CUALQUIER regla coincidente requiere
 # contraseña, aunque otra regla NOPASSWD también coincida (sudo >= 1.9).

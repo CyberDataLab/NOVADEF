@@ -39,12 +39,41 @@ def get_interfaces():
 def build_tshark_command(interfaces) -> str:
     """
     Create the command to launch Tshark
+
+    -x (full hex+ASCII payload dump per packet) IS required: json2pcap.py
+    (Flow_Module/Scripts/JSON2PCAP/json2pcap.py) reconstructs a pcap from
+    this JSON to feed CICFlowMeter, and it reads the raw frame bytes from
+    tshark's own "frame_raw" field — which tshark only emits when -x is
+    given. Without it, "frame_raw" is absent/empty, so every reconstructed
+    packet came out as a bare 14-byte Ethernet header with no payload (MAC
+    00:00:00:00:00:00, ethertype garbage) — CICFlowMeter's IP-layer filter
+    then matched zero packets, so no flow was ever written to MongoDB and
+    TAPCD's actor-profiling model always fell back to its neutral/no-flow
+    feature row regardless of attack type. This was believed harmless
+    on the assumption that "nothing downstream reads raw payload bytes" —
+    true for the anomaly detector and Falco, false for CICFlowMeter's own
+    pcap reconstruction path. -x does multiply each packet's JSON size
+    several-fold; this trade-off was re-evaluated and accepted because a
+    working actor-profiling pipeline is worth more than the smaller capture
+    footprint (see the corresponding fix in json2pcap.py: scapy.Ether(...)
+    instead of the abstract scapy.Packet(...), which was also required for
+    reconstructed packets to dissect correctly once real bytes are present).
+
+    "not port 9274" is a capture filter (BPF, applied by the kernel before
+    tshark even sees the packet) excluding Telegraf/Prometheus metrics
+    scraping traffic — Prometheus polls the victim's Telegraf exporter every
+    1s (see prometheus.yml's scenario_victim_telegraf job), and that alone
+    was measured to be ~99% of steady-state captured packets, unrelated to
+    any attack scenario. Excluding it here (rather than just lowering the
+    scrape interval) keeps Grafana's 1s resolution intact while removing the
+    dominant source of capture volume/CPU load on tshark.
     """
     command = ["tshark"]
     for interface in interfaces:
         new_interface = re.findall(r"'(.*?)'", interface)
         command.extend(["-i", new_interface[0]])
-    command.extend(["-T", "json", "-x","-l", "--no-duplicate-keys", "2>/dev/null"])
+    command.extend(["-T", "json", "-x", "-l", "--no-duplicate-keys", "2>/dev/null"])
+    command.extend(["-f", "'not port 9274'"])
     return (
         f"{" ".join(map(str, command))}"
         f" | /usr/local/bin/json_array_to_ndjson.py"

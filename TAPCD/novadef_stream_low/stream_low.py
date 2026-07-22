@@ -215,6 +215,18 @@ def parse_attack_from_msg(msg: str) -> Tuple[str, str, str, str]:
         (("ddos",), ("DDoS", "Network Flooding")),
         (("xss",), ("XSS", "Application Attack")),
         (("brute", "force"), ("Brute Force", "Credential Attack")),
+        # The fast fan-in detector's network_intrusion_alerts message reaches
+        # here as msg=title="Distributed Password Spraying against <ip>:<port>"
+        # (alert_manager._build_snort_am_alert falls back to `title` when the
+        # source is network_intrusion_alerts, not `msg`/`alert_type` directly).
+        # Without this rule it fell through to the Unknown/Unknown default,
+        # which made _is_coordinated_attack() return False and sent the
+        # MongoDB flow lookup down the uncoordinated, NO-lower-bound query
+        # (src_ip + timestamp < ts_alert, no $gte) — pulling in the single
+        # oldest historical flow for that reused attacker IP (hours old, from
+        # a previous experiment) as FirstSeen instead of this attack's own.
+        (("password", "spraying"), ("Brute Force", "Credential Attack")),
+        (("distributed", "password"), ("Brute Force", "Credential Attack")),
         (("scan", "port"), ("Port Scan", "Reconnaissance")),
         (("scan",), ("Scan", "Reconnaissance")),
         (("malware",), ("Malware", "Malicious Code")),
@@ -584,7 +596,43 @@ class StreamProcessor:
         self.coll = self.mongo[self.cfg.mongo_db][self.cfg.mongo_coll]
 
         self._pending: Dict[Tuple, Dict[str, object]] = {}
-        self._dedup_window_sec: float = float(os.getenv("DEDUP_WINDOW_SEC", "10"))
+        # This window used to default to 10s, and _flush_due() resets the
+        # "quiet time" clock on every new alert for the same key (see below)
+        # — so a sustained attack, which keeps generating alerts every few
+        # seconds, kept pushing this back indefinitely, adding 10+ seconds of
+        # pure latency to the detect→profile→decide chain before SOARCA ever
+        # saw the alert. That redundancy is real: Alert Manager (upstream)
+        # already does the actual campaign correlation/dedup — every
+        # snort_alerts_am event it emits carries the FULL accumulated
+        # attacker-IP set for the campaign, not just the new one (see its own
+        # _campaigns comment), specifically so MISP/TAPCD only ever need ONE
+        # event/profile per campaign. This window only needs to catch
+        # near-simultaneous exact re-deliveries (the same alert reported
+        # twice within milliseconds), not debounce a live attack — the "1"
+        # default was already documented above as overkill for that purpose;
+        # 0.2s is comfortably above a millisecond-scale re-delivery while
+        # shaving a full second off the Detect->Act cycle (the same class of
+        # redundant fixed wait as the trigger's sleep(5), which turned out to
+        # be unnecessary because the Alert Manager already correlates alerts
+        # into one campaign upstream of this point).
+        self._dedup_window_sec: float = float(os.getenv("DEDUP_WINDOW_SEC", "0.2"))
+        # Absolute cap on how long a key can sit in _pending regardless of
+        # how many duplicates keep arriving. _flush_due() only fires once
+        # (now - last_arrival) >= _dedup_window_sec, and every new duplicate
+        # resets last_arrival — so a sustained high-rate source (e.g. Falco
+        # emitting hundreds of near-identical "Ransomware host activity on
+        # <ip>" events per second for as long as the ransomware's encryption
+        # loop runs, all sharing the same dedup key since msg/src_ip/dst_ip
+        # are identical every time) never lets the key go quiet for
+        # _dedup_window_sec, so it never gets processed until the source
+        # itself stops — confirmed live: 37000+ "Duplicada" counts for a
+        # single key during one exp2 run, with the alert only reaching
+        # prep_pred ~40s after Falco's own timestamp on it. Alert Manager
+        # already carries the full accumulated campaign state on every event
+        # it emits (see this class's own comment above), so nothing is lost
+        # by forcing a flush based on first_arrival instead of waiting for
+        # quiet time that a sustained attack will never provide.
+        self._dedup_max_hold_sec: float = float(os.getenv("DEDUP_MAX_HOLD_SEC", "1.0"))
 
         self.stats = {
             "alerts_received": 0,
@@ -632,6 +680,7 @@ class StreamProcessor:
         ts_alert: pd.Timestamp,
         dst_ip: str = "",
         coordinated: bool = False,
+        attack_first_seen: pd.Timestamp | None = None,
     ) -> pd.DataFrame:
         """Query flows from MongoDB for the alert.
 
@@ -639,6 +688,19 @@ class StreamProcessor:
         Spraying) we query by dst_ip over a lookback window so ALL source IPs
         that participated in the same campaign are included in a single profile.
         For everything else we query by src_ip as before.
+
+        attack_first_seen (the detector's own "first_seen" for THIS attack,
+        when available) tightens the lookback window's floor to the real
+        start of this attack instead of always reaching back a fixed
+        _COORDINATED_WINDOW_SEC (120s). Without this, a scenario whose
+        victim/attacker containers are reused across back-to-back runs (the
+        normal campaign workflow) can have this query's blind 120s window
+        overlap the END of the PREVIOUS run's traffic to the same dst_ip,
+        pulling residual flows from an unrelated, already-finished attack
+        into THIS attack's profile -- confirmed in practice: a profile whose
+        detection_ts predated this run's own attack_started_at by ~110s,
+        well inside the 120s window, sourced from the prior run's leftover
+        flows to the same reused victim IP.
         """
         projection = {
             "_id": 0,
@@ -652,16 +714,55 @@ class StreamProcessor:
             "flow_iat_mean": 1, "flow_iat_std": 1, "flow_iat_max": 1, "flow_iat_min": 1,
             "active_mean": 1, "active_std": 1, "idle_mean": 1, "idle_std": 1,
         }
+        blind_window_start = ts_alert - pd.Timedelta(seconds=self._COORDINATED_WINDOW_SEC)
+        # Tighten the floor to this attack's own real start when known, so a
+        # reused victim/attacker container pair whose PREVIOUS run ended less
+        # than _COORDINATED_WINDOW_SEC ago cannot have its leftover flows
+        # pulled into this run's profile. attack_first_seen only NARROWS the
+        # window (max, never earlier than the blind floor) — it never widens
+        # it beyond _COORDINATED_WINDOW_SEC.
+        window_start = blind_window_start
+        if attack_first_seen is not None:
+            # ts_alert (and therefore blind_window_start) is always tz-naive
+            # here (parse_alert_timestamp never attaches a tz for the short
+            # "MM/DD-HH:MM:SS.micro" detector format), but attack_first_seen
+            # comes from parsing an ISO 8601 string with a "Z" suffix, which
+            # pd.Timestamp parses as tz-aware (UTC). Comparing the two raw
+            # would raise "Cannot compare tz-naive and tz-aware timestamps" --
+            # strip the tz instead of trying to make blind_window_start
+            # tz-aware, since every other timestamp in this file is naive.
+            _afs = attack_first_seen
+            if _afs.tzinfo is not None:
+                _afs = _afs.tz_localize(None)
+            if _afs > blind_window_start:
+                window_start = _afs
+        window_start = window_start.to_pydatetime()
         if coordinated and dst_ip:
             # All flows to this target within the lookback window — captures the
             # full set of spoofed/distributed source IPs in one query.
-            window_start = (ts_alert - pd.Timedelta(seconds=self._COORDINATED_WINDOW_SEC)).to_pydatetime()
             query: dict = {
                 "dst_ip": dst_ip,
                 "timestamp": {"$gte": window_start, "$lt": ts_alert.to_pydatetime()},
             }
         else:
-            query = {"src_ip": src_ip, "timestamp": {"$lt": ts_alert.to_pydatetime()}}
+            # Always bound the lookback, even on the non-coordinated path.
+            # This used to be `timestamp: {$lt: ts_alert}` with NO lower bound
+            # — if _is_coordinated_attack() ever misclassifies an attack as
+            # not-coordinated (it did: the fast fan-in detector's
+            # network_intrusion_alerts message reached here with attack=
+            # threat_type=Unknown, see parse_attack_from_msg's password/
+            # spraying rule above), this query pulled in the single OLDEST
+            # historical flow ever recorded for that src_ip — hours old, from
+            # a previous experiment reusing the same attacker IP — and its
+            # timestamp became this profile's FirstSeen forever (Neo4j's
+            # MERGE preserves the first value it ever sees for a given
+            # actor id). Reuse the same lookback window as the coordinated
+            # path so a misclassification degrades gracefully instead of
+            # reaching back to the start of Mongo's retention.
+            query = {
+                "src_ip": src_ip,
+                "timestamp": {"$gte": window_start, "$lt": ts_alert.to_pydatetime()},
+            }
 
         rows = list(self.coll.find(query, projection))
         if not rows:
@@ -687,8 +788,16 @@ class StreamProcessor:
                 "targeting dst_ip=%s in %.0fs window",
                 attack, threat_type, dst_ip_alert, self._COORDINATED_WINDOW_SEC,
             )
+        attack_first_seen = None
+        _first_seen_raw = str(obj.get("first_seen", "") or "").strip()
+        if _first_seen_raw:
+            try:
+                attack_first_seen = parse_alert_timestamp(_first_seen_raw)
+            except Exception:
+                attack_first_seen = None
         df_flows = self._query_flows_for_alert(
-            src_ip, ts_alert, dst_ip=dst_ip_alert, coordinated=is_coord
+            src_ip, ts_alert, dst_ip=dst_ip_alert, coordinated=is_coord,
+            attack_first_seen=attack_first_seen,
         )
 
         # Si no hay flujos, meter una fila neutra para no romper el pipeline.
@@ -755,7 +864,10 @@ class StreamProcessor:
         to_process = []
         for key, rec in list(self._pending.items()):
             last_arrival = rec["last_arrival"]
-            if force or (self._dedup_window_sec <= 0) or (now - last_arrival >= self._dedup_window_sec):
+            first_arrival = rec["first_arrival"]
+            quiet_enough = (self._dedup_window_sec <= 0) or (now - last_arrival >= self._dedup_window_sec)
+            held_too_long = (self._dedup_max_hold_sec > 0) and (now - first_arrival >= self._dedup_max_hold_sec)
+            if force or quiet_enough or held_too_long:
                 to_process.append((key, rec))
         for key, rec in to_process:
             obj = rec["last_obj"]

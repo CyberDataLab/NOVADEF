@@ -1,0 +1,80 @@
+---
+# Dedicated Filebeat instance for falco_events ONLY.
+#
+# The main filebeat_novadef instance handles ALL inputs (syslog, systemd,
+# tshark_traces, falco_events, network_auth_events) through a single shared
+# output.kafka — Filebeat internally uses one event queue and one set of
+# output workers across every input, regardless of which input an event came
+# from. tshark_traces alone produces millions of messages (raw packet-level
+# capture) while a real attack is in flight, and that volume saturates the
+# shared queue/workers, so falco_events messages sit behind the tshark
+# backlog even though Falco itself detects and writes them in well under a
+# second. This showed up as an 8-11s "Falco detection" delay in the GUI that
+# had nothing to do with Falco — confirmed by comparing the real Falco
+# event's own timestamp against Kafka's CreateTime for the SAME message: the
+# gap was entirely inside Filebeat, between reading the file and actually
+# publishing to Kafka.
+#
+# Running a second, completely separate Filebeat process for JUST
+# falco_events — its own queue, its own output.kafka connection — means a
+# tshark_traces burst can never delay it again.
+filebeat.prospector.scanner:
+  include_files: ['.json$', '.jsonl$', '.log$']
+  scan_frequency: 100ms
+
+filebeat.inputs:
+  - type: filestream
+    id: falco_events_dedicated
+    enable: true
+    paths:
+      - "/falco/logs/falco_events.json"
+    tags: ["falco_events"]
+    fields:
+      kafka_topic: "falco_events"
+    fields_under_root: true
+    scan_frequency: 100ms
+    # filestream's harvester backs off its own re-read attempts on this file
+    # when it goes quiet (e.g. right after app.py truncates it between
+    # experiment runs, before the next attack generates activity) — default
+    # backoff.max is 10s, and measurement (comparing a Falco event's own
+    # evt.time against when filebeat's registry cursor actually advances)
+    # showed the harvester taking 8-13s to notice fresh writes after such a
+    # quiet period, even with scan_frequency at 100ms and this input fully
+    # isolated from the tshark_traces volume (see this file's own header
+    # comment for that earlier, separate fix). Pinning backoff low and
+    # disabling the multiplier keeps every re-read attempt at ~100ms
+    # regardless of how long the file was quiet beforehand.
+    backoff.init: 100ms
+    backoff.max: 100ms
+
+# The real cause of the 7-13s Falco->Kafka gap (previously misattributed to
+# harvester backoff and consumer-group rebalance, both fixed but neither
+# actually explained it): Filebeat's internal memory queue holds events
+# until either flush.min_events accumulate or flush.timeout elapses,
+# whichever comes first — DEFAULTS to min_events=2048 (some versions 1600)
+# and timeout=10s. A single Falco event (or the first few from a slow-
+# starting attack) never reaches that event count, so the queue always
+# waits out the full 10s timeout before handing anything to the kafka
+# output — confirmed with debug logging showing a total silence (no log
+# line from ANY subsystem, logging.selectors: ["*"]) between the harvester
+# reading the new line and the kafka output connecting, lasting consistently
+# 6-9s, matching flush.timeout minus the small amount already elapsed
+# scanning/reading. flush.min_events: 0 is documented in
+# filebeat.reference.yml as making events "immediately available" — this
+# removes the count gate entirely; flush.timeout is set low rather than to
+# 0, since 0 there means "wait forever" instead of "no timeout".
+queue.mem:
+  events: 4096
+  flush.min_events: 0
+  flush.timeout: 0.1s
+
+output.kafka:
+  hosts: ["kafka_novadef:29092"]
+  topic: '%{[kafka_topic]}'
+  compression: lz4
+  required_acks: 1
+  partition.round_robin.reachable_only: true
+  bulk_max_size: 4096
+
+logging.to_files: false
+logging.level: info
