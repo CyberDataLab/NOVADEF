@@ -1,0 +1,41 @@
+
+# Data Exporter API - FastAPI server querying OpenSearch
+
+services:
+  dt_api:
+    image: dt_api_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: APIs/Data_Exporter_API/Docker/Dockerfile/dt_api.dockerfile
+    container_name: dt_api_novadef
+    profiles: ["apis_module.dt_api"]
+    environment:
+      - TZ=${TZ}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST}
+      - OPENSEARCH_REST_API_PORT=${OPENSEARCH_REST_API_PORT}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - DT_API_HOST=${DT_API_HOST}
+      - DT_API_PORT=${DT_API_PORT}
+      - DT_HTTP_TIMEOUT_SECONDS=${DT_HTTP_TIMEOUT_SECONDS}
+      - DT_MAX_RANGE_POINTS=${DT_MAX_RANGE_POINTS}
+      - DT_DEFAULT_STEP_SECONDS=${DT_DEFAULT_STEP_SECONDS}
+      - DT_MAX_PAGE_SIZE=${DT_MAX_PAGE_SIZE}
+    extra_hosts:
+      - "${OPENSEARCH_HOST:-opensearch-host}:host-gateway"
+    ports:
+      - "${DT_API_PORT:-8003}:${DT_API_PORT:-8003}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:${DT_API_PORT:-8003}/health || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M

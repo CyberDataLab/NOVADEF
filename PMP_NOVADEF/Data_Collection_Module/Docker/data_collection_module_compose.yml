@@ -1,0 +1,169 @@
+
+---
+services:
+  fluentd:
+  
+    image: fluentd_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Data_Collection_Module/Docker/Dockerfiles/fluentd.dockerfile
+
+    container_name: fluentd_novadef
+    profiles: ["collection_module.fluentd"]
+    labels:
+      module: "fluentd"
+      machine_id: "${MACHINE_ID}"
+    environment:
+      - TZ=${TZ}
+      - MACHINE_ID=${MACHINE_ID}
+      - FLUENTD_TO_PROMETHEUS_PORT=${FLUENTD_TO_PROMETHEUS_PORT:-24231}
+      - FLUENTD_INTERNAL_PORT=${FLUENTD_INTERNAL_PORT:-24220}
+      - FLUENTD_FILE_SIZE_LIMIT=${FLUENTD_FILE_SIZE_LIMIT}
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/log/journal:/var/log/journal:ro
+      - ${PFD}/Results:/results:rw
+    ports:
+      - "${FLUENTD_TO_PROMETHEUS_PORT:-24231}:24231" #Prometheus scrapping
+      - "${FLUENTD_INTERNAL_PORT:-24220}:24220" # This is a test to access via web using localhost:24220/api/plugins.json
+    restart: unless-stopped
+  
+  telegraf:
+    image: telegraf:1.38.4 #telegraf:1.33.2
+    container_name: telegraf_novadef
+    profiles: ["collection_module.telegraf"]
+    labels:
+      module: "telegraf"
+      machine_id: "${MACHINE_ID}"
+    environment:
+      - TZ=${TZ}
+      - TELEGRAF_GENERAL_INTERVAL=${TELEGRAF_GENERAL_INTERVAL}
+      - MACHINE_ID=${MACHINE_ID}
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
+      - TELEGRAF_BASE_TOPIC=${TELEGRAF_BASE_TOPIC}
+      - TELEGRAF_TO_PROMETHEUS_PORT=${TELEGRAF_TO_PROMETHEUS_PORT:-9273}
+    extra_hosts:
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc:/host/etc:ro
+      - /var:/host/var:ro
+      - ${PFD}/Data_Collection_Module/Configuration_Files/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    ports:
+        - ${TELEGRAF_TO_PROMETHEUS_PORT:-9273}:${TELEGRAF_TO_PROMETHEUS_PORT:-9273}
+    restart: unless-stopped
+
+  tshark:
+    image: tshark_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Data_Collection_Module/Docker/Dockerfiles/tshark.dockerfile
+    container_name: tshark_novadef
+    profiles: ["collection_module.tshark"]
+    environment:
+      - TZ=${TZ}
+      - TSHARK_BASE_TOPIC=${TSHARK_BASE_TOPIC}
+      - TSHARK_SIZE_LIMIT_ROTATION=${TSHARK_SIZE_LIMIT_ROTATION}
+      - TSHARK_INTERFACE=${TSHARK_INTERFACE}
+      - TSHARK_EXCLUDE_PORTS=${TSHARK_EXCLUDE_PORTS}
+    network_mode: "${NETWORK_MODE}" # Allows container to see host interfaces
+    cap_add:
+      # https://man7.org/linux/man-pages/man7/capabilities.7.html
+      - NET_ADMIN # Modify network interfaces and adjust iptables rules
+      - NET_RAW   # Capture packets without restrictions
+    volumes:
+      - ${PFD}/Results/tshark/traces:/data/traces # Tshark logs accessible to Filebeat
+      - /sys/class/net:/sys/class/net    # Allows script to see host interfaces
+    restart: unless-stopped
+
+  falco:
+    image: falco_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Data_Collection_Module/Docker/Dockerfiles/falco.dockerfile
+    container_name: falco_novadef
+    profiles: ["collection_module.falco"]
+    labels:
+      module: "falco"
+      machine_id: "${MACHINE_ID}"
+    environment:
+      - TZ=${TZ}
+      - MACHINE_ID=${MACHINE_ID}
+      - SKIP_DRIVER_LOADER=${FALCO_SKIP_DRIVER_LOADER}
+      - FALCO_RULES_PATHS=${FALCO_RULES_PATHS}
+    extra_hosts:
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    network_mode: "${NETWORK_MODE}"
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+      - SYS_RESOURCE
+    cap_drop:
+      - ALL
+    volumes:
+      - /proc:/host/proc:ro
+      - /boot:/host/boot:ro
+      - /lib/modules:/host/lib/modules:ro
+      - /usr:/host/usr:ro
+      - ${PFD}/Results/falco/logs:/var/log/falco/
+      - /var/run/falco:/var/run/falco # Falco-exporter read from falco socket
+    restart: unless-stopped
+  falco-exporter:
+    image: falcosecurity/falco-exporter:0.8.7
+    container_name: falco_exporter_novadef
+    profiles: ["collection_module.falco"]
+    labels:
+      module: "falco-exporter"
+      machine_id: "${MACHINE_ID}"
+    depends_on:
+      - falco
+    environment:
+      - MACHINE_ID=${MACHINE_ID}
+      - TZ=${TZ}
+    volumes:
+      - /var/run/falco:/var/run/falco
+    ports:
+      - "${FALCO_EXPORTER_PORT:-9376}:9376"
+    restart: unless-stopped
+
+  falco_rules_validator:
+    image: falco_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Data_Collection_Module/Docker/Dockerfiles/falco.dockerfile
+    profiles: ["collection_module.validator"]
+    environment:
+      - TZ=${TZ}
+      - MACHINE_ID=${MACHINE_ID}
+      - SKIP_DRIVER_LOADER=${FALCO_SKIP_DRIVER_LOADER}
+      - FALCO_RULES_PATHS=${FALCO_RULES_PATHS}
+      - FALCO_VALIDATE_PATHS=${FALCO_VALIDATE_PATHS}
+    entrypoint: ["/entrypoint_falco.sh", "--validate"]
+    volumes:
+      - ${PFD}/Data_Collection_Module/Configuration_Files/Falco:/etc/Falco:ro
+    restart: "no"
+
+# Autodiscovery using HTTP-SD. Prometheus will read the information to identify dinamically this device.
+  device-info:
+    image: device_info_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Data_Collection_Module/Docker/Dockerfiles/device_info.dockerfile
+    container_name: device_info_novadef
+    profiles: ["collection_module.info"]
+    environment:
+      - TZ=${TZ}
+      - MACHINE_ID=${MACHINE_ID}
+      - TELEGRAF_PROBE_HOST=${TELEGRAF_PROBE_HOST:-telegraf}
+      - TELEGRAF_TO_PROMETHEUS_PORT=${TELEGRAF_TO_PROMETHEUS_PORT:-9273}
+      - FLUENTD_PROBE_HOST=${FLUENTD_PROBE_HOST:-fluentd}
+      - FLUENTD_TO_PROMETHEUS_PORT=${FLUENTD_TO_PROMETHEUS_PORT:-24231}
+      - FALCO_PROBE_HOST=${FALCO_PROBE_HOST:-falco-exporter}
+      - FALCO_EXPORTER_PORT=${FALCO_EXPORTER_PORT:-9376}
+      - DEVICE_INFO_PROBE_TIMEOUT=${DEVICE_INFO_PROBE_TIMEOUT:-2}
+      - DEVICE_INFO_REFRESH_INTERVAL=${DEVICE_INFO_REFRESH_INTERVAL:-15}
+      - DEVICE_INFO_PORT=${DEVICE_INFO_PORT}
+    ports:
+      - "${DEVICE_INFO_PORT:-9999}:${DEVICE_INFO_PORT:-9999}"
+    restart: unless-stopped

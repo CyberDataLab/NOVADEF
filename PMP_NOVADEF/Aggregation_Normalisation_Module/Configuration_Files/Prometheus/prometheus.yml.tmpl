@@ -1,0 +1,38 @@
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+  - /etc/prometheus/rules/Telegraf/*.yml
+  - /etc/prometheus/rules/Falco/*.yml
+  - /etc/prometheus/rules/Fluentd/*.yml
+
+scrape_configs:
+  - job_name: 'device_autodiscovery'
+    metrics_path: /metrics
+    http_sd_configs:
+      - url: http://discovery-agent:${DISCOVERY_AGENT_PORT}/sd  #Endpoint to discover the IPs that exposes their metrics using an endpoint with device_info container
+        refresh_interval: 10s
+
+  # Scenario/ victim host — kept from PMP/. It runs its own standalone
+  # Telegraf (Scenario/telegraf/telegraf.conf, listens on :9274) that isn't
+  # part of the device_info/discovery-agent mesh, so it needs a static job.
+  - job_name: 'scenario_victim_telegraf'
+    metrics_path: /metrics
+    scrape_interval: 1s
+    scrape_timeout: 1s
+    static_configs:
+      - targets: ['scenario_victim:9274']
+        labels:
+          module: 'scenario_victim_telegraf'
+          machine_id: 'scenario_victim'
+
+# Only the downsampled series produced by the recording rules in rules/ are
+# forwarded to Mimir; raw high-resolution samples stay local to this Prometheus.
+remote_write:
+  - url: http://${MIMIR_HOST}:${MIMIR_PORT}/api/v1/push
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'downsampled:.*'
+        action: keep
+

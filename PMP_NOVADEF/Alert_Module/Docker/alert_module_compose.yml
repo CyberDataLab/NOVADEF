@@ -1,0 +1,116 @@
+# sudo docker compose up -d
+# sudo docker exec -it IDCONTAINER bash
+---
+services:
+  alert_module:
+    image: alert_module_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Alert_Module/Docker/Dockerfiles/alert_module.dockerfile
+    container_name: alert_module_novadef
+    profiles: ["alert_module.alert_module"]
+    environment:
+      - TZ=${TZ}
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
+      - SNORT_KAFKA_GROUP_ID=${SNORT_KAFKA_GROUP_ID}
+      - SNORT_KAFKA_TOPIC_IN=${SNORT_KAFKA_TOPIC_IN}
+      - SNORT_KAFKA_TOPIC_OUT=${SNORT_KAFKA_TOPIC_OUT}
+      - SNORT_RULES_PATHS=${SNORT_RULES_PATHS}
+      - SNORT_ALERT_TAP_IFACE=${SNORT_ALERT_TAP_IFACE}
+      - MONGO_SNORT_URI=${MONGO_SNORT_URI}
+      - SNORT_DB_USER_NAME=${SNORT_DB_USER_NAME}
+      - SNORT_DB_USER_PASSWORD=${SNORT_DB_USER_PASSWORD}
+      - MONGO_PORT=${MONGO_PORT:-27017}
+      - SNORT_KAFKA_MESSAGE_FIELD=${SNORT_KAFKA_MESSAGE_FIELD}
+      - SNORT_CONSUMER_KAFKA_AUTO_OFFSET_RESET=${SNORT_CONSUMER_KAFKA_AUTO_OFFSET_RESET}
+      - SNORT_CONSUMER_KAFKA_ENABLE_AUTO_COMMIT=${SNORT_CONSUMER_KAFKA_ENABLE_AUTO_COMMIT}
+      - SNORT_CONSUMER_KAFKA_PARTITION_ASSIGNMENT_STRATEGY=${SNORT_CONSUMER_KAFKA_PARTITION_ASSIGNMENT_STRATEGY}
+      - SNORT_CONSUMER_KAFKA_ENABLE_PARTITION_EOF=${SNORT_CONSUMER_KAFKA_ENABLE_PARTITION_EOF}
+      - SNORT_CONSUMER_KAFKA_ALLOW_AUTO_CREATE_TOPICS=${SNORT_CONSUMER_KAFKA_ALLOW_AUTO_CREATE_TOPICS}
+      - SNORT_CONSUMER_FETCH_MIN_BYTES=${SNORT_CONSUMER_FETCH_MIN_BYTES}
+      - SNORT_CONSUMER_FETCH_WAIT_MAX_MS=${SNORT_CONSUMER_FETCH_WAIT_MAX_MS}
+      - SNORT_CONSUMER_QUEUED_MAX_MESSAGES_KBYTES=${SNORT_CONSUMER_QUEUED_MAX_MESSAGES_KBYTES}
+      - SNORT_CONSUMER_MAX_POLL_INTERVAL_MS=${SNORT_CONSUMER_MAX_POLL_INTERVAL_MS}
+      - SNORT_CONSUMER_SESSION_TIMEOUT_MS=${SNORT_CONSUMER_SESSION_TIMEOUT_MS}
+      - SNORT_PRODUCER_KAFKA_PRODUCER_LINGER_MS=${SNORT_PRODUCER_KAFKA_PRODUCER_LINGER_MS}
+      - SNORT_PRODUCER_BATCH_NUM_MESSAGES=${SNORT_PRODUCER_BATCH_NUM_MESSAGES}
+      - SNORT_PRODUCER_KAFKA_PRODUCER_BATCH_SIZE=${SNORT_PRODUCER_KAFKA_PRODUCER_BATCH_SIZE}
+      - SNORT_PRODUCER_KAFKA_PRODUCER_COMPRESSION=${SNORT_PRODUCER_KAFKA_PRODUCER_COMPRESSION}
+    # If host.docker.internal is used in Linux:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ${PFD}/Results/Alerts:/home/Alert_Module/Alerts
+    restart: unless-stopped
+
+  # NOVADEF-specific fast-path NIDS (fan-in detection + Isolation Forest),
+  # not part of ROBUST-6G_PMP — added for the Scenario/Experiments attack
+  # detection pipeline. TODO: parametrize these env vars via the Launcher
+  # models the same way alert_module/collection_module already are.
+  network_intrusion_detector:
+    image: network_intrusion_detector_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Alert_Module/Docker/Dockerfiles/network_intrusion_detector.dockerfile
+    container_name: network_intrusion_detector_novadef
+    profiles: ["alert_module.network_intrusion_detector"]
+    depends_on:
+      kafka_novadef:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      - KAFKA_BOOTSTRAP=kafka_novadef:29092
+      - KAFKA_TOPIC_IN=tshark_traces
+      - KAFKA_TOPIC_OUT=network_intrusion_alerts
+      - KAFKA_TOPIC_AUTH_IN=network_auth_events
+      - TSHARK_TRACE_PATH=/tshark/traces/infile.ndjson
+      - SCENARIO_RUNTIME_DIR=/scenario-runtime
+      - DETECTOR_WINDOW_SECONDS=1
+      - DETECTOR_WINDOW_PACKETS=12
+      - DETECTOR_MIN_FAILURES=1
+      - DETECTOR_MIN_UNIQUE_USERS=1
+      - DETECTOR_MIN_UNIQUE_IPS=1
+      - DETECTOR_DEDUP_SECONDS=5
+      - DETECTOR_FAST_PATH_FIRST_FAILURE=true
+      - DETECTOR_POLL_TIMEOUT_SECONDS=0.001
+      - DETECTOR_IMMEDIATE_AUTH_CAMPAIGN_ALERT=true
+      # Run the Isolation Forest alongside the fast fan-in detector so its
+      # anomaly_score is captured for the rule-based-vs-ML detection quality
+      # comparison in the article. The fan-in path remains primary for
+      # DETECTION latency (fires first, unaffected) -- this only adds a
+      # parallel, slower ML alert with its own score for measurement.
+      - DETECTOR_ISOLATION_FOREST_ENABLED=true
+      # TTL del dedup por ataque: alto para garantizar UNA sola alerta durante
+      # toda la duración del ataque (~600s). Entre experimentos el API limpia el
+      # estado del detector explícitamente (_reset_detector_runtime_state), así
+      # que un TTL largo no causa supresión de alertas de runs posteriores.
+      - DETECTOR_CAMPAIGN_DEDUP_TTL_SECONDS=1800
+    volumes:
+      - ${PFD}/Results/Network_IDS:/app/results
+      - ${PFD}/Results/tshark/traces:/tshark/traces:ro
+      - ${PFD}/../.novadef_runtime/scenarios:/scenario-runtime:ro
+    restart: unless-stopped
+
+  alert_rules_validator:
+    image: alert_module_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Alert_Module/Docker/Dockerfiles/alert_module.dockerfile
+    profiles: ["alert_module.validator"]
+    entrypoint:
+      - snort
+      - -T
+      - -c
+      - /home/Alert_Module/Snort_configuration/lua/snort.lua
+      - -R
+      - /home/Alert_Module/Snort_configuration/Rules/snort3_custom.tmp.rules
+    volumes:
+      - ${PFD}/Alert_Module/Configuration_Files/lua:/home/Alert_Module/Snort_configuration/lua:ro
+      - ${PFD}/Alert_Module/Configuration_Files/Rules:/home/Alert_Module/Snort_configuration/Rules:ro
+    restart: "no"

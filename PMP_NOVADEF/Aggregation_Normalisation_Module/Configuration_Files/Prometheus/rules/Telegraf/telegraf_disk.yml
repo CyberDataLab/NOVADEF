@@ -1,0 +1,20 @@
+groups:
+  - name: telegraf_disk_downsampling
+    interval: 1m
+    rules:
+      - record: downsampled:telegraf_disk_used:avg1m
+        expr: avg_over_time(disk_used[1m])
+      - record: downsampled:telegraf_disk_free:avg1m
+        expr: avg_over_time(disk_free[1m])
+      - record: downsampled:telegraf_disk_total:avg1m
+        expr: avg_over_time(disk_total[1m])
+      - record: downsampled:telegraf_disk_used_percent:avg1m
+        expr: avg_over_time(disk_used_percent[1m])
+      - record: downsampled:telegraf_disk_inodes_used:avg1m
+        expr: avg_over_time(disk_inodes_used[1m])
+      - record: downsampled:telegraf_disk_inodes_free:avg1m
+        expr: avg_over_time(disk_inodes_free[1m])
+      - record: downsampled:telegraf_disk_inodes_total:avg1m
+        expr: avg_over_time(disk_inodes_total[1m])
+      - record: downsampled:telegraf_disk_inodes_used_percent:avg1m
+        expr: avg_over_time(disk_inodes_used_percent[1m])

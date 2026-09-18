@@ -1,0 +1,44 @@
+  
+# Near Real-time Data Retrieval API - FastAPI WebSocket Server
+
+services:
+  nrtdr_api:
+    image: nrtdr_api_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: APIs/Near_Real_time_Data_Retrieval_API/Docker/Dockerfile/nrtdr_api.dockerfile
+    container_name: nrtdr_api_novadef
+    profiles: ["apis_module.nrtdr_api"]
+    environment:
+      - TZ=${TZ}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_DB=${REDIS_DB}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - NRTDR_API_HOST=${NRTDR_API_HOST}
+      - NRTDR_API_PORT=${NRTDR_API_PORT}
+      - NRTDR_WS_DEFAULT_LAST_N=${NRTDR_WS_DEFAULT_LAST_N}
+      - NRTDR_WS_MAX_LAST_N=${NRTDR_WS_MAX_LAST_N}
+      - NRTDR_ACTIVE_WINDOW_SECONDS=${NRTDR_ACTIVE_WINDOW_SECONDS}
+    ports:
+      - "${NRTDR_API_PORT:-8001}:${NRTDR_API_PORT:-8001}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:${NRTDR_API_PORT:-8001}/health || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  nrtdr_data:
+    driver: local
+    name: nrtdr_data_novadef

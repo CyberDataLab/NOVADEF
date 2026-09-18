@@ -1,0 +1,4 @@
+include:
+  - path: ${PFD}/APIs/Near_Real_time_Data_Retrieval_API/Docker/NRTDR_API_compose.yml
+  - path: ${PFD}/APIs/Historical_Data_Retrieval_API/Docker/HDR_API_compose.yml
+  - path: ${PFD}/APIs/Data_Exporter_API/Docker/DT_API_compose.yml

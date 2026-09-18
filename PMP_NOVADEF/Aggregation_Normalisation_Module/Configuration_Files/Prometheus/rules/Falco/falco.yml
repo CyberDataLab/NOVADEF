@@ -1,0 +1,9 @@
+groups:
+  - name: falco_downsampling
+    interval: 1m
+    rules:
+      # falco_events is a counter (one series per triggered rule: labels
+      # rule/priority/source/tags/hostname), so we record the 1m increase
+      # (events fired in the window), not an average of the raw cumulative value.
+      - record: downsampled:falco_events:increase1m
+        expr: increase(falco_events[1m])

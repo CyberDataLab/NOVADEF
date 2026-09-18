@@ -1,0 +1,10 @@
+groups:
+  - name: downsampling
+    interval: 1m
+    rules:
+      # `up` is a synthetic metric Prometheus generates for every scrape target
+      # (1 = reachable, 0 = down), independent of any specific tool (Telegraf,
+      # Falco, Fluentd...). Kept at the root of rules/ since it isn't tied to
+      # one tool's subfolder — gives per-device availability/uptime.
+      - record: downsampled:up:avg_over_time_1m
+        expr: avg_over_time(up[1m])

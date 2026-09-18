@@ -1,0 +1,27 @@
+---
+services:
+  alert_manager:
+    image: alert_manager_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Alert_Manager/Docker/Dockerfiles/alert_manager.dockerfile
+    container_name: alert_manager_novadef
+    profiles: ["alert_manager.alert_manager"]
+    depends_on:
+      kafka_novadef:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      - KAFKA_BOOTSTRAP=kafka_novadef:29092
+      # Input topics — all detection sources
+      - TOPIC_NETWORK_ALERTS=network_intrusion_alerts
+      - TOPIC_FALCO=falco_events
+      - TOPIC_SNORT_IN=snort_alerts
+      # Output topics
+      - TOPIC_PMP_ALERTS=pmp_alerts
+      - TOPIC_SNORT_OUT=snort_alerts_am
+      # Campaign correlation config
+      - CAMPAIGN_WINDOW_SECS=1800
+      - CAMPAIGN_TTL_SECS=3600
+      - KAFKA_GROUP_ID=alert-manager-v1
+    restart: unless-stopped

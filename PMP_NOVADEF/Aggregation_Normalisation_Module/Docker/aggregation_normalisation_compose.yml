@@ -1,0 +1,202 @@
+services:
+
+  init-prometheus:
+    image: busybox:latest
+    container_name: init_prometheus
+    profiles: ["aggregation_module.prometheus"]
+    # Change the owner of the /prometheus folder to user 65534 (nobody)
+    command: sh -c "chown -R 65534:65534 /prometheus"
+    volumes:
+      - ${PFD}/Results/prometheus_data:/prometheus
+    restart: "no"
+
+  init-prometheus-config:
+    image: busybox:latest
+    container_name: init_prometheus_config
+    profiles: ["aggregation_module.prometheus"]
+    environment:
+      - DISCOVERY_AGENT_PORT=${DISCOVERY_AGENT_PORT:-8100}
+      - MIMIR_HOST=${MIMIR_HOST}
+      - MIMIR_PORT=${MIMIR_PORT:-8080}
+    volumes:
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/prometheus.yml.tmpl:/tmpl/prometheus.yml.tmpl:ro
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/generated:/out
+    command: sh -c 'sed -e "s|\$${DISCOVERY_AGENT_PORT}|$${DISCOVERY_AGENT_PORT}|g" -e "s|\$${MIMIR_HOST}|$${MIMIR_HOST}|g" -e "s|\$${MIMIR_PORT}|$${MIMIR_PORT}|g" /tmpl/prometheus.yml.tmpl > /out/prometheus.yml && cat /out/prometheus.yml'
+    restart: "no"
+  
+  prometheus:
+    image: prom/prometheus:v3.8.0
+    container_name: prometheus_server_novadef
+    profiles: ["aggregation_module.prometheus"]
+    depends_on:
+      init-prometheus:
+        condition: service_completed_successfully
+      init-prometheus-config:
+        condition: service_completed_successfully
+      discovery-agent:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${PROMETHEUS_PORT:-9090}/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      - TZ=${TZ}
+    extra_hosts:
+      - "discovery-agent:host-gateway"
+      - "${MIMIR_HOST}:host-gateway"
+    volumes:
+         #Mounting prometheus template with the environment variable expended
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/prometheus.yml.tmpl:/etc/prometheus/prometheus.yml.tmpl:ro
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/generated:/etc/prometheus/generated:ro
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/rules:/etc/prometheus/rules:ro
+      - ${PFD}/Results/prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/generated/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:${PROMETHEUS_PORT:-9090}"
+    restart: unless-stopped
+
+  discovery-agent:
+    image: discovery_agent_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Aggregation_Normalisation_Module/Docker/Dockerfiles/discovery_agent.dockerfile
+    container_name: discovery_agent_novadef
+    profiles: ["aggregation_module.prometheus"] #Same profile because Prometheus needs this microservice
+    environment:
+      - TZ=${TZ}
+      - DISCOVERY_AGENT_SCAN_PORT=${DISCOVERY_AGENT_SCAN_PORT:-9999}
+      - DISCOVERY_AGENT_SCAN_TIMEOUT=${DISCOVERY_AGENT_SCAN_TIMEOUT}
+      - DISCOVERY_AGENT_REFRESH_INTERVAL=${DISCOVERY_AGENT_REFRESH_INTERVAL}
+      - DISCOVERY_AGENT_PORT=${DISCOVERY_AGENT_PORT:-8100}
+    network_mode: "${NETWORK_MODE}"
+    restart: unless-stopped
+
+  init-opensearch:
+    image: busybox:latest
+    container_name: init_opensearch
+    profiles: ["aggregation_module.opensearch"]
+    network_mode: "${NETWORK_MODE}"
+    command: sh -c "chown -R 1000:1000 /usr/share/opensearch/data"
+    volumes:
+      - ${PFD}/Results/opensearch_data:/usr/share/opensearch/data
+    restart: "no"
+
+  opensearch:
+    image: opensearchproject/opensearch:3.4.0
+    container_name: opensearch_node_novadef
+    profiles: ["aggregation_module.opensearch"]
+    depends_on:
+      init-opensearch:
+        condition: service_completed_successfully
+    environment:
+      - cluster.name=${OPENSEARCH_CLUSTER_NAME}
+      - node.name=${OPENSEARCH_NODE_NAME}
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD}
+    network_mode: "${NETWORK_MODE}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -u \"admin:${OPENSEARCH_PASSWORD}\" --silent --fail https://localhost:${OPENSEARCH_REST_API_PORT:-9200}/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ${PFD}/Results/opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "${OPENSEARCH_REST_API_PORT:-9200}:9200"
+      - "${OPENSEARCH_ANALYSER_PORT:-9600}:9600"
+    restart: unless-stopped
+
+  init-opensearch-ism-policy:
+    image: curlimages/curl:8.11.0
+    container_name: init_opensearch_ism_policy
+    profiles: ["aggregation_module.opensearch"]
+    network_mode: "${NETWORK_MODE}"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    environment:
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-opensearch-host}
+      - OPENSEARCH_REST_API_PORT=${OPENSEARCH_REST_API_PORT:-9200}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+    volumes:
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/OpenSearch/ism_logs_retention_policy.json:/tmp/ism_logs_retention_policy.json:ro
+    entrypoint: ["sh", "-c"]
+    # Creating the policy is a one-time step (HTTP 201). On later restarts the
+    # policy already exists and OpenSearch replies 409, which is the desired
+    # end state too, so it's treated as success rather than retried/updated here.
+    # "$$" escapes are required here.
+    command:
+      - >
+        for attempt in $$(seq 1 10); do
+        status=$$(curl -k -u "admin:${OPENSEARCH_PASSWORD}" --silent --output /dev/null --write-out "%{http_code}" --max-time 10
+        -X PUT "https://${OPENSEARCH_HOST:-opensearch-host}:${OPENSEARCH_REST_API_PORT:-9200}/_plugins/_ism/policies/logs_retention_policy"
+        -H "Content-Type: application/json"
+        --data-binary @/tmp/ism_logs_retention_policy.json);
+        echo "ISM policy PUT attempt $$attempt returned HTTP $$status";
+        [ "$$status" = "201" ] || [ "$$status" = "409" ] && exit 0;
+        sleep 3;
+        done;
+        exit 1
+    restart: "no"
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:3.4.0
+    container_name: opensearch_dashboards_novadef
+    profiles: ["aggregation_module.opensearch"]
+    ports:
+      - "${OPENSEARCH_DASHBOARD_PORT:-5601}:5601"
+    environment:
+      - 'OPENSEARCH_HOSTS=["https://${OPENSEARCH_HOST:-opensearch-host}:${OPENSEARCH_REST_API_PORT:-9200}"]'
+      - OPENSEARCH_USERNAME=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-}
+    network_mode: "${NETWORK_MODE}"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  logstash:
+    image: opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0
+    container_name: logstash_novadef
+    profiles: ["aggregation_module.opensearch"]
+    volumes:
+      - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Logstash/pipeline.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    environment:
+      - "LS_JAVA_OPTS=-Xmx256m -Xms256m"
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-opensearch-host}
+      - OPENSEARCH_REST_API_PORT=${OPENSEARCH_REST_API_PORT:-9200}
+      - TELEGRAF_BASE_TOPIC=${TELEGRAF_BASE_TOPIC}
+      - FLUENTD_SYSLOG_BASE_TOPIC=${FLUENTD_SYSLOG_BASE_TOPIC}
+      - FLUENTD_SYSTEMD_BASE_TOPIC=${FLUENTD_SYSTEMD_BASE_TOPIC}
+      - FALCO_BASE_TOPIC=${FALCO_BASE_TOPIC}
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
+    network_mode: "${NETWORK_MODE}"
+    extra_hosts:
+      # The default value is not valid. "kafka-host" is used as a placeholder for the Kafka address,
+      # which should be specified using its FQDN. Docker does not support empty default values for some of its functions,
+      # and hard-coding a default FQDN is not recommended.
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      init-opensearch-ism-policy:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:

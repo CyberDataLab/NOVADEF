@@ -1,0 +1,87 @@
+
+---
+services:
+  kafka_novadef:
+    image: apache/kafka:3.9.0
+    container_name: kafka_novadef
+    profiles: ["communication_module.kafka"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "kafka_novadef", "29092"]
+      interval: 5s
+      retries: 15
+      start_period: 10s
+      timeout: 3s
+    environment:
+      - TZ=${TZ}
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_NODE_ID=1
+      # BROKER for internal connections and EXTERNAL for external connection
+      # kafka_novadef:29092 -> same Docker network
+      # host.docker.internal:9092 -> same host, but other network
+      # kafka_novadef-node1.lan:9094 -> other host
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka_novadef:9093
+      - KAFKA_LISTENERS=BROKER://0.0.0.0:${KAFKA_PORT_INTERNAL:-29092},EXTERNAL_DOCKER://0.0.0.0:9092,EXTERNAL_LAN://0.0.0.0:${KAFKA_PORT_EXTERNAL_LAN:-9094},CONTROLLER://:9093
+      - KAFKA_ADVERTISED_LISTENERS=BROKER://kafka_novadef:${KAFKA_PORT_INTERNAL:-29092},EXTERNAL_DOCKER://host.docker.internal:9092,EXTERNAL_LAN://${KAFKA_LAN_HOSTNAME:-kafka-host}:${KAFKA_PORT_EXTERNAL_LAN:-9094},CONTROLLER://kafka_novadef:9093
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=BROKER:PLAINTEXT,EXTERNAL_DOCKER:PLAINTEXT,EXTERNAL_LAN:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=BROKER
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_NUM_PARTITIONS=1
+  # === Default retention (APPLIES PER PARTITION - NUM_PARTITIONS = 1) ===
+      - KAFKA_LOG_RETENTION_MS=${KAFKA_LOG_RETENTION_MS}         # 1 day
+      - KAFKA_LOG_RETENTION_BYTES=${KAFKA_LOG_RETENTION_BYTES}    # 1 GiB (1 * 1024^3)
+      - KAFKA_LOG_CLEANUP_POLICY=${KAFKA_LOG_CLEANUP_POLICY}         # deletion (not only compact)
+      - KAFKA_LOG_SEGMENT_BYTES=${KAFKA_LOG_SEGMENT_BYTES}       # 256 MiB: rotates more frequently
+      - KAFKA_LOG_ROLL_MS=${KAFKA_LOG_ROLL_MS}               # rotated by time if there is little traffic
+
+    ports:
+      - "${KAFKA_PORT_INTERNAL:-29092}:${KAFKA_PORT_INTERNAL:-29092}"
+      - "9092:9092"
+      - "${KAFKA_PORT_EXTERNAL_LAN:-9094}:${KAFKA_PORT_EXTERNAL_LAN:-9094}" # The only case in which the external port is both inside the container and exposed on the host so that it can receive data
+    extra_hosts:
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+
+  filebeat:
+    image: elastic/filebeat:8.16.2
+    container_name: filebeat_novadef
+    profiles: ["communication_module.filebeat"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "filebeat",
+          "test",
+          "config",
+          "--strict.perms=false",
+          "-c",
+          "/usr/share/filebeat/filebeat.yml",
+        ]
+      interval: 10s
+      retries: 3
+      start_period: 10s
+      timeout: 5s
+    environment:
+      - TZ=${TZ}
+      - FLUENTD_SYSLOG_BASE_TOPIC=${FLUENTD_SYSLOG_BASE_TOPIC}
+      - FLUENTD_SYSTEMD_BASE_TOPIC=${FLUENTD_SYSTEMD_BASE_TOPIC}
+      - TSHARK_BASE_TOPIC=${TSHARK_BASE_TOPIC}
+      - FALCO_BASE_TOPIC=${FALCO_BASE_TOPIC}
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
+      - FILEBEAT_COMPRESION=${FILEBEAT_COMPRESION}
+      - FILEBEAT_BULK_MAX_SIZE=${FILEBEAT_BULK_MAX_SIZE}
+    extra_hosts:
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    volumes:
+      - ${PFD}/Communication_Bus/Configuration_Files/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ${PFD}/Results:/results:ro
+      - ${PFD}/Persistence/filebeat_data:/usr/share/filebeat/data:rw
+    command: 
+      - "--strict.perms=false" # Manual change of owner was avoided by using this flag in Filebeat.
+      - "-e"
+    restart: unless-stopped
+    user: root

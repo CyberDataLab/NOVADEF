@@ -1,0 +1,12 @@
+groups:
+  - name: telegraf_mem_downsampling
+    interval: 1m
+    rules:
+      - record: downsampled:telegraf_mem_used:avg1m
+        expr: avg_over_time(mem_used[1m])
+      - record: downsampled:telegraf_mem_available:avg1m
+        expr: avg_over_time(mem_available[1m])
+      - record: downsampled:telegraf_mem_total:avg1m
+        expr: avg_over_time(mem_total[1m])
+      - record: downsampled:telegraf_mem_used_percent:avg1m
+        expr: avg_over_time(mem_used_percent[1m])

@@ -1,0 +1,217 @@
+services:
+  #sudo docker exec -it mongodb_novadef mongo -u admin -p admin123
+  mongodb:
+    image: mongo:4.4.29
+    container_name: mongodb_novadef
+    profiles: ["db_module.mongodb"]
+    environment:
+      - TZ=${TZ}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - ${PFD}/Persistence/mongo_data:/data/db
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  init-mongo-users:
+    image: init_mongo_users_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Databases_module/Docker/Dockerfile/init_mongo_users.dockerfile
+    container_name: init_mongo_users_novadef
+    profiles: ["db_module.mongodb"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_PORT=${MONGO_PORT:-27017}
+      - SNORT_DB_USER_NAME=${SNORT_DB_USER_NAME}
+      - SNORT_DB_USER_PASSWORD=${SNORT_DB_USER_PASSWORD}
+      - FLOW_DB_WRITER_NAME=${FLOW_DB_WRITER_NAME}
+      - FLOW_DB_WRITER_PASSWORD=${FLOW_DB_WRITER_PASSWORD}
+      - FLOW_DB_READER_NAME=${FLOW_DB_READER_NAME}
+      - FLOW_DB_READER_PASSWORD=${FLOW_DB_READER_PASSWORD}
+    restart: "no"
+
+  mongodb_cm:
+    image: mongo:4.4.29
+    container_name: mongodb_cm_novadef
+    profiles: ["db_module.mongodb_cm"]
+    environment:
+      - TZ=${TZ}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_CM_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_CM_INITDB_ROOT_PASSWORD}
+    volumes:
+      - ${PFD}/Persistence/mongo_cm:/data/db
+    ports:
+      - "${MONGO_CM_PORT:-27018}:27017"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres_gui:
+    image: postgres:16
+    container_name: postgres_gui_novadef
+    profiles: ["db_module.postgres_gui"]
+    environment:
+      - TZ=${TZ}
+      - POSTGRES_USER=${POSTGRES_GUI_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_GUI_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_GUI_DB}
+    volumes:
+      - ${PFD}/Persistence/postgres_gui_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_GUI_PORT:-5432}:5432"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_GUI_USER} -d ${POSTGRES_GUI_DB} -p 5432",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis_novadef:
+    image: redis:8.6.0
+    container_name: redis_novadef
+    profiles: ["db_module.redis"]
+    environment:
+      - TZ=${TZ}
+    command: >
+      sh -c 'exec redis-server /usr/local/etc/redis/redis.conf
+      --maxmemory-samples ${REDIS_MAXMEMORY_SAMPLES}
+      --io-threads ${REDIS_IO_THREADS}
+      --stream-node-max-bytes ${REDIS_STREAM_NODE_MAX_BYTES}
+      --stream-node-max-entries ${REDIS_STREAM_NODE_MAX_ENTRIES}
+      --maxclients ${REDIS_MAXCLIENTS}'
+    #--requirepass ${REDIS_PASSWORD} -> first I need to configure the ACL Redis to create users
+    volumes:
+      - ${PFD}/Databases_module/Configuration_files/Redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ${PFD}/Persistence/Redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"] # default port is 6379
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+
+  redis_worker:
+    image: redis_worker_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Databases_module/Docker/Dockerfile/Worker_kafka_to_redis.dockerfile
+    container_name: redis_worker_novadef
+    profiles: ["db_module.redis"]
+    environment:
+      - TZ=${TZ}
+      # Kafka Configuration
+      - KAFKA_BOOTSTRAP_DOCKER=${KAFKA_BOOTSTRAP_DOCKER}
+      - KTRW_KAFKA_GROUP_ID=${KTRW_KAFKA_GROUP_ID}
+      - KTRW_KAFKA_AUTO_OFFSET_RESET=${KTRW_KAFKA_AUTO_OFFSET_RESET}
+      - KTRW_KAFKA_ENABLE_AUTO_COMMIT=${KTRW_KAFKA_ENABLE_AUTO_COMMIT}
+      # Redis Configuration
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - MONGO_CM_URI_DOCKER=${MONGO_CM_URI_DOCKER}
+      # Stream Configuration
+      - KTRW_REDIS_MAX_STREAM_LENGTH=${KTRW_REDIS_MAX_STREAM_LENGTH}
+      - KTRW_REDIS_STREAM_TTL_SECONDS=${KTRW_REDIS_STREAM_TTL_SECONDS}
+      # Topic Discovery Configuration
+      - KTRW_KAFKA_TOPIC_REFRESH_INTERVAL=${KTRW_KAFKA_TOPIC_REFRESH_INTERVAL}
+      - KTRW_CM_TOPICS_REFRESH_INTERVAL=${KTRW_CM_TOPICS_REFRESH_INTERVAL}
+      - KTRW_NEW_TOPIC_BOOTSTRAP_MAX_MESSAGES=${KTRW_NEW_TOPIC_BOOTSTRAP_MAX_MESSAGES}
+      - KTRW_TOPIC_MAP_CACHE_FILE=${KTRW_TOPIC_MAP_CACHE_FILE}
+      # Memory Management Configuration
+      - KTRW_REDIS_CLEANUP_INTERVAL=${KTRW_REDIS_CLEANUP_INTERVAL}
+      - KTRW_REDIS_RETENTION_HOURS=${KTRW_REDIS_RETENTION_HOURS}
+      - KTRW_REDIS_EMERGENCY_RETENTION_HOURS=${KTRW_REDIS_EMERGENCY_RETENTION_HOURS}
+      - KTRW_REDIS_MEMORY_THRESHOLD=${KTRW_REDIS_MEMORY_THRESHOLD}
+      # Kafka Topic Names
+      - TELEGRAF_BASE_TOPIC=${TELEGRAF_BASE_TOPIC}
+      - FLUENTD_SYSLOG_BASE_TOPIC=${FLUENTD_SYSLOG_BASE_TOPIC}
+      - FLUENTD_SYSTEMD_BASE_TOPIC=${FLUENTD_SYSTEMD_BASE_TOPIC}
+      - FALCO_BASE_TOPIC=${FALCO_BASE_TOPIC}
+      - TSHARK_BASE_TOPIC=${TSHARK_BASE_TOPIC}
+      - SNORT_KAFKA_TOPIC_OUT=${SNORT_KAFKA_TOPIC_OUT}
+      - CIC_KAFKA_BASE_TOPIC_OUT=${CIC_KAFKA_BASE_TOPIC_OUT}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import sys; cmdline = open('/proc/1/cmdline', 'rb').read().decode('utf-8', errors='ignore'); sys.exit(0 if 'kafka_redis_worker.py' in cmdline else 1)",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+    extra_hosts:
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  init-mimir:
+    image: busybox:latest
+    container_name: init_mimir
+    profiles: ["db_module.mimir"]
+    command: sh -c "chown -R 10001:10001 /data"
+    volumes:
+      - ${PFD}/Persistence/mimir_data:/data
+    restart: "no"
+
+  mimir:
+    image: grafana/mimir:3.1.2
+    container_name: mimir_novadef
+    profiles: ["db_module.mimir"]
+    depends_on:
+      init-mimir:
+        condition: service_completed_successfully
+    environment:
+      - TZ=${TZ}
+    command:
+      - -target=all
+      - -auth.multitenancy-enabled=false
+      - -ingester.ring.replication-factor=1
+      - -blocks-storage.backend=filesystem
+      - -blocks-storage.filesystem.dir=/data/blocks
+      - -blocks-storage.tsdb.dir=/data/tsdb
+      - -compactor.data-dir=/data/compactor
+      - -ruler-storage.backend=filesystem
+      - -ruler-storage.filesystem.dir=/data/rules
+      - -alertmanager-storage.backend=filesystem
+      - -alertmanager-storage.filesystem.dir=/data/alertmanager
+      - -server.http-listen-port=${MIMIR_PORT:-8080}
+    # grafana/mimir is a distroless-style image (no shell, no wget/curl/ls),
+    # so an exec-based Docker healthcheck cannot run inside the container;
+    # readiness is checked externally against /ready instead (see bootstrap script).
+    volumes:
+      - ${PFD}/Persistence/mimir_data:/data
+    ports:
+      - "${MIMIR_PORT:-8080}:${MIMIR_PORT:-8080}"
+    restart: unless-stopped

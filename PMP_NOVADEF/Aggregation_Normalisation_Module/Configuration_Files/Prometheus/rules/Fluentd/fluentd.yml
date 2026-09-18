@@ -1,0 +1,13 @@
+groups:
+  - name: fluentd_downsampling
+    interval: 1m
+    rules:
+      # Gauges: average the value over the window, same pattern as Telegraf.
+      - record: downsampled:fluentd_buffer_total_queued_size:avg1m
+        expr: avg_over_time(fluentd_buffer_total_queued_size[1m])
+      - record: downsampled:fluentd_output_status_buffer_queue_length:avg1m
+        expr: avg_over_time(fluentd_output_status_buffer_queue_length[1m])
+      # Counter: record the 1m increase (retries in the window), not an average
+      # of the raw cumulative value.
+      - record: downsampled:fluentd_output_status_retry_count:increase1m
+        expr: increase(fluentd_output_status_retry_count[1m])

@@ -1,0 +1,14 @@
+groups:
+  - name: telegraf_internet_downsampling
+    interval: 1m
+    rules:
+      - record: downsampled:telegraf_internet_speed_download:avg1m
+        expr: avg_over_time(internet_speed_download[1m])
+      - record: downsampled:telegraf_internet_speed_upload:avg1m
+        expr: avg_over_time(internet_speed_upload[1m])
+      - record: downsampled:telegraf_internet_speed_latency:avg1m
+        expr: avg_over_time(internet_speed_latency[1m])
+      - record: downsampled:telegraf_internet_speed_jitter:avg1m
+        expr: avg_over_time(internet_speed_jitter[1m])
+      - record: downsampled:telegraf_internet_speed_packet_loss:avg1m
+        expr: avg_over_time(internet_speed_packet_loss[1m])

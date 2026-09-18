@@ -1,0 +1,42 @@
+
+# Historical Data Retrieval API - FastAPI server querying Grafana Mimir
+
+services:
+  hdr_api:
+    image: hdr_api_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: APIs/Historical_Data_Retrieval_API/Docker/Dockerfile/hdr_api.dockerfile
+    container_name: hdr_api_novadef
+    profiles: ["apis_module.hdr_api"]
+    environment:
+      - TZ=${TZ}
+      - MIMIR_HOST=${MIMIR_HOST}
+      - MIMIR_PORT=${MIMIR_PORT}
+      - HDR_API_HOST=${HDR_API_HOST}
+      - HDR_API_PORT=${HDR_API_PORT}
+      - HDR_HTTP_TIMEOUT_SECONDS=${HDR_HTTP_TIMEOUT_SECONDS}
+      - HDR_MAX_RANGE_POINTS=${HDR_MAX_RANGE_POINTS}
+      - HDR_DEFAULT_STEP_SECONDS=${HDR_DEFAULT_STEP_SECONDS}
+    extra_hosts:
+      # "mimir-host" is a placeholder used when MIMIR_HOST is not part of this
+      # invocation's .env (e.g. deploying nrtdr_api alone from the same
+      # rest_apis.yml file); Docker requires a non-empty host here.
+      - "${MIMIR_HOST:-mimir-host}:host-gateway"
+    ports:
+      - "${HDR_API_PORT:-8002}:${HDR_API_PORT:-8002}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:${HDR_API_PORT:-8002}/health || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M

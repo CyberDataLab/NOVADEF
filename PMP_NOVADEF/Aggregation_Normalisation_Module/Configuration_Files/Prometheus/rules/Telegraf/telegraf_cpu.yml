@@ -1,0 +1,24 @@
+groups:
+  - name: telegraf_cpu_downsampling
+    interval: 1m
+    rules:
+      - record: downsampled:telegraf_cpu_usage_user:avg1m
+        expr: avg_over_time(cpu_usage_user[1m])
+      - record: downsampled:telegraf_cpu_usage_system:avg1m
+        expr: avg_over_time(cpu_usage_system[1m])
+      - record: downsampled:telegraf_cpu_usage_idle:avg1m
+        expr: avg_over_time(cpu_usage_idle[1m])
+      - record: downsampled:telegraf_cpu_usage_iowait:avg1m
+        expr: avg_over_time(cpu_usage_iowait[1m])
+      - record: downsampled:telegraf_cpu_usage_irq:avg1m
+        expr: avg_over_time(cpu_usage_irq[1m])
+      - record: downsampled:telegraf_cpu_usage_softirq:avg1m
+        expr: avg_over_time(cpu_usage_softirq[1m])
+      - record: downsampled:telegraf_cpu_usage_steal:avg1m
+        expr: avg_over_time(cpu_usage_steal[1m])
+      - record: downsampled:telegraf_cpu_usage_guest:avg1m
+        expr: avg_over_time(cpu_usage_guest[1m])
+      - record: downsampled:telegraf_cpu_usage_guest_nice:avg1m
+        expr: avg_over_time(cpu_usage_guest_nice[1m])
+      - record: downsampled:telegraf_cpu_usage_nice:avg1m
+        expr: avg_over_time(cpu_usage_nice[1m])
