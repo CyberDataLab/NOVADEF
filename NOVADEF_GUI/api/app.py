@@ -23,6 +23,7 @@ from typing import Any
 from urllib import request as urlrequest, error as urlerror
 
 import docker
+import pymongo
 import bcrypt
 import jwt as pyjwt
 import psycopg2
@@ -319,6 +320,9 @@ _GUI_DIR = Path(os.getenv("NOVADEF_GUI_DIR", "/gui"))
 # process itself launches docker containers with volume mounts — it isn't
 # necessarily where THIS container's own filesystem has the repo).
 SOARCA_PLAYBOOKS_DIR = Path(os.getenv("NOVADEF_SOARCA_PLAYBOOKS_DIR", "/novadef/SOARCA/playbooks"))
+# Same read-only host-repo bind mount as SOARCA_PLAYBOOKS_DIR above (-v
+# $NOVADEF_HOST_ROOT:/novadef:ro) — written by PMP_NOVADEF/Launcher/start_containers.py.
+NOVADEF_EXTERNAL_ENV_FILE = Path(os.getenv("NOVADEF_EXTERNAL_ENV_FILE", "/novadef/.novadef_external_env"))
 TS_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,(\d+))?")
 ISO_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
 def _resolve_repo_root() -> Path:
@@ -2192,25 +2196,32 @@ def _purge_misp_db() -> None:
         pass
 
 
+def _read_external_contract_var(name: str) -> str | None:
+    """Read a single KEY=VALUE line from the external contract .env file."""
+    try:
+        for line in NOVADEF_EXTERNAL_ENV_FILE.read_text(encoding="utf-8").splitlines():
+            if line.startswith(f"{name}="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        return None
+    return None
+
+
 def _purge_mongodb_flows() -> None:
     """
-    Drop the flows collection in MongoDB so stream_low starts each run with an
-    empty flow store. Historical flows from previous runs produce profiles whose
+    Delete every document in the flows collection (keeping the collection and
+    its indexes intact) so stream_low starts each run with an empty flow
+    store. Historical flows from previous runs produce profiles whose
     detection_ts predates the current run, making the OODA timeline meaningless.
     """
+    mongo_uri = _read_external_contract_var("MONGO_FLOW_WRITER_URI")
+    if not mongo_uri:
+        print("[purge] warning: MONGO_FLOW_WRITER_URI not found in external contract; skipping MongoDB purge", flush=True)
+        return
     try:
-        mongo = DOCKER_CLIENT.containers.get("mongodb_novadef")
-        result = mongo.exec_run(
-            [
-                "sh", "-lc",
-                'mongo -u admin -p admin123 --authenticationDatabase admin '
-                '--eval "db.getSiblingDB(\'flow_db\').flows.drop()" --quiet',
-            ],
-            stdout=True,
-            stderr=True,
-        )
-        out = (result.output or b"").decode(errors="replace").strip()
-        print(f"[purge] MongoDB flows dropped — {out or 'ok'}", flush=True)
+        client = pymongo.MongoClient(mongo_uri)
+        result = client["flow_db"]["flows"].delete_many({})
+        print(f"[purge] MongoDB flows purged — {result.deleted_count} documents deleted", flush=True)
     except Exception as e:
         print(f"[purge] warning: could not purge MongoDB flows: {e}", flush=True)
 
@@ -8841,8 +8852,8 @@ _KAFKA_PIPELINE_GROUP_TOPICS: dict[str, str] = {
     "soarca-tapcd-trigger": "profiles_out",
     "misp-integration-group": "network_intrusion_alerts",
     "network-intrusion-detector-v1": "cic_flow",
-    "alert-module-v1": "network_auth_events",
-    "flow-module-v1": "cic_flow",
+    "alert-module": "tshark_traces",
+    "flow-module": "tshark_traces",
     "stream-json-alerts": "flows_conditional_agg",
 }
 
