@@ -39,3 +39,11 @@ Scenario/artifacts/logs/*
 
 .novadef_runtime/
 .novadev_runtime/
+
+# ── PMP_NOVADEF: pruebas internas y ficheros generados en runtime ───────────
+PMP_NOVADEF/Tests/*
+PMP_NOVADEF/LICENSE
+PMP_NOVADEF/openapi.yaml
+PMP_NOVADEF/REQUIREMENTS.md
+PMP_NOVADEF/Aggregation_Normalisation_Module/Configuration_Files/Logstash/pipeline_topic_regex.conf
+PMP_NOVADEF/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/generated/
