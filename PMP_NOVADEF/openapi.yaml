@@ -1,0 +1,2143 @@
+openapi: 3.1.0
+info:
+  title: Programmable Monitoring Platform API
+  description: These sets of APIs describes the principal functionalities of the ROBUST-6G PMP.
+  version: 3.1.0
+
+tags:
+
+  - name: ConfigurationManager
+    description: API for interacting with the Configuration Manager to request the deployment of tools by the NXW Security Orchestrator.
+
+  - name: ConfigurationManagerInternal
+    description: Operational endpoints intended for internal monitoring and job orchestration of the Configuration Manager.
+
+  - name: ConfigurationManagerThingsboard
+    description: API for  interacting with the Configuration Manager to request information about Thingsboard deployed by the NXW Security Orchestrator.
+
+  - name: NearRealtimeDataRetrieval
+    description: API for cataloging and consuming near real-time monitoring streams through HTTP discovery endpoints and a WebSocket stream endpoint. Common root and health routes exist in the deployed service, but only the non-conflicting paths are described here to keep this shared OpenAPI document unambiguous.
+
+  - name: DataExporter
+    description: API for querying normalized logs and security events stored in OpenSearch (syslog/systemd, Falco, Telegraf), filterable by machine_id and event module, either as raw documents or as time-bucketed aggregate counts for correlation with HistoricalDataRetrieval metrics.
+  
+  - name: HistoricalDataRetrieval
+    description: API for retrieving historical data, including logs, health metrics, and network traces.
+
+
+servers:
+  - url: http://localhost:8000
+    description: Local / default environment for the Configuration Manager API
+
+paths:
+  /ConfigurationManager/DeployNetworkTool:
+    post:
+      tags:
+        - ConfigurationManager
+      summary: "Deploy a network tool"
+      description: "Deploy one network tool per request. The tool is selected with the required toolName query parameter."
+      operationId: "deployNetworkTool"
+      parameters:
+        - name: toolName
+          in: query
+          required: true
+          description: "Name of the network tool to deploy."
+          schema:
+            type: string
+            enum: [tshark, flow_module]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                configuration:
+                  type: object
+                  additionalProperties: true
+                  description: "Optional environment-variable overrides for the selected tool."
+            examples:
+              tshark_full:
+                summary: "Full tshark configuration example"
+                value:
+                  configuration:
+                    TSHARK_BASE_TOPIC: tshark_traces
+                    TSHARK_SIZE_LIMIT_ROTATION: "31457280"
+                    TSHARK_INTERFACE: enp0s3
+              flow_module_full:
+                summary: "Full flow_module configuration example"
+                value:
+                  configuration:
+                    CIC_KAFKA_BASE_TOPIC_OUT: cic_flow
+                    FLOW_KAFKA_GROUP: flow-module
+                    FLOW_PCAP_ROTATE_SIZE_MB: "102400"
+                    FLOW_CIC_ROTATE_SIZE_MB: "51200"
+                    FLOW_ROTATE_TIME_SEC: "3.0"
+                    FLOW_PACKET_QUEUE_MAX: "5000"
+                    FLOW_WRITER_FLUSH_EVERY: "100"
+                    FLOW_KAFKA_CONSUMER_AUTO_OFFSET_RESET: earliest
+                    FLOW_KAFKA_CONSUMER_PARTITION_ASSIGNMENT_STRATEGY: cooperative-sticky
+                    FLOW_KAFKA_CONSUMER_ENABLE_PARTITION_EOF: "true"
+                    FLOW_KAFKA_PRODUCER_LINGER_MS: "5"
+                    FLOW_KAFKA_PRODUCER_BATCH_SIZE: "32768"
+                    FLOW_KAFKA_PRODUCER_COMPRESSION: zstd
+      responses:
+        '202':
+          description: "Deployment job accepted and queued successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJobAcceptedResponse"
+        '400':
+          description: "Validation or deployment error."
+        '503':
+          description: "Jobs backend unavailable."
+  
+  /ConfigurationManager/DeployInfrastructureTool: 
+    post:
+      tags:
+        - ConfigurationManager
+      summary: "Deploy an infrastructure tool"
+      description: "Deploy one infrastructure tool per request. The tool is selected with the required toolName query parameter."
+      operationId: "deployInfrastructureTool"
+      parameters:
+        - name: toolName
+          in: query
+          required: true
+          description: "Name of the infrastructure tool to deploy."
+          schema:
+            type: string
+            enum: [telegraf]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                configuration:
+                  type: object
+                  additionalProperties: true
+                  description: "Optional environment-variable overrides for telegraf."
+            examples:
+              telegraf_full:
+                summary: "Full telegraf configuration example"
+                value:
+                  configuration:
+                    TELEGRAF_BASE_TOPIC: telegraf_metrics
+                    TELEGRAF_GENERAL_INTERVAL: 30s
+      responses:
+        '202':
+          description: "Deployment job accepted and queued successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJobAcceptedResponse"
+        '400':
+          description: "Validation or deployment error."
+        '503':
+          description: "Jobs backend unavailable."
+
+  /ConfigurationManager/DeployServiceTool: 
+    post:
+      tags:
+        - ConfigurationManager
+      summary: "Deploy a service tool"
+      description: "Deploy one service tool per request. The tool is selected with the required toolName query parameter. Falco additionally supports optional custom rules and the include_default_rules flag."
+      operationId: "deployServiceTool"
+      parameters:
+        - name: toolName
+          in: query
+          required: true
+          description: "Name of the service tool to deploy."
+          schema:
+            type: string
+            enum: [fluentd, falco]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                configuration:
+                  type: object
+                  additionalProperties: true
+                  description: "Optional environment-variable overrides for the selected tool."
+                rules:
+                  type: array
+                  items:
+                    type: string
+                  description: "Falco-only optional list of custom Falco rules. For tools that do not support rules, sending this field causes a validation error."
+                include_default_rules:
+                  type: boolean
+                  description: "Falco-only flag. If true, Falco uses community rules together with the provided custom rules. If omitted while custom rules are sent, it is interpreted as false. If no custom rules are provided, default community rules are used."
+            examples:
+              fluentd_full:
+                summary: "Full fluentd configuration example"
+                value:
+                  configuration:
+                    FLUENTD_FILE_SIZE_LIMIT: "20971520"
+                    FLUENTD_SYSLOG_BASE_TOPIC: syslog_logs
+                    FLUENTD_SYSTEMD_BASE_TOPIC: systemd_logs
+              falco_full:
+                summary: "Full falco configuration example"
+                value:
+                  configuration:
+                    FALCO_BASE_TOPIC: falco_events
+              falco_with_custom_rules:
+                summary: "Deploy falco with custom rules and community rules enabled"
+                value:
+                  configuration:
+                    FALCO_BASE_TOPIC: falco_events
+                  rules:
+                    - "- rule: Suspicious Write Under Etc\n  desc: Detect write access below /etc\n  condition: open_write and fd.name startswith /etc\n  output: \"Suspicious write below /etc (user=%user.name command=%proc.cmdline file=%fd.name)\"\n  priority: WARNING"
+                  include_default_rules: true
+      responses:
+        '202':
+          description: "Deployment job accepted and queued successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJobAcceptedResponse"
+        '400':
+          description: "Validation or deployment error."
+        '503':
+          description: "Jobs backend unavailable."
+
+
+
+  /ConfigurationManager/DeploySecurityTool: 
+    post:
+      tags:
+        - ConfigurationManager
+      summary: "Deploy a security tool"
+      description: "Deploy snort3 with optional configuration overrides and optional custom rules."
+      operationId: "deploySecurityTool"
+      parameters:
+        - name: toolName
+          in: query
+          required: true
+          description: "Name of the security tool to deploy."
+          schema:
+            type: string
+            enum: [snort3]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                configuration:
+                  type: object
+                  additionalProperties: true
+                  description: "Optional snort3 env var overrides."
+                  example:
+                    SNORT_KAFKA_TOPIC_OUT: "snort_alerts"
+                rules:
+                  type: array
+                  items:
+                    type: string
+                  description: "Optional list of custom Snort3 rules. Each rule must include a unique sid >= 1000001."
+                  example:
+                    - "alert tcp any any -> any any (msg:\"snort3 test rule\"; sid:1000001; rev:1;)"
+                include_default_rules:
+                  type: boolean
+                  description: "If true, snort3 uses community rules together with the provided custom rules. If omitted while rules are sent, it is interpreted as false. If no custom rules are provided, default community rules are always used."
+            examples:
+              snort3_defaults_only:
+                summary: "Deploy snort3 with full default env configuration and community rules only"
+                value:
+                  configuration:
+                    SNORT_KAFKA_GROUP_ID: alert-module
+                    SNORT_KAFKA_TOPIC_OUT: snort_alerts
+                    SNORT_CONSUMER_KAFKA_AUTO_OFFSET_RESET: earliest
+                    SNORT_CONSUMER_KAFKA_PARTITION_ASSIGNMENT_STRATEGY: cooperative-sticky
+                    SNORT_CONSUMER_KAFKA_ENABLE_PARTITION_EOF: "true"
+                    SNORT_CONSUMER_FETCH_MIN_BYTES: "1048576"
+                    SNORT_CONSUMER_FETCH_WAIT_MAX_MS: "50"
+                    SNORT_CONSUMER_QUEUED_MAX_MESSAGES_KBYTES: "262144"
+                    SNORT_CONSUMER_MAX_POLL_INTERVAL_MS: "900000"
+                    SNORT_CONSUMER_SESSION_TIMEOUT_MS: "10000"
+                    SNORT_PRODUCER_KAFKA_PRODUCER_LINGER_MS: "5"
+                    SNORT_PRODUCER_BATCH_NUM_MESSAGES: "10000"
+                    SNORT_PRODUCER_KAFKA_PRODUCER_BATCH_SIZE: "32768"
+                    SNORT_PRODUCER_KAFKA_PRODUCER_COMPRESSION: zstd
+              snort3_with_custom_and_defaults:
+                summary: "Deploy snort3 with one custom rule and community rules enabled"
+                value:
+                  configuration:
+                    SNORT_KAFKA_TOPIC_OUT: my_alerts
+                  rules:
+                    - "alert tcp any any -> any any (msg:\"snort3 test rule\"; sid:1000001; rev:1;)"
+                  include_default_rules: true
+      responses:
+        '202':
+          description: "Deployment job accepted and queued successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJobAcceptedResponse"
+        '400':
+          description: "Validation, rule-processing or deployment error."
+        '503':
+          description: "Jobs backend unavailable."
+
+  /ConfigurationManager/getConfigurationOptions:
+    get:
+      tags:
+        - ConfigurationManager
+      summary: "List configurable variables for one tool"
+      description: "Return the configurable environment variables and their default values for the selected tool."
+      operationId: "getConfigurationOptions"
+      parameters:
+        - name: toolName
+          in: query
+          description: "Name of the tool for which to retrieve configurable variables."
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Configurable variables for the selected tool."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  toolName:
+                    type: string
+                  configurable_variables:
+                    type: array
+                    description: "List of configurable environment variables."
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        default_value:
+                          type: string
+        '404':
+          description: "Unknown tool."
+
+  /ConfigurationManager/getConfiguration:
+    get:
+      tags:
+        - ConfigurationManager
+      summary: "Retrieve a persisted deployment configuration"
+      description: "Return the current stored configuration for a deployment, including revision metadata and, for rules-capable tools such as snort3 and falco, the current rules_config. This contract intentionally documents only the configuration values that are meant to be exposed to API clients."
+      operationId: "getConfiguration"
+      parameters:
+        - name: config_id
+          in: query
+          description: "The stable configuration identifier returned by a previous deploy call."
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Current persisted configuration"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  config_id:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      endpoint:
+                        type: string
+                      tool_name:
+                        type: string
+                      created_at:
+                        type: string
+                      updated_at:
+                        type: string
+                      revision:
+                        type: integer
+                      current_version_hash:
+                        type: string
+                      resolved_env:
+                        type: object
+                        description: "Resolved environment variables intended to be exposed to API clients. Internal-only variables such as SNORT_RULES_PATHS and FALCO_RULES_PATHS, as well as non-configurable runtime-managed values, are not part of this public contract."
+                        additionalProperties:
+                          type: string
+                      rules_config:
+                        type: object
+                        description: "Present for tools that support managed rules such as snort3 and falco."
+                        properties:
+                          include_default_rules:
+                            type: boolean
+                          custom_rules:
+                            type: array
+                            items:
+                              type: string
+                          custom_rule_sids:
+                            type: array
+                            items:
+                              type: string
+                          custom_rule_names:
+                            type: array
+                            items:
+                              type: string
+        '404':
+          description: "Configuration not found."
+
+  /ConfigurationManager/updateConfiguration:
+    put:
+      tags:
+        - ConfigurationManager
+      summary: "Update an existing deployment configuration"
+      description: "Update an existing deployment configuration. For rules-capable tools such as snort3 and falco, this endpoint also supports rules_action add/remove/replace."
+      operationId: "soUpdateConfiguration"
+      parameters:
+        - name: toolName
+          in: query
+          required: true
+          description: "Name of the tool to update."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                config_id:
+                  type: string
+                  description: "Stable identifier of the deployment to update."
+                configuration:
+                  type: object
+                  additionalProperties: true
+                  description: "Optional partial env var overrides."
+                rules_action:
+                  type: string
+                  enum: [add, remove, replace]
+                  description: "Action for mutating custom rules on rules-capable tools such as snort3 and falco."
+                rules:
+                  type: array
+                  items:
+                    type: string
+                  description: "List of custom rules. Required for add and replace on snort3 and falco."
+                rule_sids:
+                  type: array
+                  items:
+                    type: string
+                  description: "Snort3-only list of custom rule SIDs to remove. Required for remove on snort3."
+                rule_names:
+                  type: array
+                  items:
+                    type: string
+                  description: "Falco-only list of custom rule names to remove. Required for remove on falco."
+                include_default_rules:
+                  type: boolean
+                  description: "Flag accepted during replace to set whether default rules are used together with custom rules. It is rejected for remove and for add."
+              required:
+                - config_id
+            examples:
+              tshark_partial_update:
+                summary: "Update one tshark field only"
+                value:
+                  config_id: "<tshark-config-id>"
+                  configuration:
+                    TSHARK_BASE_TOPIC: updated_topic
+              snort3_add_rule:
+                summary: "Add one custom snort3 rule"
+                value:
+                  config_id: "<snort3-config-id>"
+                  rules_action: add
+                  rules:
+                    - "alert udp any any -> any any (msg:\"snort3 add rule\"; sid:1000002; rev:1;)"
+              snort3_replace_rules:
+                summary: "Replace all current custom snort3 rules"
+                value:
+                  config_id: "<snort3-config-id>"
+                  rules_action: replace
+                  rules:
+                    - "alert icmp any any -> any any (msg:\"snort3 replace rule\"; sid:1000003; rev:1;)"
+                  include_default_rules: false
+              snort3_remove_rules:
+                summary: "Remove custom snort3 rules by SID"
+                value:
+                  config_id: "<snort3-config-id>"
+                  rules_action: remove
+                  rule_sids:
+                    - "1000003"
+              falco_add_rule:
+                summary: "Add one custom falco rule"
+                value:
+                  config_id: "<falco-config-id>"
+                  rules_action: add
+                  rules:
+                    - "- rule: Unexpected Shell In Container\n  desc: Detect shell execution in a container\n  condition: container and spawned_process and proc.name in (bash, sh, zsh)\n  output: \"Shell spawned in container (user=%user.name command=%proc.cmdline container=%container.id)\"\n  priority: WARNING"
+              falco_replace_rules:
+                summary: "Replace all current custom falco rules"
+                value:
+                  config_id: "<falco-config-id>"
+                  rules_action: replace
+                  rules:
+                    - "- rule: Write Below Bin\n  desc: Detect write access below /bin\n  condition: open_write and fd.name startswith /bin\n  output: \"Write below /bin (user=%user.name command=%proc.cmdline file=%fd.name)\"\n  priority: ERROR"
+                  include_default_rules: true
+              falco_remove_rules:
+                summary: "Remove custom falco rules by rule name"
+                value:
+                  config_id: "<falco-config-id>"
+                  rules_action: remove
+                  rule_names:
+                    - Unexpected Shell In Container
+
+      responses:
+        "202":
+          description: "Configuration update job accepted and queued successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJobAcceptedResponse"
+        '400':
+          description: "Validation, rule-processing or redeployment error."
+        '422':
+          description: "Missing required query parameter or request body."
+        '503':
+          description: "Jobs backend unavailable."
+
+  /ConfigurationManager/getKafkaTopicsState:
+    get:
+      tags:
+        - ConfigurationManager
+      summary: "Retrieve the persisted Kafka topics state"
+      description: "Return the current kafka_topics document stored in MongoDB CM with the latest producer topic values resolved by the Configuration Manager."
+      operationId: "getKafkaTopicsState"
+      responses:
+        '200':
+          description: "Current Kafka topics state."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerKafkaTopicsStateResponse"
+        '404':
+          description: "No kafka_topics document found yet."
+        '503':
+          description: "MongoDB CM is unavailable."
+
+  /ConfigurationManager/getToolRuntimeState:
+    get:
+      tags:
+        - ConfigurationManager
+      summary: "Retrieve a tool runtime state"
+      description: "Return the current runtime status of the main Docker container associated with the requested tool."
+      operationId: "getToolRuntimeState"
+      parameters:
+        - name: toolName
+          in: query
+          description: "Name of the tool whose runtime state should be checked."
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Runtime state retrieved successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerToolRuntimeStateResponse"
+        '400':
+          description: "Unknown tool or tool without runtime container mapping."
+
+  /ConfigurationManager/internal/jobs/{job_id}:
+    get:
+      tags:
+        - ConfigurationManagerInternal
+      summary: "Retrieve one internal deployment job"
+      description: "Return the current state and metadata of a queued, running or finished internal job managed by the Configuration Manager."
+      operationId: "getConfigurationManagerJob"
+      parameters:
+        - name: job_id
+          in: path
+          description: "Internal job identifier."
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Job status retrieved successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJob"
+        '404':
+          description: "Job not found."
+
+  /ConfigurationManager/internal/jobs:
+    get:
+      tags:
+        - ConfigurationManagerInternal
+      summary: "List internal deployment jobs"
+      description: "Return the list of internal jobs optionally filtered by status."
+      operationId: "listConfigurationManagerJobs"
+      parameters:
+        - name: status
+          in: query
+          description: "Optional job status filter."
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: "Maximum number of jobs to return."
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: "Jobs listed successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerJobListResponse"
+
+  /ConfigurationManager/internal/jobs/{job_id}/cancel:
+    post:
+      tags:
+        - ConfigurationManagerInternal
+      summary: "Cancel a queued internal deployment job"
+      description: "Cancel an internal job that is still queued. Running and finished jobs cannot be canceled."
+      operationId: "cancelConfigurationManagerJob"
+      parameters:
+        - name: job_id
+          in: path
+          description: "Internal job identifier."
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Job canceled successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationManagerCancelJobResponse"
+        '400':
+          description: "Job cannot be canceled."
+
+  /streams:
+    get:
+      tags:
+        - NearRealtimeDataRetrieval
+      summary: "List cataloged near real-time streams"
+      description: "Return the NRTDR stream catalog with optional filters by machine identifier, logical data type and recent activity window."
+      operationId: "getAvailableStreams"
+      servers:
+        - url: http://localhost:8001
+          description: Near Real-Time Data Retrieval API default HTTP endpoint
+      parameters:
+        - name: machine_id
+          in: query
+          description: "Filter by machine identifier or 'global'."
+          required: false
+          schema:
+            $ref: "#/components/schemas/NRTDRMachineId"
+        - name: data_type
+          in: query
+          description: "Filter by logical data type."
+          required: false
+          schema:
+            $ref: "#/components/schemas/NRTDRDataType"
+        - name: only_active
+          in: query
+          description: "Return only streams active within the selected time window."
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: active_within_seconds
+          in: query
+          description: "Activity window in seconds used by both filtering and the computed is_active flag."
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 86400
+            default: 60
+      responses:
+        '200':
+          description: "Cataloged streams retrieved successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NRTDRAvailableStreamsResponse"
+        '500':
+          description: "Failed to list streams."
+
+  /streams/{data_type}/{machine_id}:
+    get:
+      tags:
+        - NearRealtimeDataRetrieval
+      summary: "Retrieve one cataloged stream description"
+      description: "Return the metadata of a specific stream identified by logical data type and machine identifier."
+      operationId: "getStreamById"
+      servers:
+        - url: http://localhost:8001
+          description: Near Real-Time Data Retrieval API default HTTP endpoint
+      parameters:
+        - name: data_type
+          in: path
+          description: "Logical data type."
+          required: true
+          schema:
+            $ref: "#/components/schemas/NRTDRDataType"
+        - name: machine_id
+          in: path
+          description: "Machine identifier or 'global'."
+          required: true
+          schema:
+            $ref: "#/components/schemas/NRTDRMachineId"
+        - name: active_within_seconds
+          in: query
+          description: "Activity window in seconds used to evaluate the is_active flag."
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 86400
+            default: 60
+      responses:
+        '200':
+          description: "Stream metadata retrieved successfully."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NRTDRStreamInfo"
+        '404':
+          description: "Stream not found in the catalog."
+
+  /stream/{data_type}/{machine_id}:
+    get:
+      tags:
+        - NearRealtimeDataRetrieval
+      summary: "Open a WebSocket stream subscription"
+      description: "Upgrade this request to a WebSocket connection to receive an optional replay of the latest messages followed by live messages from the selected Redis Stream. Swagger UI cannot execute the WebSocket upgrade directly, but the contract and payload schemas are documented here."
+      operationId: "connectStreamWebSocket"
+      servers:
+        - url: ws://localhost:8001
+          description: Near Real-Time Data Retrieval API default WebSocket endpoint
+      parameters:
+        - name: data_type
+          in: path
+          description: "Logical data type."
+          required: true
+          schema:
+            $ref: "#/components/schemas/NRTDRDataType"
+        - name: machine_id
+          in: path
+          description: "Machine identifier or 'global'."
+          required: true
+          schema:
+            $ref: "#/components/schemas/NRTDRMachineId"
+        - name: last_n
+          in: query
+          description: "How many most recent messages to replay before live streaming starts."
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 10
+      responses:
+        '101':
+          description: "WebSocket upgrade accepted. Messages follow the NRTDRWebSocketMessage schema."
+        '400':
+          description: "Invalid path or query parameters."
+        '404':
+          description: "Stream not found."
+
+  /logs:
+    get:
+      tags:
+        - DataExporter
+      summary: "Query raw log/event documents"
+      description: "Returns one page of raw Logstash/OpenSearch documents (syslog, systemd, Falco or Telegraf events) matching the given filters and time range, unmodified. 'module=system' already covers both syslog and systemd, which are unified at ingestion time. Paginate with the opaque next_cursor from the response, passed back as 'cursor'."
+      operationId: "getLogs"
+      servers:
+        - url: http://localhost:8003
+          description: Data Exporter API default HTTP endpoint
+      parameters:
+        - name: machine_id
+          in: query
+          description: "Filter by machine_id. Omitted returns all machines."
+          required: false
+          schema:
+            $ref: "#/components/schemas/DTMachineId"
+        - name: module
+          in: query
+          description: "Filter by event module. 'system' covers both syslog and systemd."
+          required: false
+          schema:
+            $ref: "#/components/schemas/DTLogModule"
+        - name: start
+          in: query
+          required: true
+          description: "Range start (ISO-8601/RFC3339)."
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: true
+          description: "Range end (ISO-8601/RFC3339)."
+          schema:
+            type: string
+            format: date-time
+        - name: size
+          in: query
+          required: false
+          description: "Page size."
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+        - name: cursor
+          in: query
+          required: false
+          description: "Opaque cursor from a previous response's next_cursor, used to fetch the next page."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Page of raw log/event documents"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DTLogsResponse"
+        "400":
+          description: "Invalid time range (end <= start) or invalid cursor."
+        "503":
+          description: "OpenSearch is unreachable."
+        "504":
+          description: "Timed out querying OpenSearch."
+
+  /logs/aggregate:
+    get:
+      tags:
+        - DataExporter
+      summary: "Query bucketed counts of log/event documents"
+      description: "Buckets matching documents over time (date_histogram), optionally sub-grouped by 'dataset', 'machine' or 'module'. Analogous to a Prometheus time series, useful to correlate log/event volume with HistoricalDataRetrieval metrics for the same machine_id and time range."
+      operationId: "getLogsAggregate"
+      servers:
+        - url: http://localhost:8003
+          description: Data Exporter API default HTTP endpoint
+      parameters:
+        - name: machine_id
+          in: query
+          description: "Filter by machine_id. Omitted returns all machines."
+          required: false
+          schema:
+            $ref: "#/components/schemas/DTMachineId"
+        - name: module
+          in: query
+          description: "Filter by event module. 'system' covers both syslog and systemd."
+          required: false
+          schema:
+            $ref: "#/components/schemas/DTLogModule"
+        - name: start
+          in: query
+          required: true
+          description: "Range start (ISO-8601/RFC3339)."
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: true
+          description: "Range end (ISO-8601/RFC3339)."
+          schema:
+            type: string
+            format: date-time
+        - name: interval
+          in: query
+          required: false
+          description: "Bucket width in seconds. Defaults to DT_DEFAULT_STEP_SECONDS (60, same as Prometheus/HDR)."
+          schema:
+            type: integer
+            minimum: 1
+        - name: group_by
+          in: query
+          required: false
+          description: "Sub-group each bucket by dataset, machine or module."
+          schema:
+            type: string
+            enum: [dataset, machine, module]
+      responses:
+        "200":
+          description: "Bucketed counts for the requested filters and time range"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DTLogsAggregateResponse"
+        "400":
+          description: "Invalid time range, unknown group_by, or range would exceed DT_MAX_RANGE_POINTS buckets."
+        "503":
+          description: "OpenSearch is unreachable."
+        "504":
+          description: "Timed out querying OpenSearch."
+
+
+  /HistoricalDataRetrieval/tools:
+    get:
+      tags:
+        - HistoricalDataRetrieval
+      summary: "List available tools and their historical metrics."
+      description: "Returns the catalog of tools (data sources) and, for each one, the metric aliases that can be queried through /HistoricalDataRetrieval/historical/{tool}/{metric}, together with the real Mimir metric name backing each alias."
+      operationId: "listHistoricalDataTools"
+      responses:
+        "200":
+          description: "Tools/metrics catalog"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HDRToolsCatalogResponse"
+
+  /HistoricalDataRetrieval/machines:
+    get:
+      tags:
+        - HistoricalDataRetrieval
+      summary: "List known machine_id values."
+      description: "Returns the machine_id label values seen by Mimir. Can optionally be scoped to a single tool/metric pair to only list machines that have reported that specific metric."
+      operationId: "listHistoricalDataMachines"
+      parameters:
+        - name: tool
+          in: query
+          description: "Restrict discovery to this tool's metric. Must be provided together with 'metric'."
+          required: false
+          schema:
+            type: string
+        - name: metric
+          in: query
+          description: "Restrict discovery to this metric alias. Must be provided together with 'tool'."
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Known machine_id values"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HDRMachinesResponse"
+        "400":
+          description: "'tool' and 'metric' were not provided together."
+
+  /HistoricalDataRetrieval/historical/{tool}/{metric}:
+    get:
+      tags:
+        - HistoricalDataRetrieval
+      summary: "Query historical time-series data for a tool metric over a time range."
+      description: "Queries Grafana Mimir for the requested tool/metric over the given time range, optionally filtered by machine_id, and returns one normalized series per matching Mimir time series."
+      operationId: "getHistoricalData"
+      parameters:
+        - name: tool
+          in: path
+          required: true
+          description: "Tool/data-source name, see GET /HistoricalDataRetrieval/tools."
+          schema:
+            type: string
+        - name: metric
+          in: path
+          required: true
+          description: "Metric alias, see GET /HistoricalDataRetrieval/tools."
+          schema:
+            type: string
+        - name: machine_id
+          in: query
+          required: false
+          description: "Filter by machine_id. Omitted or 'global' returns all machines for this metric."
+          schema:
+            type: string
+        - name: start
+          in: query
+          required: true
+          description: "Range start (ISO-8601/RFC3339)."
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: true
+          description: "Range end (ISO-8601/RFC3339)."
+          schema:
+            type: string
+            format: date-time
+        - name: step
+          in: query
+          required: false
+          description: "Resolution in seconds. Defaults to HDR_DEFAULT_STEP_SECONDS."
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: "Historical series for the requested tool/metric"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HDRHistoricalSeriesResponse"
+        "400":
+          description: "Invalid time range (end <= start, or too many points requested for the given step)."
+        "404":
+          description: "Unknown tool/metric combination."
+        "502":
+          description: "Mimir returned a non-success payload."
+        "503":
+          description: "Mimir is unreachable."
+        "504":
+          description: "Timed out querying Mimir."
+
+
+
+                      
+  /ConfigurationManagerThingsboard/collectDataFromThingsboard:
+    post:
+      tags: [ConfigurationManagerThingsboard]
+      summary: Start continuous monitoring for one or multiple devices
+      operationId: collectDataFromThingsboard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectDataRequest"
+      responses:
+        "200":
+          description: Successfully processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectDataResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Device(s) not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectNotFoundResponse"
+        "429":
+          description: Maximum number of concurrent devices reached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ConfigurationManagerThingsboard/stopMonitoring:
+    post:
+      tags: [ConfigurationManagerThingsboard]
+      summary: Stop monitoring for one or multiple devices
+      operationId: stopMonitoring
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopMonitoringRequest"
+      responses:
+        "200":
+          description: Successfully processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopMonitoringResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ConfigurationManagerThingsboard/stopAllMonitoring:
+    post:
+      tags: [ConfigurationManagerThingsboard]
+      summary: Stop monitoring for ALL active devices
+      operationId: stopAllMonitoring
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopAllMonitoringRequest"
+      responses:
+        "200":
+          description: Successfully processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopAllMonitoringResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ConfigurationManagerThingsboard/monitoringStatus:
+    get:
+      tags: [ConfigurationManagerThingsboard]
+      summary: Retrieve the status of monitored devices
+      operationId: monitoringStatus
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MonitoringStatusResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /health:
+    get:
+      tags: [ConfigurationManagerThingsboard]
+      summary: Service health check endpoint
+      operationId: healthCheck
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  schemas:
+    DataSource:
+      type: object
+      properties:
+        toolName:
+          type: string
+          description: "The name of the tool."
+        objetives:
+          type: array
+          description: "A objetives list of the data source."
+          items:
+            type: string
+            description: "Each objetive."
+        networkSegment:
+          type: array
+          description: "A list of network segments of the data source."
+          items:
+            type: string
+            description: "Each network segment."
+
+    Threshold:
+      type: object
+      properties:
+        toolName:
+          type: string
+          description: "The name of the tool."
+        policy:
+          type: array
+          description: "A list of policies for the threshold."
+          items:
+            $ref: "#/components/schemas/Policy"
+
+    Policy:
+      type: object
+      properties:
+        id:
+          type: string
+          description: "The id of the policy."
+        policyType:
+          type: string
+          description: "The type of the policy."
+          example: 
+            - "Drop"
+            - "Blocking"
+            - "Blacklist"
+            - "Whitelist"
+        policyAction:
+          type: string
+          description: "The objetive of the policy."
+          example:
+            - "Block all traffic from a specific IP address."
+            - "Drop all traffic from a specific Port."
+            - "Allow all traffic from a specific NetworkSegment."
+        policyObjetive:
+          type: array
+          items: 
+            type: string
+            description: "The objetive of the policy."
+            example:
+                - "IP"
+                - "Port"
+                - "Protocol"
+                - "NetworkSegment"
+
+    Tool:
+      type: object
+      properties:
+        id:
+          type: string
+          description: "The id of the tool."
+        name:
+          type: string
+          description: "The name of the tool."
+        version:
+          type: string
+          description: "The version of the tool."
+        toolType:
+          type: string
+        configuration:
+          type: object
+          description: "The configuration details for the tool."
+          properties:
+            configFile:
+              type: string
+              format: binary
+              description: "The JSON configuration file for the tool."
+    CollectDataRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - thingsboardsIP
+        - thingsboardPort
+        - entityType
+      properties:
+        thingsboardsIP:
+          type: string
+          description: ThingsBoard server IP or hostname
+        thingsboardPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: ThingsBoard server port
+        entityType:
+          type: string
+          default: DEVICE
+          description: Entity type (typically DEVICE)
+        entityId:
+          type: string
+          description: Single device ID (mutually exclusive with entityIds)
+        entityIds:
+          type: array
+          minItems: 1
+          description: Multiple device IDs (mutually exclusive with entityId)
+          items:
+            type: string
+      oneOf:
+        - required: [entityId]
+          not:
+            required: [entityIds]
+        - required: [entityIds]
+          not:
+            required: [entityId]
+
+    StopMonitoringRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        entityId:
+          type: string
+          description: Single device ID
+        entityIds:
+          type: array
+          minItems: 1
+          description: Multiple device IDs
+          items:
+            type: string
+      oneOf:
+        - required: [entityId]
+          not:
+            required: [entityIds]
+        - required: [entityIds]
+          not:
+            required: [entityId]
+
+    StopAllMonitoringRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm]
+      properties:
+        confirm:
+          type: boolean
+          description: Must be true to confirm stopping all devices
+
+    CollectDataResponse:
+      type: object
+      required: [message, summary, results]
+      properties:
+        message:
+          type: string
+        summary:
+          $ref: "#/components/schemas/CollectSummary"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectResultItem"
+
+    CollectSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - total
+        - success
+        - already_monitoring
+        - canceled
+        - errors
+      properties:
+        total:
+          type: integer
+        success:
+          type: integer
+        already_monitoring:
+          type: integer
+        canceled:
+          type: integer
+        errors:
+          type: integer
+
+    CollectResultItem:
+      type: object
+      additionalProperties: false
+      required:
+        - entity_id
+        - status
+        - message
+      properties:
+        entity_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - success
+            - already_monitoring
+            - error
+            - canceled
+        message:
+          type: string
+        kafka_topic:
+          type: string
+          description: Associated Kafka topic (when applicable)
+
+    StopMonitoringResponse:
+      type: object
+      required: [message, summary, results]
+      properties:
+        message:
+          type: string
+        summary:
+          $ref: "#/components/schemas/StopSummary"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/StopResultItem"
+
+    StopAllMonitoringResponse:
+      type: object
+      required: [message, summary, results]
+      properties:
+        message:
+          type: string
+        summary:
+          $ref: "#/components/schemas/StopSummary"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/StopResultItem"
+
+    StopSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - total
+        - success
+        - not_found
+        - already_stopping
+        - stopping
+        - timeout
+        - errors
+      properties:
+        total:
+          type: integer
+        success:
+          type: integer
+        not_found:
+          type: integer
+        already_stopping:
+          type: integer
+        stopping:
+          type: integer
+        timeout:
+          type: integer
+        errors:
+          type: integer
+
+    StopResultItem:
+      type: object
+      additionalProperties: false
+      required:
+        - entity_id
+        - status
+        - message
+      properties:
+        entity_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - success
+            - not_found
+            - already_stopping
+            - stopping
+            - timeout
+            - error
+        message:
+          type: string
+        kafka_topic:
+          type: string
+        warning:
+          type: string
+        statistics:
+          $ref: "#/components/schemas/StopStatistics"
+
+    StopStatistics:
+      type: object
+      additionalProperties: false
+      required:
+        - total_polls
+        - total_alarms_sent
+      properties:
+        total_polls:
+          type: integer
+        total_alarms_sent:
+          type: integer
+
+    MonitoringStatusResponse:
+      type: object
+      required:
+        - active_devices
+        - max_devices
+        - poll_interval_seconds
+        - devices
+      properties:
+        active_devices:
+          type: integer
+        max_devices:
+          type: integer
+        poll_interval_seconds:
+          type: integer
+        devices:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/DeviceStatus"
+
+    DeviceStatus:
+      type: object
+      required:
+        - started_at
+        - last_poll
+        - is_alive
+        - status
+        - total_polls
+        - total_alarms_sent
+        - kafka_topic
+        - config
+      properties:
+        started_at:
+          type: string
+          format: date-time
+        last_poll:
+          type: string
+          nullable: true
+          format: date-time
+        is_alive:
+          type: boolean
+        status:
+          type: string
+          nullable: true
+        total_polls:
+          type: integer
+        total_alarms_sent:
+          type: integer
+        kafka_topic:
+          type: string
+        config:
+          type: object
+          required:
+            - thingsboardsIP
+            - thingsboardPort
+            - entityType
+          properties:
+            thingsboardsIP:
+              type: string
+            thingsboardPort:
+              type: integer
+            entityType:
+              type: string
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+        - kafka_bootstrap
+        - active_devices
+        - alive_threads
+        - monitor_threads_alive
+        - orphan_monitor_threads
+        - max_devices
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+        kafka_bootstrap:
+          type: string
+        active_devices:
+          type: integer
+        alive_threads:
+          type: integer
+        monitor_threads_alive:
+          type: integer
+        orphan_monitor_threads:
+          type: integer
+        max_devices:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    CollectNotFoundResponse:
+      type: object
+      required:
+        - error
+        - validation_errors
+      properties:
+        error:
+          type: string
+        validation_errors:
+          type: array
+          items:
+            type: object
+            required: [entity_id, error]
+            properties:
+              entity_id:
+                type: string
+              error:
+                type: string
+
+    ConfigurationManagerJobAcceptedResponse:
+      type: object
+      required:
+        - status
+        - message
+        - job_id
+        - job_status
+        - queue_position
+      properties:
+        status:
+          type: string
+          example: accepted
+        message:
+          type: string
+          example: Deployment job queued.
+        job_id:
+          type: string
+        job_status:
+          type: string
+          example: queued
+        queue_position:
+          type: integer
+          minimum: 1
+
+    ConfigurationManagerJobListResponse:
+      type: object
+      required:
+        - status
+        - data
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigurationManagerJob"
+
+    ConfigurationManagerJob:
+      type: object
+      required:
+        - _id
+        - job_type
+        - endpoint
+        - tool_name
+        - request_payload
+        - allowed_tool_names
+        - status
+        - stage
+        - attempt
+        - max_attempts
+        - created_at
+        - updated_at
+        - worker_id
+        - api_instance_id
+        - retry
+        - ttl_expire_at
+      properties:
+        _id:
+          type: string
+        job_type:
+          type: string
+          enum: [deploy, update]
+        endpoint:
+          type: string
+        tool_name:
+          type: string
+        request_payload:
+          type: object
+          additionalProperties: true
+        allowed_tool_names:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          example: queued
+        stage:
+          type: string
+          example: queued
+        attempt:
+          type: integer
+        max_attempts:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        worker_id:
+          type: string
+        api_instance_id:
+          type: string
+        result:
+          type: object
+          additionalProperties: true
+          nullable: true
+        error:
+          $ref: "#/components/schemas/ConfigurationManagerJobError"
+        retry:
+          $ref: "#/components/schemas/ConfigurationManagerJobRetry"
+        ttl_expire_at:
+          type: string
+          format: date-time
+
+    ConfigurationManagerJobError:
+      type: object
+      nullable: true
+      properties:
+        code:
+          type: string
+        user_message:
+          type: string
+        technical_message:
+          type: string
+
+    ConfigurationManagerJobRetry:
+      type: object
+      required:
+        - is_retryable
+        - next_retry_at
+      properties:
+        is_retryable:
+          type: boolean
+        next_retry_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ConfigurationManagerCancelJobResponse:
+      type: object
+      required:
+        - status
+        - message
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+          example: "Job '<job_id>' canceled."
+
+    ConfigurationManagerKafkaTopicsStateResponse:
+      type: object
+      required:
+        - status
+        - topics
+      properties:
+        status:
+          type: string
+          example: success
+        topics:
+          type: object
+          additionalProperties:
+            type: string
+
+    ConfigurationManagerToolRuntimeStateResponse:
+      type: object
+      required:
+        - status
+        - toolName
+        - container_name
+        - runtime_status
+        - is_active
+      properties:
+        status:
+          type: string
+          example: success
+        toolName:
+          type: string
+        container_name:
+          type: string
+        runtime_status:
+          type: string
+          example: running
+        is_active:
+          type: boolean
+
+    NRTDRMachineId:
+      type: string
+      pattern: "^(global|[0-9a-z]{64})$"
+      minLength: 6
+      maxLength: 64
+      example: global
+
+    NRTDRDataType:
+      type: string
+      pattern: "^[a-z_]{1,64}$"
+      example: health_metrics
+
+    NRTDRStreamInfo:
+      type: object
+      required:
+        - stream_key
+        - data_type
+        - machine_id
+        - source_topics
+        - topic_vars
+        - is_global
+        - is_active
+      properties:
+        stream_key:
+          type: string
+          description: Redis stream key
+        data_type:
+          $ref: "#/components/schemas/NRTDRDataType"
+        machine_id:
+          $ref: "#/components/schemas/NRTDRMachineId"
+        source_topic:
+          type: string
+          nullable: true
+          description: Kafka topic currently feeding the stream
+        topic_var:
+          type: string
+          nullable: true
+          description: Topic env var name used to resolve the source topic
+        source_topics:
+          type: array
+          items:
+            type: string
+          description: All Kafka topics observed for the stream
+        topic_vars:
+          type: array
+          items:
+            type: string
+          description: All topic env vars observed for the stream
+        last_source_topic:
+          type: string
+          nullable: true
+          description: Most recent Kafka topic feeding the stream
+        last_topic_var:
+          type: string
+          nullable: true
+          description: Most recent topic env var associated with the stream
+        first_seen:
+          type: string
+          nullable: true
+          description: First time the stream was seen
+        last_seen:
+          type: string
+          nullable: true
+          description: Most recent time a message was ingested
+        last_redis_stream_id:
+          type: string
+          nullable: true
+          description: Latest Redis Stream entry id
+        is_global:
+          type: boolean
+          description: Whether the stream is global
+        is_active:
+          type: boolean
+          description: Whether the stream is active in the selected window
+
+    NRTDRAvailableStreamsResponse:
+      type: object
+      required:
+        - total_streams
+        - streams
+      properties:
+        total_streams:
+          type: integer
+        streams:
+          type: array
+          items:
+            $ref: "#/components/schemas/NRTDRStreamInfo"
+
+    NRTDRWebSocketMessage:
+      type: object
+      required:
+        - stream_key
+        - data_type
+        - machine_id
+        - redis_stream_id
+        - payload
+      properties:
+        stream_key:
+          type: string
+        data_type:
+          $ref: "#/components/schemas/NRTDRDataType"
+        machine_id:
+          $ref: "#/components/schemas/NRTDRMachineId"
+        source_topic:
+          type: string
+          nullable: true
+        redis_stream_id:
+          type: string
+        ingested_at:
+          type: string
+          nullable: true
+        payload:
+          description: Sanitized message payload decoded from the Redis Stream entry.
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: array
+              items: {}
+            - type: string
+            - type: number
+            - type: integer
+            - type: boolean
+
+    NRTDRWebSocketError:
+      type: object
+      required:
+        - error
+        - detail
+      properties:
+        error:
+          type: string
+          example: Stream not found
+        detail:
+          type: string
+
+    HDRMachineId:
+      type: string
+      pattern: "^(global|[0-9a-z]{64})$"
+      minLength: 6
+      maxLength: 64
+      example: global
+
+    HDRToolName:
+      type: string
+      pattern: "^[a-z_]{1,64}$"
+      example: telegraf
+
+    HDRMetricName:
+      type: string
+      pattern: "^[a-z0-9_]{1,128}$"
+      example: cpu_usage_user
+
+    HDRMetricInfo:
+      type: object
+      required:
+        - metric
+        - mimir_metric_name
+        - aggregation
+        - description
+      properties:
+        metric:
+          $ref: "#/components/schemas/HDRMetricName"
+        mimir_metric_name:
+          type: string
+          description: Real metric name as stored in Mimir
+          example: "downsampled:telegraf_cpu_usage_user:avg1m"
+        unit:
+          type: string
+          nullable: true
+          description: Unit of the metric value, if applicable
+          example: percent
+        aggregation:
+          type: string
+          description: Aggregation semantics applied by the recording rule
+          example: avg
+        description:
+          type: string
+
+    HDRToolInfo:
+      type: object
+      required:
+        - tool
+        - metrics
+      properties:
+        tool:
+          $ref: "#/components/schemas/HDRToolName"
+        metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/HDRMetricInfo"
+
+    HDRToolsCatalogResponse:
+      type: object
+      required:
+        - total_tools
+        - tools
+      properties:
+        total_tools:
+          type: integer
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/HDRToolInfo"
+
+    HDRMachinesResponse:
+      type: object
+      required:
+        - total_machines
+        - machine_ids
+      properties:
+        total_machines:
+          type: integer
+        machine_ids:
+          type: array
+          items:
+            type: string
+
+    HDRDataPoint:
+      type: object
+      required:
+        - timestamp
+        - value
+      properties:
+        timestamp:
+          type: string
+          description: ISO-8601 UTC timestamp
+        value:
+          type: number
+
+    HDRSeriesLabels:
+      type: object
+      properties:
+        machine_id:
+          type: string
+          nullable: true
+          description: Machine identifier, when present on the series
+        extra:
+          type: object
+          additionalProperties:
+            type: string
+          description: Any other label reported by Mimir for this series
+
+    HDRHistoricalSeries:
+      type: object
+      required:
+        - labels
+        - points
+      properties:
+        labels:
+          $ref: "#/components/schemas/HDRSeriesLabels"
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/HDRDataPoint"
+
+    HDRHistoricalSeriesResponse:
+      type: object
+      required:
+        - tool
+        - metric
+        - mimir_metric_name
+        - start
+        - end
+        - step_seconds
+        - total_series
+        - series
+      properties:
+        tool:
+          $ref: "#/components/schemas/HDRToolName"
+        metric:
+          $ref: "#/components/schemas/HDRMetricName"
+        mimir_metric_name:
+          type: string
+        machine_id_filter:
+          type: string
+          nullable: true
+          description: machine_id requested; null/'global' means unfiltered
+        start:
+          type: string
+        end:
+          type: string
+        step_seconds:
+          type: integer
+        total_series:
+          type: integer
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/HDRHistoricalSeries"
+
+    DTMachineId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      example: global
+
+    DTLogModule:
+      type: string
+      description: "event.module value written by Logstash; 'system' already unifies syslog and systemd."
+      enum: [system, falco, telegraf]
+
+    DTLogsResponse:
+      type: object
+      required:
+        - total_hits
+        - returned
+        - documents
+      properties:
+        total_hits:
+          type: integer
+          description: Total number of documents matching the query
+        returned:
+          type: integer
+          description: Number of documents included in this page
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque search_after cursor; pass it back as 'cursor' to fetch the next page, null when there are no more results
+        documents:
+          type: array
+          description: Raw Logstash/OpenSearch documents, unmodified
+          items:
+            type: object
+            additionalProperties: true
+
+    DTAggregateBucketGroup:
+      type: object
+      required:
+        - key
+        - doc_count
+      properties:
+        key:
+          type: string
+          description: Value of the group_by field for this slice of the bucket
+        doc_count:
+          type: integer
+
+    DTAggregateBucket:
+      type: object
+      required:
+        - timestamp
+        - doc_count
+      properties:
+        timestamp:
+          type: string
+          description: ISO-8601 UTC start of this time bucket
+        doc_count:
+          type: integer
+        groups:
+          type: array
+          description: Present only when group_by is requested
+          items:
+            $ref: "#/components/schemas/DTAggregateBucketGroup"
+
+    DTLogsAggregateResponse:
+      type: object
+      required:
+        - start
+        - end
+        - interval_seconds
+        - total_buckets
+        - buckets
+      properties:
+        machine_id_filter:
+          type: string
+          nullable: true
+        module_filter:
+          $ref: "#/components/schemas/DTLogModule"
+        group_by:
+          type: string
+          nullable: true
+        start:
+          type: string
+        end:
+          type: string
+        interval_seconds:
+          type: integer
+        total_buckets:
+          type: integer
+        buckets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DTAggregateBucket"

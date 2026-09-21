@@ -31,7 +31,6 @@ FLOW_ROTATE_TIME_SEC = float(os.getenv("FLOW_ROTATE_TIME_SEC"))
 # === WRITER CONTROL ===
 FLOW_PACKET_QUEUE_MAX = int(os.getenv("FLOW_PACKET_QUEUE_MAX"))
 FLOW_WRITER_FLUSH_EVERY = int(os.getenv("FLOW_WRITER_FLUSH_EVERY"))
-FLOW_WATCHDOG_STALL_SECS = int(os.getenv("FLOW_WATCHDOG_STALL_SECS"))
 
 
 class CICWorker:
@@ -43,9 +42,14 @@ class CICWorker:
         self.rotate_size = rotate_size_mb
         self.file_index = 0
         self.c2k_producer = c2k_producer
-        self.tmp_csv = os.path.join(self.cic_results, "flow_tmp.csv")
+        # Guards global_csv/file_index, shared across concurrent
+        # run_cic_on_pcap() threads (one per pcap rotation).
+        self._global_csv_lock = threading.Lock()
         self.global_csv = os.path.join(self.cic_results, f"flow_global_{self.file_index:02d}.csv")
         self.flow_collection = db_collection
+        # Caps concurrent CICFlowMeter (JVM) processes: without it, rotations
+        # under real traffic pile up unbounded and starve the CPU.
+        self._cic_concurrency = threading.Semaphore(2)
 
     def _rotate_global(self):
         """
@@ -66,57 +70,78 @@ class CICWorker:
         Save the flows in the historical database.
         [OPTIONAL] Publish in Kafka topic the flows.
         """
-        CICFLOWMETER_COMMAND = [CIC_LAUNCHER, pcap_path, self.tmp_csv]
-        print(f"⚡ Running CICFlowMeter in {pcap_path}")
-        proc = subprocess.Popen(
-            CICFLOWMETER_COMMAND,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        # Per-invocation temp file (keyed on the source pcap's name) —
+        # concurrent rotations no longer share one and can't corrupt it.
+        tmp_csv = os.path.join(self.cic_results, f"flow_tmp_{os.path.basename(pcap_path)}.csv")
+        CICFLOWMETER_COMMAND = [CIC_LAUNCHER, pcap_path, tmp_csv]
+        with self._cic_concurrency:
+            print(f"⚡ Running CICFlowMeter in {pcap_path}")
+            proc = subprocess.Popen(
+                CICFLOWMETER_COMMAND,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
 
-        '''Only for debugging
-        def log_output(stream, prefix):
-            for line in stream:
-                print(f"[{prefix}] {line.strip()}")
+            '''Only for debugging
+            def log_output(stream, prefix):
+                for line in stream:
+                    print(f"[{prefix}] {line.strip()}")
 
-        threading.Thread(target=log_output, args=(proc.stdout, f"CIC-out-{os.path.basename(pcap_path)}"), daemon=True).start()
-        threading.Thread(target=log_output, args=(proc.stderr, f"CIC-err-{os.path.basename(pcap_path)}"), daemon=True).start()
-        '''
-        proc.wait()
-        print(f"✅ CICFlowMeter ended with  {pcap_path}")
+            threading.Thread(target=log_output, args=(proc.stdout, f"CIC-out-{os.path.basename(pcap_path)}"), daemon=True).start()
+            threading.Thread(target=log_output, args=(proc.stderr, f"CIC-err-{os.path.basename(pcap_path)}"), daemon=True).start()
+            '''
+            proc.wait()
+            print(f"✅ CICFlowMeter ended with  {pcap_path}")
 
-        if os.path.exists(self.tmp_csv):
-            self._rotate_global()
-            with open(self.tmp_csv, "r") as tmpf:
-                lines = tmpf.readlines()
-
-            if not lines:
-                print(f"⚠️ Temporary CSV file empty for  {pcap_path}")
+        try:
+            if not os.path.exists(tmp_csv):
+                print(f"⚠️ Flow file not found: {tmp_csv}")
                 return
 
-            header, data = lines[0], lines[1:]
-            if not os.path.exists(self.global_csv):
-                with open(self.global_csv, "w") as gf:
-                    gf.write(header)
+            # global_csv/file_index are shared state; tmp_csv isn't.
+            with self._global_csv_lock:
+                with open(tmp_csv, "r") as tmpf:
+                    lines = tmpf.readlines()
 
-            with open(self.global_csv, "a") as gf:
-                gf.writelines(data)
+                if not lines:
+                    print(f"⚠️ Temporary CSV file empty for  {pcap_path}")
+                    return
 
-            print(f"📊 {len(data)} flows added to {self.global_csv}")
+                header, data = lines[0], lines[1:]
+                self._rotate_global()
+                if not os.path.exists(self.global_csv):
+                    with open(self.global_csv, "w") as gf:
+                        gf.write(header)
 
-        
-            # Uncomment if you want to publish on Kafka.
-            if data:
-                self.c2k_producer.produce_lines(data)
+                with open(self.global_csv, "a") as gf:
+                    gf.writelines(data)
 
-        
+                print(f"📊 {len(data)} flows added to {self.global_csv}")
 
-        # Read flows and upload them to MongoDB
-        if not os.path.exists(self.tmp_csv):
-            print(f"⚠️ Flow file not found: {self.tmp_csv}")
-            return
+            # JSON docs, one flow per line, keyed by CICFlowMeter's own CSV
+            # header — network_intrusion_detector's Isolation Forest input
+            # parses these keys directly.
+            if data and header:
+                import io
+                reader = csv.DictReader(io.StringIO("".join([header] + data)))
+                json_lines = [
+                    json.dumps({k.strip(): v.strip() for k, v in row.items() if k}, ensure_ascii=False)
+                    for row in reader
+                ]
+                if json_lines:
+                    self.c2k_producer.produce_lines(json_lines)
+                    print(f"📤 {len(json_lines)} flujos publicados en Kafka ({CIC_KAFKA_BASE_TOPIC_OUT})")
 
+            self._insert_flows_to_mongo(tmp_csv)
+        finally:
+            # Per-invocation file: nothing else will clean it up.
+            try:
+                os.remove(tmp_csv)
+            except Exception:
+                pass
+
+    def _insert_flows_to_mongo(self, tmp_csv: str) -> None:
         def _smart_cast(val: str):
             """
             Assign the correct format to the different types of data that appear in the streams.
@@ -153,7 +178,7 @@ class CICWorker:
         inserted, duplicates, _errors = 0, 0, 0
 
         docs = []
-        with open(self.tmp_csv, "r", newline="") as f:
+        with open(tmp_csv, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 # convert types
@@ -164,7 +189,7 @@ class CICWorker:
                 docs.append(doc)
 
         if not docs:
-            print(f"⚠️ File {self.tmp_csv} empty")
+            print(f"⚠️ File {tmp_csv} empty")
             return
 
         try:
@@ -261,7 +286,6 @@ class PacketWriter:
         os.makedirs(output_dir, exist_ok=True)
 
         self.q = Queue(maxsize=FLOW_PACKET_QUEUE_MAX)
-        self._last_write_ts = time.time()
         self._last_file_ts = time.time()
         self._written_since_flush = 0
         self._running = True
@@ -328,13 +352,19 @@ class PacketWriter:
 
     def _new_file(self):
         """
-        Creates the JSON2PCAP stream, as well as a new PCAP file. 
-        If one is already open, it closes it and launches Snort on it using new threads.
+        Creates the JSON2PCAP stream, as well as a new PCAP file.
+        If one is already open, closes it and runs CICFlowMeter on it in the background.
         """
         if self.j2p_worker:
-            old_trace = self.j2p_worker.trace_path
-            threading.Thread(target=self.j2p_worker.close, daemon=True).start()
-            threading.Thread(target=self._run_cic_and_delete, args=(old_trace,), daemon=True).start()
+            old_worker = self.j2p_worker
+            old_trace = old_worker.trace_path
+            # close() must finish before CICFlowMeter reads the file, or it
+            # reads a truncated pcapng and emits an empty CSV. Run both
+            # sequentially in one background thread, off the writer loop.
+            def _finalize_and_analyze():
+                old_worker.close()
+                self._run_cic_and_delete(old_trace)
+            threading.Thread(target=_finalize_and_analyze, daemon=True).start()
 
         trace_path = os.path.join(self.output_dir, f"trace_{self.file_index:02d}.pcapng")
         print(f"📂 New file opened: {trace_path}")
@@ -346,15 +376,6 @@ class PacketWriter:
             self.file_index = 0
         
         self._last_file_ts = time.time()
-
-    def write_packet(self, packet_dict):
-        """
-        Write the network packet in JSON and rotate the PCAP if it exceeds the size limit.
-        """
-        self.j2p_worker.write_packet(packet_dict)
-        trace_file = self.j2p_worker.trace_path
-        if os.path.exists(trace_file) and os.path.getsize(trace_file) >= self.rotate_size:
-            self._new_file()
 
     def close(self):
         """

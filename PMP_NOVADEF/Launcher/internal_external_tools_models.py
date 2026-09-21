@@ -277,10 +277,9 @@ class FlowModuleConfig(BaseModel):
     FLOW_KAFKA_GROUP:                                   str = "flow-module"
     FLOW_PCAP_ROTATE_SIZE_MB:                           str = "102400"
     FLOW_CIC_ROTATE_SIZE_MB:                            str = "51200"
-    FLOW_ROTATE_TIME_SEC:                               str = "0.5"
-    FLOW_PACKET_QUEUE_MAX:                              str = "100000"
+    FLOW_ROTATE_TIME_SEC:                               str = "3.0"
+    FLOW_PACKET_QUEUE_MAX:                              str = "5000"
     FLOW_WRITER_FLUSH_EVERY:                            str = "100"
-    FLOW_WATCHDOG_STALL_SECS:                           str = "120"
     FLOW_KAFKA_CONSUMER_AUTO_OFFSET_RESET:              str = "earliest"
     FLOW_KAFKA_CONSUMER_ENABLE_AUTO_COMMIT:             str = "true"
     FLOW_KAFKA_CONSUMER_PARTITION_ASSIGNMENT_STRATEGY:  str = "cooperative-sticky"
@@ -533,7 +532,6 @@ TOOL_ENV_VARS = {
         "FLOW_ROTATE_TIME_SEC",
         "FLOW_PACKET_QUEUE_MAX",
         "FLOW_WRITER_FLUSH_EVERY",
-        "FLOW_WATCHDOG_STALL_SECS",
         "FLOW_KAFKA_CONSUMER_AUTO_OFFSET_RESET",
         "FLOW_KAFKA_CONSUMER_ENABLE_AUTO_COMMIT",
         "FLOW_KAFKA_CONSUMER_PARTITION_ASSIGNMENT_STRATEGY",

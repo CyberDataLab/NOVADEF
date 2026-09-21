@@ -11,6 +11,8 @@ services:
     container_name: flow_module_novadef
     profiles: ["flow_module.flow_module"]
     restart: unless-stopped
+    # tini as PID 1 reaps tcpdump zombies spawned internally by CICFlowMeter.
+    init: true
     #depends_on:
     #  kafka_novadef:
     #    condition: service_healthy
@@ -26,7 +28,6 @@ services:
       - FLOW_ROTATE_TIME_SEC=${FLOW_ROTATE_TIME_SEC}
       - FLOW_PACKET_QUEUE_MAX=${FLOW_PACKET_QUEUE_MAX}
       - FLOW_WRITER_FLUSH_EVERY=${FLOW_WRITER_FLUSH_EVERY}
-      - FLOW_WATCHDOG_STALL_SECS=${FLOW_WATCHDOG_STALL_SECS}
       - MONGO_FLOW_WRITER_URI=${MONGO_FLOW_WRITER_URI}
       - FLOW_DB_WRITER_NAME=${FLOW_DB_WRITER_NAME}
       - FLOW_DB_WRITER_PASSWORD=${FLOW_DB_WRITER_PASSWORD}

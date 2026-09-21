@@ -767,7 +767,9 @@ if args.python == False:
                 d = [i for i in range(len(s1)) if s1[i] != s2[i]]
                 #print(d)
 
-        new_packet = scapy.Packet(bytes(bytearray.fromhex(frame_raw)))
+        # Packet() has no dissector, so CICFlowMeter can't see IP on
+        # read-back; captured frames are always Ethernet, use Ether().
+        new_packet = scapy.Ether(bytes(bytearray.fromhex(frame_raw)))
         if frame_time:
             new_packet.time = float(frame_time)
         #print(type(new_packet))
