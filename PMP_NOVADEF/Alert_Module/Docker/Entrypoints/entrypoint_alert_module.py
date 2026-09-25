@@ -28,6 +28,10 @@ KAFKA_GROUP_ID = os.getenv("SNORT_KAFKA_GROUP_ID", "alert-module-v1")
 KAFKA_TOPIC_IN = os.getenv("SNORT_KAFKA_TOPIC_IN", "tshark_traces")
 KAFKA_TOPIC_OUT = os.getenv("SNORT_KAFKA_TOPIC_OUT", "snort_alerts")
 
+# Dedup window: same (src_ip, dst_ip, rule) within this many seconds is
+# dropped, so a single nmap/repeated attack doesn't flood Kafka/Mongo.
+SNORT_ALERT_DEDUP_WINDOW_SECS = int(os.getenv("SNORT_ALERT_DEDUP_WINDOW_SECS", "60"))
+
 # === SNORT CONFIG ===
 # ====== CONSTANTS TUN/TAP ======
 TAP_IFACE = os.getenv("SNORT_ALERT_TAP_IFACE", "tap0")
@@ -176,11 +180,11 @@ def start_snort_live(ifname: str):
 
 
 
-def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_collection):
+def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_collection, stop_event=None):
     """
     Continuously monitors the Snort alert file for newly appended lines.
-    Each new alert is forwarded to Kafka and optionally stored in MongoDB.
-    Implements buffered Kafka publishing to reduce overhead.
+    Drops repeated (src_ip, dst_ip, rule) alerts within SNORT_ALERT_DEDUP_WINDOW_SECS.
+    Each new alert is published to Kafka immediately and stored in MongoDB.
     """
     os.makedirs(os.path.dirname(alert_path), exist_ok=True)
     if not os.path.exists(alert_path):
@@ -188,35 +192,64 @@ def alerts_tail_loop(alert_path: str, producer: KafkaAlertProducer, alerts_colle
     ensure_mode_644(alert_path)
 
     print(f"📡 Starting alerts tail on {alert_path}")
+    print(f"🔧 Deduplication enabled: {SNORT_ALERT_DEDUP_WINDOW_SECS}s window on (src_ip, dst_ip, rule)")
+
+    # {(src_ip, dst_ip, rule): last_sent_timestamp}
+    dedup_cache: dict = {}
+
     with open(alert_path, "r", encoding="utf-8", errors="replace") as f:
         f.seek(0, os.SEEK_END) # Go to the end of the file (only new lines)
-
-        buffer = []
-        last_flush = time.time()
-        FLUSH_INTERVAL = 1.0  # seconds
 
         while True:
             line = f.readline()
             if not line:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 time.sleep(0.5) # Waiting to receive new alerts
-            else:
-                line = line.strip()
-                if not line:
-                    continue
+                continue
 
-                #  Sending to Kafka (in batches for efficiency)
-                buffer.append(line)
-                if time.time() - last_flush >= FLUSH_INTERVAL:
-                    try:
-                        producer.produce_lines(buffer)
-                    except Exception as e:
-                        print(f"❌ Error publishing alerts to Kafka: {e}")
-                    buffer.clear()
-                    last_flush = time.time()
+            line = line.strip()
+            if not line:
+                continue
 
-                # Sending alerts to MongoDB
-                if alerts_collection is not None:
-                    insert_alert_line(alerts_collection, line)
+            # NOTE: correlation_id is not produced by Snort itself (it's a
+            # network_intrusion_detector concept) — left out of dedup here on
+            # purpose. Revisit when that detector moves to its own module.
+            is_duplicate = False
+            try:
+                alert_doc = json.loads(line)
+                src_ap = alert_doc.get('src_ap', '')
+                dst_ap = alert_doc.get('dst_ap', '')
+                src_ip = src_ap.split(':')[0] if src_ap else ''
+                dst_ip = dst_ap.split(':')[0] if dst_ap else ''
+                rule = alert_doc.get('rule', '')
+                dedup_key = (src_ip, dst_ip, rule)
+                now = time.time()
+
+                # Prune expired entries roughly every 1000 alerts.
+                if len(dedup_cache) > 1000:
+                    expired = [k for k, t in dedup_cache.items() if now - t > SNORT_ALERT_DEDUP_WINDOW_SECS]
+                    for k in expired:
+                        del dedup_cache[k]
+
+                if dedup_key in dedup_cache and now - dedup_cache[dedup_key] < SNORT_ALERT_DEDUP_WINDOW_SECS:
+                    is_duplicate = True
+                else:
+                    dedup_cache[dedup_key] = now
+                    print(f"🚨 New alert: {alert_doc.get('msg', '')} | {src_ip} -> {dst_ip} (rule={rule})")
+            except Exception:
+                pass  # If parsing fails, let the line through
+
+            if is_duplicate:
+                continue
+
+            try:
+                producer.produce_lines([line])
+            except Exception as e:
+                print(f"❌ Error publishing alert to Kafka: {e}")
+
+            if alerts_collection is not None:
+                insert_alert_line(alerts_collection, line)
 
 
 def rebuild_frame_from_layers(layers):
@@ -342,7 +375,7 @@ def main():
     Ensures graceful cleanup of resources on exit.
     """
 
-    mongo_uri = os.getenv("MONGO_SNORT_URI") or f"mongodb://{os.getenv('SNORT_DB_USER_NAME')}:{quote_plus(os.getenv('SNORT_DB_USER_PASSWORD'))}@mongodb:{os.getenv('MONGO_PORT')}/?authSource=admin"
+    mongo_uri = os.getenv("MONGO_SNORT_URI") or f"mongodb://{os.getenv('MONGO_SNORT_USER_NAME')}:{quote_plus(os.getenv('MONGO_SNORT_USER_PASSWORD'))}@mongodb:{os.getenv('MONGO_PORT')}/?authSource=admin"
 
     try:
         client = MongoClient(mongo_uri)
@@ -377,11 +410,13 @@ def main():
 
     snort_proc = start_snort_live(TAP_IFACE)
 
-    threading.Thread(
+    stop_event = threading.Event()
+    alert_thread = threading.Thread(
         target=alerts_tail_loop,
-        args=(ALERT_PATH, kafka_producer, alerts_collection),
-        daemon=True
-    ).start()
+        args=(ALERT_PATH, kafka_producer, alerts_collection, stop_event),
+        daemon=False
+    )
+    alert_thread.start()
 
     consumer = KafkaLineConsumer(
         topic=KAFKA_TOPIC_IN,
@@ -408,6 +443,10 @@ def main():
         inject_packet_to_tap(packet_dict, tap_fd)
 
         consumer.commit_msg(msg)
+
+    # Signal the alerts thread to stop and wait for it to finish
+    stop_event.set()
+    alert_thread.join(timeout=5)
 
     try:
         snort_proc.terminate()

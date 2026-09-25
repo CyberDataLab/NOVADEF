@@ -422,7 +422,7 @@ def sanitize_packet_timestamp(packet_dict):
 
 def main():
 
-    mongo_uri = os.getenv("MONGO_FLOW_WRITER_URI") or f"mongodb://{os.getenv('FLOW_DB_WRITER_NAME')}:{quote_plus(os.getenv('FLOW_DB_WRITER_PASSWORD'))}@mongodb:{os.getenv('MONGO_PORT')}/?authSource=admin"
+    mongo_uri = os.getenv("MONGO_FLOW_WRITER_URI") or f"mongodb://{os.getenv('MONGO_FLOW_WRITER_NAME')}:{quote_plus(os.getenv('MONGO_FLOW_WRITER_PASSWORD'))}@mongodb:{os.getenv('MONGO_PORT')}/?authSource=admin"
     client = MongoClient(mongo_uri)
     db = client["flow_db"]
     flow_collection = db["flows"]

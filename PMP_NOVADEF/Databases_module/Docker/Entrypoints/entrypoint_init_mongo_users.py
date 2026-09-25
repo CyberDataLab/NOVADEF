@@ -38,22 +38,22 @@ def main() -> int:
     try:
         ensure_user(
             admin_db,
-            os.environ["SNORT_DB_USER_NAME"],
-            os.environ["SNORT_DB_USER_PASSWORD"],
+            os.environ["MONGO_SNORT_USER_NAME"],
+            os.environ["MONGO_SNORT_USER_PASSWORD"],
             role="readWrite",
             database="snort_db",
         )
         ensure_user(
             admin_db,
-            os.environ["FLOW_DB_WRITER_NAME"],
-            os.environ["FLOW_DB_WRITER_PASSWORD"],
+            os.environ["MONGO_FLOW_WRITER_NAME"],
+            os.environ["MONGO_FLOW_WRITER_PASSWORD"],
             role="readWrite",
             database="flow_db",
         )
         ensure_user(
             admin_db,
-            os.environ["FLOW_DB_READER_NAME"],
-            os.environ["FLOW_DB_READER_PASSWORD"],
+            os.environ["MONGO_FLOW_READER_NAME"],
+            os.environ["MONGO_FLOW_READER_PASSWORD"],
             role="read",
             database="flow_db",
         )

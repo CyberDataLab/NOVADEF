@@ -390,10 +390,10 @@ def build_default_env(
         f"@mongodb:{mongo_port}/?authSource=admin"
     )
 
-    snort_db_user_name = default_env["SNORT_DB_USER_NAME"]
+    snort_db_user_name = default_env["MONGO_SNORT_USER_NAME"]
     snort_db_user_password = get_existing_password(
         env_path=env_file_path,
-        password_tool="SNORT_DB_USER_PASSWORD=",
+        password_tool="MONGO_SNORT_USER_PASSWORD=",
     )
     if not snort_db_user_password:
         snort_db_user_password = generate_secure_password()
@@ -403,10 +403,10 @@ def build_default_env(
         f"@mongodb:{mongo_port}/?authSource=admin"
     )
 
-    flow_db_writer_name = default_env["FLOW_DB_WRITER_NAME"]
+    flow_db_writer_name = default_env["MONGO_FLOW_WRITER_NAME"]
     flow_db_writer_password = get_existing_password(
         env_path=env_file_path,
-        password_tool="FLOW_DB_WRITER_PASSWORD=",
+        password_tool="MONGO_FLOW_WRITER_PASSWORD=",
     )
     if not flow_db_writer_password:
         flow_db_writer_password = generate_secure_password()
@@ -416,10 +416,10 @@ def build_default_env(
         f"@mongodb:{mongo_port}/?authSource=admin"
     )
 
-    flow_db_reader_name = default_env["FLOW_DB_READER_NAME"]
+    flow_db_reader_name = default_env["MONGO_FLOW_READER_NAME"]
     flow_db_reader_password = get_existing_password(
         env_path=env_file_path,
-        password_tool="FLOW_DB_READER_PASSWORD=",
+        password_tool="MONGO_FLOW_READER_PASSWORD=",
     )
     if not flow_db_reader_password:
         flow_db_reader_password = generate_secure_password()
@@ -466,11 +466,11 @@ def build_default_env(
             "OPENSEARCH_HOST": opensearch_host,
             "MONGO_INITDB_ROOT_PASSWORD": mongo_initdb_root_password,
             "MONGO_URI": mongo_uri,
-            "SNORT_DB_USER_PASSWORD": snort_db_user_password,
+            "MONGO_SNORT_USER_PASSWORD": snort_db_user_password,
             "MONGO_SNORT_URI": mongo_snort_uri,
-            "FLOW_DB_WRITER_PASSWORD": flow_db_writer_password,
+            "MONGO_FLOW_WRITER_PASSWORD": flow_db_writer_password,
             "MONGO_FLOW_WRITER_URI": mongo_flow_writer_uri,
-            "FLOW_DB_READER_PASSWORD": flow_db_reader_password,
+            "MONGO_FLOW_READER_PASSWORD": flow_db_reader_password,
             "MONGO_FLOW_READER_URI": mongo_flow_reader_uri,
             "MONGO_CM_INITDB_ROOT_PASSWORD": mongo_cm_initdb_root_password,
             "MONGO_CM_URI": mongo_cm_uri_docker,
