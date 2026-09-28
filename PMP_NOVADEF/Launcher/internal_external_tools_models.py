@@ -316,15 +316,6 @@ class Snort3Config(BaseModel):
     SNORT_PRODUCER_KAFKA_PRODUCER_COMPRESSION:              str = "zstd"
 
 
-class AlarmCollectorConfig(BaseModel):
-    """Pydantic model for ThingsBoard alarm collector configurable environment variables."""
-    model_config = {"extra": "forbid"}
-
-    TB_USERNAME:    str = "tenant@thingsboard.org"
-    TB_PASSWORD:    str = "tenant"
-    TB_USE_HTTPS:   str = "false"
-
-
 PUBLIC_TOOL_MODELS = {
     "tshark":          TsharkConfig,
     "flow_module":     FlowModuleConfig,
@@ -345,7 +336,6 @@ INTERNAL_TOOL_MODELS = {
     "mimir":             MimirConfig,
     "prometheus":        PrometheusConfig,
     "opensearch":        OpenSearchConfig,
-    "alarm_collector":   AlarmCollectorConfig,
 }
 
 
@@ -377,7 +367,6 @@ DEFAULT_ENV_MODEL_CLASSES = (
     NrtdrApiConfig,
     HdrApiConfig,
     DtApiConfig,
-    AlarmCollectorConfig,
     FlowModuleConfig,
     Snort3Config,
 )
@@ -588,11 +577,6 @@ TOOL_ENV_VARS = {
         "HDR_HTTP_TIMEOUT_SECONDS",
         "HDR_MAX_RANGE_POINTS",
         "HDR_DEFAULT_STEP_SECONDS",
-    ],
-    "alarm_collector": [
-        "TB_USERNAME",
-        "TB_PASSWORD",
-        "TB_USE_HTTPS",
     ],
     "dt_api": [
         "OPENSEARCH_HOST",

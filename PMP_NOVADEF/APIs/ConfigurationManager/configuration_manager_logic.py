@@ -111,7 +111,6 @@ TOOL_NAME_TO_MODULE: Dict[str, Tuple[str, str]] = {
     "redis":            ("db_module",            "redis"),
     "prometheus":       ("aggregation_module",   "prometheus"),
     "opensearch":       ("aggregation_module",   "opensearch"),
-    "alarm_collector":  ("thingsboard_module",   "alarm_collector"),
 }
 
 # ---------------------------------------------------------------------------

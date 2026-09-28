@@ -56,6 +56,9 @@ MODULE_COMPOSE_FILES: Dict[str, List[str]] = {
     "aggregation_module": [
         "Aggregation_Normalisation_Module/Docker/aggregation_normalisation_compose.yml",
     ],
+    "intrusion_detector_module": [
+        "Intrusion_Detector_Module/Docker/intrusion_detector_module_compose.yml",
+    ],
 }
 
 
@@ -66,7 +69,7 @@ class cmd_parser:
     """
 
     MODULE_REGISTRY: Dict[str, List[str]] = {
-        "alert_module":         ["alert_module", "network_intrusion_detector"],
+        "alert_module":         ["alert_module"],
         "alert_manager":        ["alert_manager"],
         "apis_module":          ["nrtdr_api", "hdr_api", "dt_api"],
         "communication_module": ["kafka", "filebeat"],
@@ -74,6 +77,7 @@ class cmd_parser:
         "flow_module":          ["flow_module"],
         "db_module":            ["mongodb", "mongodb_cm", "postgres_gui", "redis", "mimir"],
         "aggregation_module":   ["prometheus", "opensearch"],
+        "intrusion_detector_module": ["network_intrusion_detector"],
     }
 
     def __init__(self) -> None:

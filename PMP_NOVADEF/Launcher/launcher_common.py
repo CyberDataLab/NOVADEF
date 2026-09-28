@@ -55,6 +55,9 @@ MODULE_COMPOSE_FILES = {
     "aggregation_module": [
         "Aggregation_Normalisation_Module/Docker/aggregation_normalisation_compose.yml",
     ],
+    "intrusion_detector_module": [
+        "Intrusion_Detector_Module/Docker/intrusion_detector_module_compose.yml",
+    ],
 }
 
 BASE_CONTAINERS = [
