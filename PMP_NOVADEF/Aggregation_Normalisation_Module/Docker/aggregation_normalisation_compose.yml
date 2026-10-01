@@ -4,6 +4,8 @@ services:
     image: busybox:latest
     container_name: init_prometheus
     profiles: ["aggregation_module.prometheus"]
+    labels:
+      - "novadef.role=infrastructure"
     # Change the owner of the /prometheus folder to user 65534 (nobody)
     command: sh -c "chown -R 65534:65534 /prometheus"
     volumes:
@@ -14,6 +16,8 @@ services:
     image: busybox:latest
     container_name: init_prometheus_config
     profiles: ["aggregation_module.prometheus"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - DISCOVERY_AGENT_PORT=${DISCOVERY_AGENT_PORT:-8100}
       - MIMIR_HOST=${MIMIR_HOST}
@@ -28,6 +32,8 @@ services:
     image: prom/prometheus:v3.8.0
     container_name: prometheus_server_novadef
     profiles: ["aggregation_module.prometheus"]
+    labels:
+      - "novadef.role=infrastructure"
     depends_on:
       init-prometheus:
         condition: service_completed_successfully
@@ -67,6 +73,8 @@ services:
       dockerfile: Aggregation_Normalisation_Module/Docker/Dockerfiles/discovery_agent.dockerfile
     container_name: discovery_agent_novadef
     profiles: ["aggregation_module.prometheus"] #Same profile because Prometheus needs this microservice
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - DISCOVERY_AGENT_SCAN_PORT=${DISCOVERY_AGENT_SCAN_PORT:-9999}
@@ -80,6 +88,8 @@ services:
     image: busybox:latest
     container_name: init_opensearch
     profiles: ["aggregation_module.opensearch"]
+    labels:
+      - "novadef.role=infrastructure"
     network_mode: "${NETWORK_MODE}"
     command: sh -c "chown -R 1000:1000 /usr/share/opensearch/data"
     volumes:
@@ -90,6 +100,8 @@ services:
     image: opensearchproject/opensearch:3.4.0
     container_name: opensearch_node_novadef
     profiles: ["aggregation_module.opensearch"]
+    labels:
+      - "novadef.role=infrastructure"
     depends_on:
       init-opensearch:
         condition: service_completed_successfully
@@ -124,6 +136,8 @@ services:
     image: curlimages/curl:8.11.0
     container_name: init_opensearch_ism_policy
     profiles: ["aggregation_module.opensearch"]
+    labels:
+      - "novadef.role=infrastructure"
     network_mode: "${NETWORK_MODE}"
     depends_on:
       opensearch:
@@ -157,6 +171,8 @@ services:
     image: opensearchproject/opensearch-dashboards:3.4.0
     container_name: opensearch_dashboards_novadef
     profiles: ["aggregation_module.opensearch"]
+    labels:
+      - "novadef.role=infrastructure"
     ports:
       - "${OPENSEARCH_DASHBOARD_PORT:-5601}:5601"
     environment:
@@ -173,6 +189,8 @@ services:
     image: opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0
     container_name: logstash_novadef
     profiles: ["aggregation_module.opensearch"]
+    labels:
+      - "novadef.role=infrastructure"
     volumes:
       - ${PFD}/Aggregation_Normalisation_Module/Configuration_Files/Logstash/pipeline.conf:/usr/share/logstash/pipeline/logstash.conf:ro
     environment:

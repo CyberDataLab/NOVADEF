@@ -9,6 +9,8 @@ services:
       dockerfile: APIs/Historical_Data_Retrieval_API/Docker/Dockerfile/hdr_api.dockerfile
     container_name: hdr_api_novadef
     profiles: ["apis_module.hdr_api"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MIMIR_HOST=${MIMIR_HOST}

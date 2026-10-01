@@ -5,6 +5,8 @@ services:
     image: apache/kafka:3.9.0
     container_name: kafka_novadef
     profiles: ["communication_module.kafka"]
+    labels:
+      - "novadef.role=infrastructure"
     healthcheck:
       test: ["CMD", "nc", "-z", "kafka_novadef", "29092"]
       interval: 5s
@@ -50,6 +52,8 @@ services:
     image: elastic/filebeat:8.16.2
     container_name: filebeat_novadef
     profiles: ["communication_module.filebeat"]
+    labels:
+      - "novadef.role=infrastructure"
     healthcheck:
       test:
         [

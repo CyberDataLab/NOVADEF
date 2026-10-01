@@ -9,6 +9,8 @@ services:
       dockerfile: Alert_Module/Docker/Dockerfiles/alert_module.dockerfile
     container_name: alert_module_novadef
     profiles: ["alert_module.alert_module"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
@@ -55,6 +57,8 @@ services:
     build:
       context: ${PFD}
       dockerfile: Alert_Module/Docker/Dockerfiles/alert_module.dockerfile
+    labels:
+      - "novadef.role=infrastructure"
     profiles: ["alert_module.validator"]
     entrypoint:
       - snort

@@ -9,6 +9,8 @@ services:
       dockerfile: APIs/Data_Exporter_API/Docker/Dockerfile/dt_api.dockerfile
     container_name: dt_api_novadef
     profiles: ["apis_module.dt_api"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - OPENSEARCH_HOST=${OPENSEARCH_HOST}

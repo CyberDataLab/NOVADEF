@@ -4,6 +4,8 @@ services:
     image: mongo:4.4.29
     container_name: mongodb_novadef
     profiles: ["db_module.mongodb"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
@@ -26,6 +28,8 @@ services:
       dockerfile: Databases_module/Docker/Dockerfile/init_mongo_users.dockerfile
     container_name: init_mongo_users_novadef
     profiles: ["db_module.mongodb"]
+    labels:
+      - "novadef.role=infrastructure"
     depends_on:
       mongodb:
         condition: service_healthy
@@ -45,6 +49,8 @@ services:
     image: mongo:4.4.29
     container_name: mongodb_cm_novadef
     profiles: ["db_module.mongodb_cm"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_CM_INITDB_ROOT_USERNAME}
@@ -64,6 +70,8 @@ services:
     image: postgres:16
     container_name: postgres_gui_novadef
     profiles: ["db_module.postgres_gui"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - POSTGRES_USER=${POSTGRES_GUI_USER}
@@ -88,6 +96,8 @@ services:
     image: redis:8.6.0
     container_name: redis_novadef
     profiles: ["db_module.redis"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
     command: >
@@ -122,6 +132,8 @@ services:
       dockerfile: Databases_module/Docker/Dockerfile/Worker_kafka_to_redis.dockerfile
     container_name: redis_worker_novadef
     profiles: ["db_module.redis"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       # Kafka Configuration
@@ -180,6 +192,8 @@ services:
     image: busybox:latest
     container_name: init_mimir
     profiles: ["db_module.mimir"]
+    labels:
+      - "novadef.role=infrastructure"
     command: sh -c "chown -R 10001:10001 /data"
     volumes:
       - ${PFD}/Persistence/mimir_data:/data
@@ -189,6 +203,8 @@ services:
     image: grafana/mimir:3.1.2
     container_name: mimir_novadef
     profiles: ["db_module.mimir"]
+    labels:
+      - "novadef.role=infrastructure"
     depends_on:
       init-mimir:
         condition: service_completed_successfully

@@ -6,6 +6,8 @@ services:
   # =============================
   neo4j:
     image: neo4j:5.25
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       NEO4J_AUTH: neo4j/neo4jpass
       NEO4J_server_bolt_advertised__address: neo4j:7687
@@ -35,6 +37,8 @@ services:
   novadef_stream_low:
     build:
       context: ./novadef_stream_low
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       TZ: UTC
       KAFKA_BOOTSTRAP: kafka_novadef:29092
@@ -56,6 +60,8 @@ services:
   novadef_prep_pred:
     build:
       context: ./novadef_prep_pred
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       TZ: UTC
       KAFKA_BOOTSTRAP: kafka_novadef:29092
@@ -86,6 +92,8 @@ services:
   novadef_neo4j_ingester:
     build:
       context: ./novadef_neo4j_ingester
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       TZ: UTC
       KAFKA_BOOTSTRAP: kafka_novadef:29092

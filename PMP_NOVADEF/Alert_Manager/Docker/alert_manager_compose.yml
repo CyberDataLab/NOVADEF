@@ -7,9 +7,8 @@ services:
       dockerfile: Alert_Manager/Docker/Dockerfiles/alert_manager.dockerfile
     container_name: alert_manager_novadef
     profiles: ["alert_manager.alert_manager"]
-    depends_on:
-      kafka_novadef:
-        condition: service_healthy
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=UTC
       - KAFKA_BOOTSTRAP=kafka_novadef:29092

@@ -5,6 +5,8 @@ services:
   soarca-db:
     image: mongo:4.4
     container_name: pmp-soarca-db
+    labels:
+      - "novadef.role=infrastructure"
     restart: on-failure
     environment:
       - MONGO_INITDB_ROOT_USERNAME=soarca
@@ -16,6 +18,8 @@ services:
   soarca-core:
     image: cossas/soarca:latest
     container_name: pmp-soarca-core
+    labels:
+      - "novadef.role=infrastructure"
     platform: linux/amd64
     restart: on-failure
     ports:
@@ -31,6 +35,8 @@ services:
   soarca-executor:
     image: alpine:latest
     container_name: pmp-soarca-executor-ssh
+    labels:
+      - "novadef.role=infrastructure"
     command: tail -f /dev/null
     restart: on-failure
     environment:
@@ -42,6 +48,8 @@ services:
   misp-soarca-trigger:
     build: .
     container_name: pmp-misp-soarca-trigger
+    labels:
+      - "novadef.role=infrastructure"
     restart: on-failure
     environment:
       - MISP_URL=https://misp-server

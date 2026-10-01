@@ -8,6 +8,8 @@ services:
   grafana:
     image: grafana/grafana:11.4.0
     container_name: novadef-grafana
+    labels:
+      - "novadef.role=infrastructure"
     ports:
       - "3000:3000"
     environment:

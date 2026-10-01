@@ -9,6 +9,8 @@ services:
       dockerfile: APIs/Near_Real_time_Data_Retrieval_API/Docker/Dockerfile/nrtdr_api.dockerfile
     container_name: nrtdr_api_novadef
     profiles: ["apis_module.nrtdr_api"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - REDIS_HOST=${REDIS_HOST}

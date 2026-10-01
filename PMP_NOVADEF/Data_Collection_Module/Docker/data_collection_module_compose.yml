@@ -2,17 +2,14 @@
 ---
 services:
   fluentd:
-  
     image: fluentd_novadef:latest
     build:
       context: ${PFD}
       dockerfile: Data_Collection_Module/Docker/Dockerfiles/fluentd.dockerfile
-
     container_name: fluentd_novadef
     profiles: ["collection_module.fluentd"]
     labels:
-      module: "fluentd"
-      machine_id: "${MACHINE_ID}"
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MACHINE_ID=${MACHINE_ID}
@@ -29,12 +26,11 @@ services:
     restart: unless-stopped
   
   telegraf:
-    image: telegraf:1.38.4 #telegraf:1.33.2
+    image: telegraf:1.38.4
     container_name: telegraf_novadef
     profiles: ["collection_module.telegraf"]
     labels:
-      module: "telegraf"
-      machine_id: "${MACHINE_ID}"
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - TELEGRAF_GENERAL_INTERVAL=${TELEGRAF_GENERAL_INTERVAL}
@@ -61,6 +57,8 @@ services:
       dockerfile: Data_Collection_Module/Docker/Dockerfiles/tshark.dockerfile
     container_name: tshark_novadef
     profiles: ["collection_module.tshark"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - TSHARK_BASE_TOPIC=${TSHARK_BASE_TOPIC}
@@ -85,8 +83,7 @@ services:
     container_name: falco_novadef
     profiles: ["collection_module.falco"]
     labels:
-      module: "falco"
-      machine_id: "${MACHINE_ID}"
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MACHINE_ID=${MACHINE_ID}
@@ -114,8 +111,7 @@ services:
     container_name: falco_exporter_novadef
     profiles: ["collection_module.falco"]
     labels:
-      module: "falco-exporter"
-      machine_id: "${MACHINE_ID}"
+      - "novadef.role=infrastructure"
     depends_on:
       - falco
     environment:
@@ -133,6 +129,8 @@ services:
       context: ${PFD}
       dockerfile: Data_Collection_Module/Docker/Dockerfiles/falco.dockerfile
     profiles: ["collection_module.validator"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MACHINE_ID=${MACHINE_ID}
@@ -152,6 +150,8 @@ services:
       dockerfile: Data_Collection_Module/Docker/Dockerfiles/device_info.dockerfile
     container_name: device_info_novadef
     profiles: ["collection_module.info"]
+    labels:
+      - "novadef.role=infrastructure"
     environment:
       - TZ=${TZ}
       - MACHINE_ID=${MACHINE_ID}

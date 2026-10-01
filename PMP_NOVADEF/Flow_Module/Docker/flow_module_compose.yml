@@ -10,12 +10,11 @@ services:
       dockerfile: Flow_Module/Docker/Dockerfiles/flow_module.dockerfile
     container_name: flow_module_novadef
     profiles: ["flow_module.flow_module"]
+    labels:
+      - "novadef.role=infrastructure"
     restart: unless-stopped
     # tini as PID 1 reaps tcpdump zombies spawned internally by CICFlowMeter.
     init: true
-    #depends_on:
-    #  kafka_novadef:
-    #    condition: service_healthy
     environment:
       - TZ=${TZ}
       - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
