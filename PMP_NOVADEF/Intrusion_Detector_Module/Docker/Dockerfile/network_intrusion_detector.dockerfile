@@ -8,6 +8,7 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir confluent-kafka numpy scikit-learn
 
-COPY Alert_Module/Docker/Entrypoints/entrypoint_network_intrusion_detector.py /app/entrypoint_network_intrusion_detector.py
+COPY Intrusion_Detector_Module/Scripts/ /app/Scripts/
+COPY Intrusion_Detector_Module/Docker/Entrypoints/entrypoint_network_intrusion_detector.py /app/entrypoint_network_intrusion_detector.py
 
 CMD ["python3", "/app/entrypoint_network_intrusion_detector.py"]

@@ -316,13 +316,52 @@ class Snort3Config(BaseModel):
     SNORT_PRODUCER_KAFKA_PRODUCER_COMPRESSION:              str = "zstd"
 
 
+# Network Intrusion Detector (NID)
+class NetworkIntrusionDetectorConfig(BaseModel):
+    """Pydantic model for the Intrusion_Detector_Module configurable environment variables."""
+    model_config = {"extra": "forbid"}
+
+    TSHARK_BASE_TOPIC:                              str = TsharkConfig.model_fields["TSHARK_BASE_TOPIC"].default
+    CIC_KAFKA_BASE_TOPIC_OUT:                       str = FlowModuleConfig.model_fields["CIC_KAFKA_BASE_TOPIC_OUT"].default
+    NID_KAFKA_TOPIC_OUT:                            str = "network_intrusion_alerts"
+    NID_KAFKA_GROUP_ID:                              str = "network-intrusion-detector-v1"
+    NID_POLL_TIMEOUT_SECONDS:                        str = "0.01"
+
+    NID_WINDOW_SECONDS:                              str = "1"
+    NID_WINDOW_PACKETS:                              str = "12"
+    NID_MIN_FAILURES:                                str = "3"
+    NID_MIN_UNIQUE_USERS:                            str = "2"
+    NID_MIN_UNIQUE_IPS:                              str = "2"
+    NID_DEDUP_SECONDS:                               str = "10"
+    NID_ALERT_DEDUP_TTL_SECONDS:                     str = "1800"
+
+    NID_FAST_FANIN_ENABLED:                          str = "true"
+    NID_ISOLATION_FOREST_ENABLED:                    str = "false"
+    NID_FAST_FANIN_WINDOW_SECONDS:                   str = "2.0"
+    NID_FAST_FANIN_MIN_UNIQUE_IPS:                   str = "4"
+    NID_FAST_FANIN_MIN_SYN_PACKETS:                  str = "8"
+    NID_FAST_FANIN_DEDUP_SECONDS:                    str = "1800"
+    NID_FAST_FANIN_ENRICH_INTERVAL_SECONDS:          str = "5.0"
+
+    NID_INFRA_RESOLVE_INTERVAL_SECONDS:              str = "60"
+
+
+class InfraDiscoveryWatcherConfig(BaseModel):
+    """Pydantic model for the Infra_Discovery_Watcher configurable environment variables."""
+    model_config = {"extra": "forbid"}
+
+    NID_WATCHER_POLL_INTERVAL_SECONDS:              str = "30"
+    NID_WATCHER_INFRA_LABEL:                        str = "novadef.role=infrastructure"
+
+
 PUBLIC_TOOL_MODELS = {
-    "tshark":          TsharkConfig,
-    "flow_module":     FlowModuleConfig,
-    "telegraf":        TelegrafConfig,
-    "fluentd":         FluentdConfig,
-    "falco":           FalcoConfig,
-    "snort3":          Snort3Config,
+    "tshark":                      TsharkConfig,
+    "flow_module":                 FlowModuleConfig,
+    "telegraf":                    TelegrafConfig,
+    "fluentd":                     FluentdConfig,
+    "falco":                       FalcoConfig,
+    "snort3":                      Snort3Config,
+    "network_intrusion_detector":  NetworkIntrusionDetectorConfig,
 }
 
 
@@ -340,11 +379,12 @@ INTERNAL_TOOL_MODELS = {
 
 
 INTERNAL_SUPPORT_MODELS = {
-    "info":             InfoConfig,
-    "postgres_gui":     PostgresGuiConfig,
-    "nrtdr_api":        NrtdrApiConfig,
-    "hdr_api":          HdrApiConfig,
-    "dt_api":           DtApiConfig,
+    "info":                        InfoConfig,
+    "postgres_gui":                PostgresGuiConfig,
+    "nrtdr_api":                   NrtdrApiConfig,
+    "hdr_api":                     HdrApiConfig,
+    "dt_api":                      DtApiConfig,
+    "infra_discovery_watcher":     InfraDiscoveryWatcherConfig,
 }
 
 
@@ -369,6 +409,8 @@ DEFAULT_ENV_MODEL_CLASSES = (
     DtApiConfig,
     FlowModuleConfig,
     Snort3Config,
+    NetworkIntrusionDetectorConfig,
+    InfraDiscoveryWatcherConfig,
 )
 
 
@@ -558,6 +600,33 @@ TOOL_ENV_VARS = {
         "SNORT_PRODUCER_KAFKA_PRODUCER_BATCH_SIZE",
         "SNORT_PRODUCER_KAFKA_PRODUCER_COMPRESSION",
     ],
+    "network_intrusion_detector": [
+        "TSHARK_BASE_TOPIC",
+        "CIC_KAFKA_BASE_TOPIC_OUT",
+        "NID_KAFKA_TOPIC_OUT",
+        "NID_KAFKA_GROUP_ID",
+        "NID_POLL_TIMEOUT_SECONDS",
+        "NID_WINDOW_SECONDS",
+        "NID_WINDOW_PACKETS",
+        "NID_MIN_FAILURES",
+        "NID_MIN_UNIQUE_USERS",
+        "NID_MIN_UNIQUE_IPS",
+        "NID_DEDUP_SECONDS",
+        "NID_ALERT_DEDUP_TTL_SECONDS",
+        "NID_FAST_FANIN_ENABLED",
+        "NID_ISOLATION_FOREST_ENABLED",
+        "NID_FAST_FANIN_WINDOW_SECONDS",
+        "NID_FAST_FANIN_MIN_UNIQUE_IPS",
+        "NID_FAST_FANIN_MIN_SYN_PACKETS",
+        "NID_FAST_FANIN_DEDUP_SECONDS",
+        "NID_FAST_FANIN_ENRICH_INTERVAL_SECONDS",
+        "NID_INFRA_RESOLVE_INTERVAL_SECONDS",
+        # Infra_Discovery_Watcher's own vars — folded in here because it's
+        # always deployed alongside this tool, never selectable on its own
+        # (see InfraDiscoveryWatcherConfig).
+        "NID_WATCHER_POLL_INTERVAL_SECONDS",
+        "NID_WATCHER_INFRA_LABEL",
+    ],
     "nrtdr_api": [
         "REDIS_HOST",
         "REDIS_PORT",
@@ -599,12 +668,14 @@ PRODUCER_TOPIC_VARS = {
     "falco":        ["FALCO_BASE_TOPIC"],
     "flow_module":  ["CIC_KAFKA_BASE_TOPIC_OUT"],
     "snort3":       ["SNORT_KAFKA_TOPIC_OUT"],
+    "network_intrusion_detector": ["NID_KAFKA_TOPIC_OUT"],
 }
 
 
 CONSUMER_TOPIC_VARS = {
     "flow_module":  ["TSHARK_BASE_TOPIC"],
     "snort3":       ["TSHARK_BASE_TOPIC"],
+    "network_intrusion_detector": ["TSHARK_BASE_TOPIC", "CIC_KAFKA_BASE_TOPIC_OUT"],
     "opensearch":   [
         "TELEGRAF_BASE_TOPIC",
         "FLUENTD_SYSLOG_BASE_TOPIC",

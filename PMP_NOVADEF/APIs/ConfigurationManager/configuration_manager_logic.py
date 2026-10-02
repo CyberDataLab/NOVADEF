@@ -158,6 +158,10 @@ NON_CONFIGURABLE_ENV_VARS: Dict[str, set[str]] = {
         "SNORT_CONSUMER_KAFKA_ALLOW_AUTO_CREATE_TOPICS",
         "SNORT_ALERT_TAP_IFACE",
     },
+    "network_intrusion_detector": {
+        "TSHARK_BASE_TOPIC",
+        "CIC_KAFKA_BASE_TOPIC_OUT",
+    },
 }
 
 

@@ -1,0 +1,74 @@
+# sudo docker compose up -d
+# sudo docker exec -it IDCONTAINER bash
+---
+services:
+  # NOVADEF-specific fast-path NIDS (fan-in detection + Isolation Forest)
+  network_intrusion_detector:
+    image: network_intrusion_detector_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Intrusion_Detector_Module/Docker/Dockerfile/network_intrusion_detector.dockerfile
+    container_name: network_intrusion_detector_novadef
+    profiles: ["intrusion_detector_module.network_intrusion_detector"]
+    labels:
+      - "novadef.role=infrastructure"
+    depends_on:
+      infra_discovery_watcher:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ}
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
+      - TSHARK_BASE_TOPIC=${TSHARK_BASE_TOPIC}
+      - CIC_KAFKA_BASE_TOPIC_OUT=${CIC_KAFKA_BASE_TOPIC_OUT}
+      - NID_KAFKA_TOPIC_OUT=${NID_KAFKA_TOPIC_OUT}
+      - NID_KAFKA_GROUP_ID=${NID_KAFKA_GROUP_ID}
+      - NID_POLL_TIMEOUT_SECONDS=${NID_POLL_TIMEOUT_SECONDS}
+      - NID_WINDOW_SECONDS=${NID_WINDOW_SECONDS}
+      - NID_WINDOW_PACKETS=${NID_WINDOW_PACKETS}
+      - NID_MIN_FAILURES=${NID_MIN_FAILURES}
+      - NID_MIN_UNIQUE_USERS=${NID_MIN_UNIQUE_USERS}
+      - NID_MIN_UNIQUE_IPS=${NID_MIN_UNIQUE_IPS}
+      - NID_DEDUP_SECONDS=${NID_DEDUP_SECONDS}
+      - NID_ALERT_DEDUP_TTL_SECONDS=${NID_ALERT_DEDUP_TTL_SECONDS}
+      - NID_FAST_FANIN_ENABLED=${NID_FAST_FANIN_ENABLED}
+      - NID_ISOLATION_FOREST_ENABLED=${NID_ISOLATION_FOREST_ENABLED}
+      - NID_FAST_FANIN_WINDOW_SECONDS=${NID_FAST_FANIN_WINDOW_SECONDS}
+      - NID_FAST_FANIN_MIN_UNIQUE_IPS=${NID_FAST_FANIN_MIN_UNIQUE_IPS}
+      - NID_FAST_FANIN_MIN_SYN_PACKETS=${NID_FAST_FANIN_MIN_SYN_PACKETS}
+      - NID_FAST_FANIN_DEDUP_SECONDS=${NID_FAST_FANIN_DEDUP_SECONDS}
+      - NID_FAST_FANIN_ENRICH_INTERVAL_SECONDS=${NID_FAST_FANIN_ENRICH_INTERVAL_SECONDS}
+      - NID_INFRA_RESOLVE_INTERVAL_SECONDS=${NID_INFRA_RESOLVE_INTERVAL_SECONDS}
+    # If host.docker.internal is used in Linux:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    volumes:
+      - ${PFD}/Results/Network_IDS:/app/results
+      - nid_infra_discovery:/shared/infra:ro
+    restart: unless-stopped
+
+  # Discovers NOVADEF infrastructure containers by Docker label (novadef.role=infrastructure).
+  # In a future multi-machine deployment it could instead ask the orchestrator for this information
+  infra_discovery_watcher:
+    image: infra_discovery_watcher_novadef:latest
+    build:
+      context: ${PFD}
+      dockerfile: Intrusion_Detector_Module/Docker/Dockerfile/infra_discovery_watcher.dockerfile
+    container_name: infra_discovery_watcher_novadef
+    profiles: ["intrusion_detector_module.network_intrusion_detector"]
+    environment:
+      - NID_WATCHER_POLL_INTERVAL_SECONDS=${NID_WATCHER_POLL_INTERVAL_SECONDS}
+      - NID_WATCHER_INFRA_LABEL=${NID_WATCHER_INFRA_LABEL}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - nid_infra_discovery:/shared/infra
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  nid_infra_discovery: {}

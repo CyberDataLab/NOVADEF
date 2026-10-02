@@ -23,6 +23,7 @@ start_log_hub() {
     docker run -d \
         --name "$DOZZLE_CONTAINER_NAME" \
         --network launcher_default \
+        --label novadef.role=infrastructure \
         -p "${DOZZLE_PORT}:8080" \
         -v /var/run/docker.sock:/var/run/docker.sock \
         --restart unless-stopped \
@@ -43,6 +44,7 @@ start_auth_db() {
     docker run -d \
         --name "$AUTH_DB_CONTAINER" \
         --network launcher_default \
+        --label novadef.role=infrastructure \
         -e POSTGRES_USER="$AUTH_DB_USER" \
         -e POSTGRES_PASSWORD="$AUTH_DB_PASSWORD" \
         -e POSTGRES_DB="$AUTH_DB_NAME" \
@@ -70,6 +72,7 @@ start_experiments_api() {
     docker run -d \
         --name "$EXPERIMENTS_API_CONTAINER" \
         --network launcher_default \
+        --label novadef.role=infrastructure \
         -p "${EXPERIMENTS_API_PORT}:18082" \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "$NOVADEF_ROOT/.novadef_runtime:/runtime" \

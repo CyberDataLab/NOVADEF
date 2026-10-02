@@ -90,6 +90,7 @@ ASSOCIATED_CONTAINERS = [
     "discovery_agent_novadef", # This container is associated with Prometheus, but it is not an API tool itself
     "opensearch_dashboards_novadef", # This container is associated with OpenSearch, but it is not an API tool itself
     "logstash_novadef", # This container is associated with OpenSearch, but it is not an API tool itself
+    "infra_discovery_watcher_novadef", # This container is associated with Intrusion_Detector_Module, but it is not an API tool itself
 ]
 
 
