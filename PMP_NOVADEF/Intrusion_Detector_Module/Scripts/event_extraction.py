@@ -72,7 +72,6 @@ def _extract_tshark_packet(payload: dict[str, Any]) -> dict[str, Any] | None:
         "username": src_ip,
         "auth_success": not is_remote_auth_port,
         "host_signal": False,
-        "hybrid_campaign": "",
         "timestamp": timestamp,
         "source_type": "tshark",
     }
@@ -128,7 +127,6 @@ def _extract_cic_flow_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         "username": src_ip_txt,
         "auth_success": False,
         "host_signal": False,
-        "hybrid_campaign": "",
         "timestamp": timestamp,
         "source_type": "cic_flow",
         "flow_duration": flow_duration_f,

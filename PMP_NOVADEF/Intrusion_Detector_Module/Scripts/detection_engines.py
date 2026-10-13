@@ -136,8 +136,6 @@ def _evaluate_window(
     unique_src_ips = {item["src_ip"] for item in window_events}
     unique_users = {item["username"] for item in window_events}
     host_signal_seen = any(bool(item.get("host_signal")) for item in window_events)
-    hybrid_campaign = any(bool(str(item.get("hybrid_campaign", "")).strip()) for item in window_events)
-    attack_family = "hybrid_lateral_remote_execution" if hybrid_campaign else "distributed_password_spraying"
 
     if failed_attempts < config.MIN_FAILURES:
         return False
@@ -145,7 +143,7 @@ def _evaluate_window(
         return False
     if len(unique_users) < config.MIN_UNIQUE_USERS:
         return False
-    if attack_family == "distributed_password_spraying" and dst_port not in config.ALLOWED_REMOTE_PORTS:
+    if dst_port not in config.ALLOWED_REMOTE_PORTS:
         return False
 
     # The Isolation Forest is the sole judge: no alert without a real anomaly.
@@ -153,18 +151,16 @@ def _evaluate_window(
     if not is_anomaly:
         return False
 
+    # Network-level observation alone can't distinguish plain password
+    # spraying from a hybrid lateral-movement campaign — that discrimination
+    # legitimately belongs to the Falco/host-level channel, not here.
     alert_type = "distributed_password_spraying"
     mitre_attack = _MITRE_ATTACK_SPRAYING
     d3fend_candidates = _D3FEND_CANDIDATES_SPRAYING
     title = f"Distributed Password Spraying against {dst_ip}:{dst_port}"
-    if hybrid_campaign:
-        alert_type = "hybrid_lateral_remote_execution"
-        mitre_attack = ["T1078", "T1021", "T1059", "T1047"]
-        d3fend_candidates = ["Network Traffic Filtering", "Session Termination", "Execution Isolation", "Process Termination"]
-        title = f"Hybrid Lateral Remote Execution against {dst_ip}:{dst_port}"
 
     first_seen_ts = min(float(item["timestamp"]) for item in window_events)
-    dedup_key = f"attack|target={dst_ip}:{dst_port}|family={attack_family}"
+    dedup_key = f"attack|target={dst_ip}:{dst_port}|family={alert_type}"
 
     # Re-emit when a source IP that was not reported yet joins the attack, so
     # the profile builds up incrementally instead of freezing on the first
