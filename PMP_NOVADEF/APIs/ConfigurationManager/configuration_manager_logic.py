@@ -129,6 +129,8 @@ TOOL_RUNTIME_CONTAINERS: Dict[str, str] = {
     "tshark": "tshark_novadef",
     "flow_module": "flow_module_novadef",
     "snort3": "alert_module_novadef",
+    "network_intrusion_detector": "network_intrusion_detector_novadef",
+    "alert_manager": "alert_manager_novadef",
 }
 
 # ---------------------------------------------------------------------------
@@ -161,6 +163,11 @@ NON_CONFIGURABLE_ENV_VARS: Dict[str, set[str]] = {
     "network_intrusion_detector": {
         "TSHARK_BASE_TOPIC",
         "CIC_KAFKA_BASE_TOPIC_OUT",
+    },
+    "alert_manager": {
+        "NID_KAFKA_TOPIC_OUT",
+        "FALCO_BASE_TOPIC",
+        "SNORT_KAFKA_TOPIC_OUT",
     },
 }
 
@@ -581,46 +588,11 @@ def get_tool_runtime_state(tool_name: str) -> Dict[str, Any]:
     }
 
 
-def validate_snort3_dependency_state(collection: Optional[Collection]) -> Tuple[bool, str]:
-    """
-    Ensure Snort3 can only be deployed when tshark is actively running and its
-    resolved input topic is available in MongoDB CM.
-    """
-    tshark_runtime = get_tool_runtime_state("tshark")
-    if tshark_runtime.get("status") != "success":
-        return False, str(tshark_runtime.get("message", "Could not determine tshark runtime state."))
-
-    if not bool(tshark_runtime.get("is_active")):
-        container_name = str(tshark_runtime.get("container_name", "tshark_novadef"))
-        runtime_status = str(tshark_runtime.get("runtime_status", "unknown"))
-        return (
-            False,
-            "Snort3 requires tshark to be actively deployed first. "
-            f"Container '{container_name}' is currently '{runtime_status}'.",
-        )
-
-    if collection is None:
-        return (
-            False,
-            "Snort3 requires MongoDB CM to resolve tshark topics, but MongoDB CM is unavailable.",
-        )
-
-    stored_topics = get_kafka_topics_from_mongo(collection)
-    tshark_topic = str(stored_topics.get("TSHARK_BASE_TOPIC", "")).strip()
-    if not tshark_topic:
-        return (
-            False,
-            "Snort3 requires the tshark topic to be present in MongoDB CM. "
-            "Deploy tshark first through the Configuration Manager.",
-        )
-
-    return True, ""
-
-
 # Dependency map for tools that require upstream dependencies
 DEPENDENCY_MAP = {
     "snort3": {"upstream_tool": "tshark", "required_topic": "TSHARK_BASE_TOPIC"},
     "flow_module": {"upstream_tool": "tshark", "required_topic": "TSHARK_BASE_TOPIC"},
+    "network_intrusion_detector": {"upstream_tool": "tshark", "required_topic": "TSHARK_BASE_TOPIC"},
 }
 
 
@@ -644,31 +616,25 @@ def validate_dependency_state(tool_name: str, collection: Optional[Collection]) 
     if not bool(upstream_runtime.get("is_active")):
         container_name = str(upstream_runtime.get("container_name", f"{upstream_tool}_novadef"))
         runtime_status = str(upstream_runtime.get("runtime_status", "unknown"))
-        tool_display_name = "Snort3" if tool_name == "snort3" else "Flow"  # User-friendly names
-        upstream_display_name = "tshark"
         return (
             False,
-            f"{tool_display_name} requires {upstream_display_name} to be actively deployed first. "
+            f"{tool_name} requires {upstream_tool} to be actively deployed first. "
             f"Container '{container_name}' is currently '{runtime_status}'.",
         )
 
     if collection is None:
-        tool_display_name = "Snort3" if tool_name == "snort3" else "Flow"
-        upstream_display_name = "tshark"
         return (
             False,
-            f"{tool_display_name} requires MongoDB CM to resolve {upstream_display_name} topics, but MongoDB CM is unavailable.",
+            f"{tool_name} requires MongoDB CM to resolve {upstream_tool} topics, but MongoDB CM is unavailable.",
         )
 
     stored_topics = get_kafka_topics_from_mongo(collection)
     topic_value = str(stored_topics.get(required_topic, "")).strip()
     if not topic_value:
-        tool_display_name = "Snort3" if tool_name == "snort3" else "Flow"
-        upstream_display_name = "tshark"
         return (
             False,
-            f"{tool_display_name} requires the {upstream_display_name} topic to be present in MongoDB CM. "
-            "Deploy tshark first through the Configuration Manager.",
+            f"{tool_name} requires the {upstream_tool} topic to be present in MongoDB CM. "
+            f"Deploy {upstream_tool} first through the Configuration Manager.",
         )
 
     return True, ""
