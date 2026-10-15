@@ -354,6 +354,22 @@ class InfraDiscoveryWatcherConfig(BaseModel):
     NID_WATCHER_INFRA_LABEL:                        str = "novadef.role=infrastructure"
 
 
+class AlertManagerConfig(BaseModel):
+    """Pydantic model for the Alert_Manager configurable environment variables."""
+    model_config = {"extra": "forbid"}
+
+    # Redeclared (same names) so this model is self-contained for the
+    # Configuration Manager's per-tool deploy flow — see NetworkIntrusionDetectorConfig.
+    NID_KAFKA_TOPIC_OUT:                            str = NetworkIntrusionDetectorConfig.model_fields["NID_KAFKA_TOPIC_OUT"].default
+    FALCO_BASE_TOPIC:                               str = FalcoConfig.model_fields["FALCO_BASE_TOPIC"].default
+    SNORT_KAFKA_TOPIC_OUT:                           str = Snort3Config.model_fields["SNORT_KAFKA_TOPIC_OUT"].default
+    ALERT_MANAGER_PMP_ALERTS:                       str = "pmp_alerts"
+    ALERT_MANAGER_TAPCD_COMPAT_ALERTS:               str = "alert_manager_tapcd_compat_alerts"
+    ALERT_MANAGER_KAFKA_GROUP_ID:                    str = "alert-manager-v1"
+    ALERT_MANAGER_CAMPAIGN_WINDOW_SECS:              str = "1800"
+    ALERT_MANAGER_CAMPAIGN_TTL_SECS:                 str = "3600"
+
+
 PUBLIC_TOOL_MODELS = {
     "tshark":                      TsharkConfig,
     "flow_module":                 FlowModuleConfig,
@@ -362,6 +378,7 @@ PUBLIC_TOOL_MODELS = {
     "falco":                       FalcoConfig,
     "snort3":                      Snort3Config,
     "network_intrusion_detector":  NetworkIntrusionDetectorConfig,
+    "alert_manager":               AlertManagerConfig,
 }
 
 
@@ -411,6 +428,7 @@ DEFAULT_ENV_MODEL_CLASSES = (
     Snort3Config,
     NetworkIntrusionDetectorConfig,
     InfraDiscoveryWatcherConfig,
+    AlertManagerConfig,
 )
 
 
@@ -658,6 +676,16 @@ TOOL_ENV_VARS = {
         "DT_DEFAULT_STEP_SECONDS",
         "DT_MAX_PAGE_SIZE",
     ],
+    "alert_manager": [
+        "NID_KAFKA_TOPIC_OUT",
+        "FALCO_BASE_TOPIC",
+        "SNORT_KAFKA_TOPIC_OUT",
+        "ALERT_MANAGER_PMP_ALERTS",
+        "ALERT_MANAGER_TAPCD_COMPAT_ALERTS",
+        "ALERT_MANAGER_KAFKA_GROUP_ID",
+        "ALERT_MANAGER_CAMPAIGN_WINDOW_SECS",
+        "ALERT_MANAGER_CAMPAIGN_TTL_SECS",
+    ],
 }
 
 
@@ -676,6 +704,7 @@ CONSUMER_TOPIC_VARS = {
     "flow_module":  ["TSHARK_BASE_TOPIC"],
     "snort3":       ["TSHARK_BASE_TOPIC"],
     "network_intrusion_detector": ["TSHARK_BASE_TOPIC", "CIC_KAFKA_BASE_TOPIC_OUT"],
+    "alert_manager": ["NID_KAFKA_TOPIC_OUT", "FALCO_BASE_TOPIC", "SNORT_KAFKA_TOPIC_OUT"],
     "opensearch":   [
         "TELEGRAF_BASE_TOPIC",
         "FLUENTD_SYSLOG_BASE_TOPIC",

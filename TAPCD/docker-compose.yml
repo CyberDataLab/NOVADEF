@@ -44,7 +44,7 @@ services:
       KAFKA_BOOTSTRAP: kafka_novadef:29092
     command: ["python3", "stream_low.py",
               "--bootstrap-servers", "kafka_novadef:29092",
-              "--in-topic", "snort_alerts_am",
+              "--in-topic", "alert_manager_tapcd_compat_alerts",
               "--out-topic", "flows_conditional_agg",
               "--group-id", "stream-json-alerts",
               "--linger-ms", "0",

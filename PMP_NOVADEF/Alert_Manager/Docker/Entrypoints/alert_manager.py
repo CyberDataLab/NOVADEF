@@ -15,8 +15,9 @@ Generates a campaign_id of the form:  <dst_ip>-<epoch_bucket>
 where epoch_bucket = floor(event_unix_time / CAMPAIGN_WINDOW_SECS)
 
 Publishes enriched events to:
-  - pmp_alerts       (consumed by MISP — JSON with campaign_id)
-  - snort_alerts_am  (TAPCD-compat Snort format with campaign_id, consumed by stream_low)
+  - pmp_alerts                     (consumed by MISP, JSON with campaign_id)
+  - alert_manager_tapcd_compat_alerts (Snort-shaped format for stream_low;
+                                       carries all 3 sources, not just Snort)
 """
 
 import json
@@ -26,13 +27,12 @@ import os
 import re
 import signal
 import socket
-import sys
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from confluent_kafka import Consumer, Producer, KafkaError, KafkaException
+from confluent_kafka import Consumer, Producer, KafkaError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,51 +43,54 @@ log = logging.getLogger("alert_manager")
 # ---------------------------------------------------------------------------
 # Config from env
 # ---------------------------------------------------------------------------
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka_novadef:29092")
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP")
 
-TOPIC_NETWORK_ALERTS = os.getenv("TOPIC_NETWORK_ALERTS", "network_intrusion_alerts")
-TOPIC_FALCO           = os.getenv("TOPIC_FALCO", "falco_events")
-TOPIC_SNORT_IN        = os.getenv("TOPIC_SNORT_IN", "snort_alerts")
+# Input topics are reused as-is from their producer's own variable name
+# (NetworkIntrusionDetectorConfig/FalcoConfig/Snort3Config) so the
+# Configuration Manager's generic consumer-topic resolution can overwrite
+# them without a per-tool special case.
+TOPIC_NETWORK_ALERTS = os.getenv("NID_KAFKA_TOPIC_OUT")
+TOPIC_FALCO           = os.getenv("FALCO_BASE_TOPIC")
+TOPIC_SNORT_IN        = os.getenv("SNORT_KAFKA_TOPIC_OUT")
 
-TOPIC_PMP_ALERTS      = os.getenv("TOPIC_PMP_ALERTS", "pmp_alerts")
-TOPIC_SNORT_OUT       = os.getenv("TOPIC_SNORT_OUT", "snort_alerts_am")
+TOPIC_PMP_ALERTS      = os.getenv("ALERT_MANAGER_PMP_ALERTS")
+# NOTE: carries Snort, Falco AND the intrusion detector's alerts, despite the
+# TAPCD-compat *format* being Snort-shaped — not a Snort-only topic.
+TOPIC_TAPCD_COMPAT    = os.getenv("ALERT_MANAGER_TAPCD_COMPAT_ALERTS")
 
-GROUP_ID = os.getenv("KAFKA_GROUP_ID", "alert-manager-v1")
+GROUP_ID = os.getenv("ALERT_MANAGER_KAFKA_GROUP_ID")
 
 # Falco host-level rules (file/process activity, e.g. ransomware encryption)
 # often carry no network fields at all — there is no src/dst IP to extract from
 # a local `openssl enc` syscall. Resolve the currently active scenario victim
-# dynamically (env var > DNS of the scenario hostname > lab fallback) so those
-# events can still be attributed to a victim_ip and correlated into a campaign.
-# Same pattern as MISP's _resolve_victim_ip().
-_SCENARIO_VICTIM_IP_ENV = os.getenv("SCENARIO_VICTIM_IP", "")
-_SCENARIO_VICTIM_HOSTNAME = os.getenv("SCENARIO_VICTIM_HOSTNAME", "scenario_victim")
-_SCENARIO_VICTIM_IP_FALLBACK = os.getenv("SCENARIO_VICTIM_IP_FALLBACK", "172.18.0.29")
+# dynamically (DNS of the scenario hostname) so those events can still be
+# attributed to a victim_ip and correlated into a campaign. Same pattern as
+# MISP's _resolve_victim_ip().
+#
+# This hostname is a fixed architectural contract (the alias NOVADEF_GUI's
+# app.py always binds via _ensure_launcher_network_alias()), not something an
+# operator tunes — hardcoded, not an env var.
+_SCENARIO_VICTIM_HOSTNAME = "scenario_victim"
 
 
 def _resolve_victim_ip_uncached() -> str:
-    if _SCENARIO_VICTIM_IP_ENV:
-        return _SCENARIO_VICTIM_IP_ENV
+    # NOTE (verify in a real run before/soon after this change ships): there
+    # used to be a hardcoded fallback IP here for when DNS resolution fails.
+    # It was removed as dead weight — _parse_falco_event() already drops an
+    # event cleanly when victim_ip is empty, which is safer than silently
+    # mis-attributing it to a guessed IP. But if Falco-sourced alerts start
+    # disappearing from pmp_alerts after this, that means resolution was
+    # failing more often than the code's own history suggested — the fix is
+    # to repair the DNS/alias resolution, NOT to reintroduce a guessed IP.
     try:
         return socket.gethostbyname(_SCENARIO_VICTIM_HOSTNAME)
     except Exception:
-        return _SCENARIO_VICTIM_IP_FALLBACK
+        return ""
 
 
-# _parse_falco_event() calls this for EVERY host-level Falco event (they carry
-# no IP of their own — see its comment). The scenario_victim alias is bound to
-# the current run's victim container via app.py's
-# _ensure_launcher_network_alias(), which disconnects+reconnects the container
-# on Docker's launcher_default network on every experiment launch; Docker's
-# embedded DNS takes a few seconds to propagate that rebind, so an uncached
-# gethostbyname() here would occasionally pay that full resolution delay on
-# the very first host event of a run (measured up to ~10s in this
-# environment) and then repeat the (cheap, cached-by-OS-resolver) lookup on
-# every subsequent event. Cache the resolved IP for a short TTL instead of
-# per-import or per-call: short enough to pick up a new run's victim IP
-# shortly after _ensure_launcher_network_alias() rebinds it, long enough that
-# a burst of host events (hundreds/sec during ransomware) all reuse one
-# resolution instead of hammering the resolver.
+# Cached briefly: an uncached lookup pays the full DNS delay (~10s measured,
+# right after the alias rebinds on each experiment launch) on every one of
+# the hundreds/sec of host events a ransomware run can produce.
 _victim_ip_cache_lock = threading.Lock()
 _victim_ip_cache_value: str = ""
 _victim_ip_cache_at: float = 0.0
@@ -109,10 +112,10 @@ def _resolve_victim_ip() -> str:
 
 # Window in seconds within which two events on the same victim IP are considered
 # the same campaign. Default 30 min.
-CAMPAIGN_WINDOW_SECS = int(os.getenv("CAMPAIGN_WINDOW_SECS", "1800"))
+CAMPAIGN_WINDOW_SECS = int(os.getenv("ALERT_MANAGER_CAMPAIGN_WINDOW_SECS"))
 
 # How long (seconds) we keep campaign state in memory after last activity.
-CAMPAIGN_TTL_SECS = int(os.getenv("CAMPAIGN_TTL_SECS", "3600"))
+CAMPAIGN_TTL_SECS = int(os.getenv("ALERT_MANAGER_CAMPAIGN_TTL_SECS"))
 
 # ---------------------------------------------------------------------------
 # Global state: victim_ip -> campaign metadata
@@ -121,14 +124,9 @@ CAMPAIGN_TTL_SECS = int(os.getenv("CAMPAIGN_TTL_SECS", "3600"))
 _state_lock = threading.Lock()
 # {victim_ip: {"campaign_id": str, "epoch_bucket": int, "last_seen": float,
 #              "attacker_ips": set[str]}}
-# attacker_ips accumulates every source IP seen across ALL re-emitted network
-# alerts for this campaign (the detector now emits one alert per newly-seen
-# attacker IP instead of a single alert for the whole attack). Each outgoing
-# pmp_alerts/snort_alerts_am event carries the FULL accumulated set, not just
-# the IPs from the triggering alert — so MISP/TAPCD only ever need to
-# create/update ONE event and ONE actor profile per campaign, and that single
-# profile ends up describing all attacker IPs instead of whichever one
-# happened to trigger the first detection.
+# attacker_ips accumulates every source IP seen for this campaign, so each
+# outgoing event carries the full set — one actor profile per campaign in
+# MISP/TAPCD, not one per triggering IP.
 _campaigns: dict[str, dict] = {}
 
 _closing = False
@@ -234,16 +232,9 @@ def _build_consumer(topics: list[str], group_suffix: str) -> Consumer:
         "enable.auto.commit": False,
         "auto.offset.reset": "latest",
         "allow.auto.create.topics": True,
-        # Kept low deliberately: each topic has its own single-member group,
-        # so there is no risk of a false eviction under normal load. A high
-        # session.timeout.ms instead means that on container restart (which
-        # happens on every experiment launch, see _reset_detector_runtime_
-        # state() in app.py), the broker takes up to that long to expire the
-        # previous member's session before it will assign partitions to the
-        # freshly-subscribed consumer — this showed up as a flat ~10s delay
-        # on the FIRST falco_events message of a run (network/snort topics,
-        # which had continuous traffic and re-triggered rebalancing sooner,
-        # did not show the same stall).
+        # Kept low: a single-member group has no false-eviction risk, and a
+        # high value delayed the first falco_events message ~10s after every
+        # container restart (broker waiting out the old session).
         "session.timeout.ms": 6000,
         "max.poll.interval.ms": 300000,
         "socket.keepalive.enable": True,
@@ -309,8 +300,7 @@ def _parse_network_intrusion_alert(obj: dict) -> Optional[dict]:
 def _parse_falco_event(obj: dict) -> Optional[dict]:
     """
     Falco schema (as published by Data_Collection_Module):
-    {"rule": str, "priority": str, "output": str,
-     "output_fields": {"proc.env": "...CAMPAIGN_ID=xxx..."}}
+    {"rule": str, "priority": str, "output": str, "output_fields": {...}}
     OR wrapped: the Kafka message value may itself be a JSON with a "message" field
     that contains the Falco JSON.
     """
@@ -344,18 +334,11 @@ def _parse_falco_event(obj: dict) -> Optional[dict]:
         # Host-level rules (file/process activity, e.g. ransomware encryption via
         # `openssl enc`) carry no network fields — there is no src/dst IP on a
         # local syscall. Attribute the event to the currently active scenario
-        # victim so it can still be correlated into a campaign, instead of
-        # silently dropping it (which is what happened before this fallback).
+        # victim so it can still be correlated into a campaign.
         victim_ip = _resolve_victim_ip()
         if not victim_ip:
+            # DNS resolution failed — drop rather than guess a victim IP.
             return None
-
-    # Extract campaign_id from proc.env if available
-    env_str = output_fields.get("proc.env", "") or ""
-    env_cid = ""
-    m = re.search(r'CAMPAIGN_ID=([^\s;,]+)', env_str)
-    if m:
-        env_cid = m.group(1).strip()
 
     ts_str = output_fields.get("evt.time") or obj.get("time") or ""
     try:
@@ -371,15 +354,14 @@ def _parse_falco_event(obj: dict) -> Optional[dict]:
         "priority": obj.get("priority", ""),
         "output": output,
         "output_fields": output_fields,
-        "env_campaign_id": env_cid,  # from attacker env — used only as hint
         "original": obj,
     }
 
 
 def _parse_snort_alert(obj: dict) -> Optional[dict]:
     """
-    TAPCD-compat Snort schema:
-    {timestamp, msg, src_ap, dst_ap, src_ip, dst_ip, campaign_id, ...}
+    TAPCD-compat Snort schema: {timestamp, msg, src_ap, dst_ap, src_ip, dst_ip, ...}.
+    Any campaign_id on the raw message is ignored — this module assigns its own.
     """
     dst_ip = str(obj.get("dst_ip") or "").strip()
     if not dst_ip and "dst_ap" in obj:
@@ -439,11 +421,8 @@ def _build_pmp_alert(parsed: dict, campaign_id: str) -> dict:
     src = parsed["source"]
     orig = parsed["original"]
 
-    # accumulated_src_ips holds every attacker IP seen across all re-emitted
-    # network alerts for this campaign (see _accumulate_attacker_ips). Always
-    # included — even on falco_events/snort_alerts payloads — so MISP can
-    # enrich the SAME campaign event/actor with the full attacker IP set
-    # regardless of which alert triggered this particular publish.
+    # Full campaign IP set (see _accumulate_attacker_ips), included even for
+    # falco_events/snort_alerts so MISP always enriches the same actor.
     accumulated_ips = parsed.get("accumulated_src_ips") or []
 
     base = {
@@ -498,21 +477,17 @@ def _build_pmp_alert(parsed: dict, campaign_id: str) -> dict:
     return base
 
 
-def _build_snort_am_alert(parsed: dict, campaign_id: str) -> Optional[dict]:
+def _build_tapcd_compat_alert(parsed: dict, campaign_id: str) -> Optional[dict]:
     """
-    Build a TAPCD-compat (snort_alerts_am) event with campaign_id injected.
-    Generated for network_intrusion_alerts, snort_alerts, AND falco_events.
+    Build a TAPCD-compat event (campaign_id injected) for network_intrusion_alerts,
+    snort_alerts, AND falco_events.
 
-    Falco used to be MISP-only here (never reached stream_low/prep_pred), on
-    the assumption that a host-only ransomware attack has no network phase to
-    profile — but the compromised host can still have real network activity
-    (C2 callbacks, exfiltration, or just ordinary flows captured for that
-    victim IP) that TAPCD's ML model could characterize if it ever looked.
-    Routing Falco through the same snort_alerts_am path lets stream_low query
-    MongoDB for that host's own flows and build a real profile when there's
-    something to find, instead of unconditionally skipping the lookup and
-    leaving the actor stuck on the DetectionAlert-only stub from
-    misp_to_soarca._publish_falco_ransomware_to_tapcd.
+    Falco used to be MISP-only here, on the assumption a host-only ransomware
+    attack has no network phase to profile — but the compromised host can
+    have real network activity (C2, exfiltration) worth characterizing.
+    Routing it through this same path lets stream_low query MongoDB for that
+    host's own flows instead of leaving the actor on a DetectionAlert-only
+    stub.
     """
     src = parsed["source"]
 
@@ -579,44 +554,19 @@ _PARSERS = {
 def _consume_topic(topic: str, group_suffix: str):
     """Run a dedicated consumer+producer loop for a SINGLE topic.
 
-    This used to be one shared consumer subscribed to all three topics with
-    a single poll() loop. Kafka doesn't guarantee round-robin delivery across
-    topics for one consumer, so whichever topic had the higher message
-    volume at a given moment (network_intrusion_alerts/snort_alerts, which
-    fire continuously while an attack is in flight) could starve the others
-    for many seconds even though their messages were already sitting in
-    Kafka — this is exactly what delayed a real-time Falco ransomware
-    detection by ~10s in a hybrid (exp3) run: the shared consumer was busy
-    draining a burst of network alerts and didn't get back to falco_events
-    until the network burst let up. Giving each topic its own consumer
-    (own Kafka consumer group) and producer, each in its own thread, means a
-    burst on one topic can never delay processing on another — Falco events
-    are read and published the moment they land in Kafka, regardless of how
-    busy the network-alert stream is. _campaigns state is still shared and
-    protected by _state_lock (already used by _infer_campaign/
-    _accumulate_attacker_ips/_gc_expired_campaigns), so campaign correlation
-    across topics still works exactly the same as before.
+    One consumer per topic (own group, own thread) — a single shared
+    consumer let a network-alert burst starve falco_events for ~10s
+    (Kafka gives no round-robin guarantee across topics). _campaigns state
+    stays shared, protected by _state_lock.
     """
     consumer = _build_consumer([topic], group_suffix)
     producer = _build_producer()
     parse_fn = _PARSERS[topic]
 
-    # Commit/flush are deferred to a periodic interval instead of happening
-    # synchronously on every message. A ransomware run's file-activity burst
-    # (encryption touching hundreds of files/sec) can queue 10k+ Falco events
-    # in a few seconds; producer.flush() blocks for a broker ack and
-    # consumer.commit(asynchronous=False) blocks for a commit ack, and paying
-    # both round-trips (~8ms measured here) on EVERY single message serialized
-    # the whole burst — an 11k-message flood took ~95s to drain, so the one
-    # real detection buried in it (the attack's first file write, itself
-    # ingested within ~1s of the attack starting) didn't reach TAPCD/SOARCA
-    # until the burst finished, turning a sub-5s countermeasure into a 96s
-    # one. producer.poll(0) (inside _produce) still services delivery-report
-    # callbacks on every message without blocking; batching the actual
-    # flush+commit to this interval lets librdkafka's own internal batching
-    # (linger.ms/batch.size) do the work at line rate while still committing
-    # offsets at least every _COMMIT_INTERVAL_SECS, so a crash mid-burst only
-    # replays a bounded, small amount of at-least-once work.
+    # Flush/commit on an interval, not per-message: both block on a broker
+    # round-trip (~8ms), which serialized a 10k+ Falco burst into a ~95s
+    # drain (turning a sub-5s countermeasure into a 96s one). A crash
+    # mid-burst only replays work since the last interval.
     _COMMIT_INTERVAL_SECS = 0.25
     _last_commit = time.time()
     _dirty_msg = None
@@ -679,13 +629,13 @@ def _consume_topic(topic: str, group_suffix: str):
             except Exception as exc:
                 log.error("[%s] Failed to produce to %s: %s", topic, TOPIC_PMP_ALERTS, exc)
 
-            # Publish to snort_alerts_am (TAPCD stream_low consumes this)
+            # Publish to alert_manager_tapcd_compat_alerts (TAPCD stream_low consumes this)
             try:
-                snort_am = _build_snort_am_alert(parsed, campaign_id)
-                if snort_am is not None:
-                    _produce(producer, TOPIC_SNORT_OUT, snort_am)
+                tapcd_compat = _build_tapcd_compat_alert(parsed, campaign_id)
+                if tapcd_compat is not None:
+                    _produce(producer, TOPIC_TAPCD_COMPAT, tapcd_compat)
             except Exception as exc:
-                log.error("[%s] Failed to produce to %s: %s", topic, TOPIC_SNORT_OUT, exc)
+                log.error("[%s] Failed to produce to %s: %s", topic, TOPIC_TAPCD_COMPAT, exc)
 
             _dirty_msg = msg
 
@@ -714,7 +664,7 @@ def run():
     log.info(
         "Alert Manager started — correlating by victim IP within %ds window → "
         "publishing to %s and %s (one dedicated consumer thread per source topic)",
-        CAMPAIGN_WINDOW_SECS, TOPIC_PMP_ALERTS, TOPIC_SNORT_OUT,
+        CAMPAIGN_WINDOW_SECS, TOPIC_PMP_ALERTS, TOPIC_TAPCD_COMPAT,
     )
 
     threads = [
