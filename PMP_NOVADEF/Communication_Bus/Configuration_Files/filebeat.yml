@@ -9,8 +9,9 @@ filebeat.inputs:
         # It does not work with [0-9]{8} sentence, it only works with several [0-9] sentences
     tags: ["syslog_logs"]
     fields:
-      kafka_topic: "${FLUENTD_SYSLOG_BASE_TOPIC:syslog_logs}" 
+      kafka_topic: "${FLUENTD_SYSLOG_BASE_TOPIC:syslog_logs}"
     fields_under_root: true
+    prospector.scanner.check_interval: "${FILEBEAT_SCAN_FREQUENCY:100ms}"
 
   - type: filestream #log
     id: systemd_logs
@@ -21,8 +22,9 @@ filebeat.inputs:
         # Example: /fluentd/log/systemd_output.log.20250124.log
     tags: ["systemd_logs"]
     fields:
-      kafka_topic: "${FLUENTD_SYSTEMD_BASE_TOPIC:systemd_logs}" 
+      kafka_topic: "${FLUENTD_SYSTEMD_BASE_TOPIC:systemd_logs}"
     fields_under_root: true
+    prospector.scanner.check_interval: "${FILEBEAT_SCAN_FREQUENCY:100ms}"
 
   - type: filestream #log
     id: tshark_ndjson_traces
@@ -31,8 +33,9 @@ filebeat.inputs:
       - "/results/tshark/traces/infile.ndjson" #"/tshark/traces/infile.ndjson"
     tags: ["tshark_ndjson_traces"]
     fields:
-      kafka_topic: "${TSHARK_BASE_TOPIC:tshark_traces}" 
+      kafka_topic: "${TSHARK_BASE_TOPIC:tshark_traces}"
     fields_under_root: true
+    prospector.scanner.check_interval: "${FILEBEAT_SCAN_FREQUENCY:100ms}"
     parsers:
       - ndjson:
           target: ""           # Leave the flat JSON at the root of the network event
@@ -41,20 +44,10 @@ filebeat.inputs:
     close.on_state_change.renamed: true    # closes when it detects that the file has been renamed
     clean_removed: true                    # clears the status when the file is no longer present
   
-  - type: filestream #log
-    id: falco_events
-    enabled: true
-    paths:
-      - "/results/falco/logs/falco_events.json" #"/falco/logs/falco_events.json"
-    tags: ["falco_events"]
-    fields:
-      kafka_topic: "${FALCO_BASE_TOPIC:falco_events}"
-    fields_under_root: true
-
 output.kafka:
   hosts: ["${KAFKA_BOOTSTRAP}"]
   topic: '%{[kafka_topic]}'
-  compression: "${FILEBEAT_COMPRESION}" #lz4
+  compression: "${FILEBEAT_COMPRESSION}" #lz4
   required_acks: "1"
   partition.round_robin.reachable_only: true
   bulk_max_size: "${FILEBEAT_BULK_MAX_SIZE}"

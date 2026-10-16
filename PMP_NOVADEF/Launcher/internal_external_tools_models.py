@@ -70,6 +70,13 @@ class FalcoConfig(BaseModel):
     FALCO_BASE_TOPIC:               str = "falco_events"
     FALCO_SKIP_DRIVER_LOADER:       str = "1"
     FALCO_EXPORTER_PORT:            str = "9376"
+    # Falcosidekick: forwards Falco's own HTTP output straight to Kafka,
+    # bypassing Filebeat entirely (same direct-to-Kafka pattern Telegraf
+    # already uses). Always deployed alongside Falco, never on its own.
+    FALCOSIDEKICK_LISTEN_PORT:              str = "2801"
+    FALCOSIDEKICK_KAFKA_COMPRESSION:        str = "none"
+    FALCOSIDEKICK_KAFKA_REQUIRED_ACKS:      str = "1"
+    FALCOSIDEKICK_KAFKA_MINIMUM_PRIORITY:   str = ""
 
 
 class KafkaConfig(BaseModel):
@@ -92,11 +99,11 @@ class FilebeatConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     FILEBEAT_BULK_MAX_SIZE:         str = "4096"
-    FILEBEAT_COMPRESION:            str = "lz4"
+    FILEBEAT_COMPRESSION:           str = "lz4"
+    FILEBEAT_SCAN_FREQUENCY:        str = "100ms"
     FLUENTD_SYSLOG_BASE_TOPIC:      str = FluentdConfig.model_fields["FLUENTD_SYSLOG_BASE_TOPIC"].default
     FLUENTD_SYSTEMD_BASE_TOPIC:     str = FluentdConfig.model_fields["FLUENTD_SYSTEMD_BASE_TOPIC"].default
     TSHARK_BASE_TOPIC:              str = TsharkConfig.model_fields["TSHARK_BASE_TOPIC"].default
-    FALCO_BASE_TOPIC:               str = FalcoConfig.model_fields["FALCO_BASE_TOPIC"].default
 
 class MimirConfig(BaseModel):
     """Pydantic model for Grafana Mimir historical storage configuration."""
@@ -459,6 +466,10 @@ TOOL_ENV_VARS = {
         "FALCO_SKIP_DRIVER_LOADER",
         "FALCO_EXPORTER_PORT",
         "FALCO_RULES_PATHS",
+        "FALCOSIDEKICK_LISTEN_PORT",
+        "FALCOSIDEKICK_KAFKA_COMPRESSION",
+        "FALCOSIDEKICK_KAFKA_REQUIRED_ACKS",
+        "FALCOSIDEKICK_KAFKA_MINIMUM_PRIORITY",
     ],
     "info": [
         "DEVICE_INFO_PORT",
@@ -482,11 +493,11 @@ TOOL_ENV_VARS = {
     ],
     "filebeat": [
         "FILEBEAT_BULK_MAX_SIZE",
-        "FILEBEAT_COMPRESION",
+        "FILEBEAT_COMPRESSION",
+        "FILEBEAT_SCAN_FREQUENCY",
         "FLUENTD_SYSLOG_BASE_TOPIC",
         "FLUENTD_SYSTEMD_BASE_TOPIC",
         "TSHARK_BASE_TOPIC",
-        "FALCO_BASE_TOPIC",
     ],
     "prometheus": [
         "PROMETHEUS_PORT",
@@ -639,9 +650,6 @@ TOOL_ENV_VARS = {
         "NID_FAST_FANIN_DEDUP_SECONDS",
         "NID_FAST_FANIN_ENRICH_INTERVAL_SECONDS",
         "NID_INFRA_RESOLVE_INTERVAL_SECONDS",
-        # Infra_Discovery_Watcher's own vars — folded in here because it's
-        # always deployed alongside this tool, never selectable on its own
-        # (see InfraDiscoveryWatcherConfig).
         "NID_WATCHER_POLL_INTERVAL_SECONDS",
         "NID_WATCHER_INFRA_LABEL",
     ],
@@ -715,6 +723,5 @@ CONSUMER_TOPIC_VARS = {
         "TSHARK_BASE_TOPIC",
         "FLUENTD_SYSLOG_BASE_TOPIC",
         "FLUENTD_SYSTEMD_BASE_TOPIC",
-        "FALCO_BASE_TOPIC",
     ],
 }

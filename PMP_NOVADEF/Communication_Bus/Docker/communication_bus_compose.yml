@@ -15,6 +15,7 @@ services:
       timeout: 3s
     environment:
       - TZ=${TZ}
+      - KAFKA_HEAP_OPTS=-Xms256m -Xmx512m
       - KAFKA_PROCESS_ROLES=broker,controller
       - KAFKA_NODE_ID=1
       # BROKER for internal connections and EXTERNAL for external connection
@@ -74,10 +75,10 @@ services:
       - FLUENTD_SYSLOG_BASE_TOPIC=${FLUENTD_SYSLOG_BASE_TOPIC}
       - FLUENTD_SYSTEMD_BASE_TOPIC=${FLUENTD_SYSTEMD_BASE_TOPIC}
       - TSHARK_BASE_TOPIC=${TSHARK_BASE_TOPIC}
-      - FALCO_BASE_TOPIC=${FALCO_BASE_TOPIC}
       - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
-      - FILEBEAT_COMPRESION=${FILEBEAT_COMPRESION}
+      - FILEBEAT_COMPRESSION=${FILEBEAT_COMPRESSION}
       - FILEBEAT_BULK_MAX_SIZE=${FILEBEAT_BULK_MAX_SIZE}
+      - FILEBEAT_SCAN_FREQUENCY=${FILEBEAT_SCAN_FREQUENCY}
     extra_hosts:
       - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
     volumes:

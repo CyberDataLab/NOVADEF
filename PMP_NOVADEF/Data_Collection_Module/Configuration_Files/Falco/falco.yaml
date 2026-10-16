@@ -6,14 +6,16 @@ log_output:
 stdout_output:
   enabled: false
 json_output: true
+json_include_output_property: true
+
+http_output:
+  enabled: true
+  # falco runs with network_mode: host, so localhost reaches falcosidekick's published port.
+  url: "http://localhost:${FALCOSIDEKICK_LISTEN_PORT}/"
 
 file_output:
   enabled: true
-  # keep_alive=false makes Falco close and reopen this file on every single
-  # event. Under attack bursts (hundreds of events/sec) with the host under
-  # CPU pressure, that per-event open/close/flush cycle was adding several
-  # seconds of latency before events reached Filebeat. keep_alive=true opens
-  # the file once and appends, eliminating that overhead.
+  # keep_alive avoids a per-event open/close/flush cycle that added latency under attack bursts.
   keep_alive: true
   filename: /var/log/falco/falco_events.json
 
@@ -30,15 +32,7 @@ grpc:
 grpc_output:
   enabled: true
 
-# NOVADEF only ever runs containers under Docker — cri/podman/lxc/libvirt_lxc/
-# bpm are all left at their library default of enabled:true with no matching
-# socket on this host (containerd/crio/k3s/podman/lxc sockets don't exist
-# here). Falco still probes each enabled engine's socket for every container
-# it observes, and each failed probe against a nonexistent socket leaves
-# behind a zombie `[timeout] <defunct>` process that Falco never reaps —
-# after this container's been running for hours, that accumulates into
-# thousands of zombies (observed: ~11,500 after 7.5h). Disabling every engine
-# but docker here stops Falco from probing sockets that will never answer.
+# Only docker is used in NOVADEF; other engines' nonexistent sockets caused zombie probe processes to pile up.
 container_engines:
   docker:
     enabled: true

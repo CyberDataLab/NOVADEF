@@ -89,6 +89,7 @@ services:
       - MACHINE_ID=${MACHINE_ID}
       - SKIP_DRIVER_LOADER=${FALCO_SKIP_DRIVER_LOADER}
       - FALCO_RULES_PATHS=${FALCO_RULES_PATHS}
+      - FALCOSIDEKICK_LISTEN_PORT=${FALCOSIDEKICK_LISTEN_PORT}
     extra_hosts:
       - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
     network_mode: "${NETWORK_MODE}"
@@ -105,7 +106,38 @@ services:
       - /usr:/host/usr:ro
       - ${PFD}/Results/falco/logs:/var/log/falco/
       - /var/run/falco:/var/run/falco # Falco-exporter read from falco socket
+    depends_on:
+      falcosidekick:
+        condition: service_healthy
     restart: unless-stopped
+
+  falcosidekick:
+    image: falcosecurity/falcosidekick:2.35.0
+    container_name: falcosidekick_novadef
+    profiles: ["collection_module.falco"]
+    labels:
+      - "novadef.role=infrastructure"
+    environment:
+      - TZ=${TZ}
+      - LISTENADDRESS=0.0.0.0
+      - LISTENPORT=${FALCOSIDEKICK_LISTEN_PORT}
+      - KAFKA_HOSTPORT=${KAFKA_BOOTSTRAP}
+      - KAFKA_TOPIC=${FALCO_BASE_TOPIC}
+      - KAFKA_COMPRESSION=${FALCOSIDEKICK_KAFKA_COMPRESSION}
+      - KAFKA_REQUIREDACKS=${FALCOSIDEKICK_KAFKA_REQUIRED_ACKS}
+      - KAFKA_MINIMUMPRIORITY=${FALCOSIDEKICK_KAFKA_MINIMUM_PRIORITY}
+    extra_hosts:
+      - "${KAFKA_LAN_HOSTNAME:-kafka-host}:host-gateway"
+    ports:
+      - "${FALCOSIDEKICK_LISTEN_PORT}:${FALCOSIDEKICK_LISTEN_PORT}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${FALCOSIDEKICK_LISTEN_PORT}/ping"]
+      interval: 5s
+      retries: 10
+      start_period: 5s
+      timeout: 3s
+    restart: unless-stopped
+
   falco-exporter:
     image: falcosecurity/falco-exporter:0.8.7
     container_name: falco_exporter_novadef

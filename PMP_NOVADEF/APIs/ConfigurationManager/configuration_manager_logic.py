@@ -119,7 +119,6 @@ TOOL_NAME_TO_MODULE: Dict[str, Tuple[str, str]] = {
 CO_DEPLOY_TOOLS: Dict[str, List[str]] = {
     "tshark":   ["filebeat"],
     "fluentd":  ["filebeat"],
-    "falco":    ["filebeat"],
 }
 
 # ---------------------------------------------------------------------------
