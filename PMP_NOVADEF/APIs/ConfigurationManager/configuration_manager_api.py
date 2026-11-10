@@ -58,7 +58,7 @@ app = FastAPI(
 NETWORK_TOOLS        = ["tshark", "flow_module"]
 INFRASTRUCTURE_TOOLS = ["telegraf"]
 SERVICE_TOOLS        = ["fluentd", "falco"]
-SECURITY_TOOLS       = ["snort3"]
+SECURITY_TOOLS       = ["snort3", "network_intrusion_detector", "alert_manager"]
 
 
 @app.get("/")

@@ -111,6 +111,8 @@ TOOL_NAME_TO_MODULE: Dict[str, Tuple[str, str]] = {
     "redis":            ("db_module",            "redis"),
     "prometheus":       ("aggregation_module",   "prometheus"),
     "opensearch":       ("aggregation_module",   "opensearch"),
+    "network_intrusion_detector": ("intrusion_detector_module", "network_intrusion_detector"),
+    "alert_manager":    ("alert_manager",        "alert_manager"),
 }
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,7 @@ TOOL_RUNTIME_CONTAINERS: Dict[str, str] = {
     "snort3": "alert_module_novadef",
     "network_intrusion_detector": "network_intrusion_detector_novadef",
     "alert_manager": "alert_manager_novadef",
+    "falco": "falco_novadef",
 }
 
 # ---------------------------------------------------------------------------
@@ -587,27 +590,21 @@ def get_tool_runtime_state(tool_name: str) -> Dict[str, Any]:
     }
 
 
-# Dependency map for tools that require upstream dependencies
-DEPENDENCY_MAP = {
-    "snort3": {"upstream_tool": "tshark", "required_topic": "TSHARK_BASE_TOPIC"},
-    "flow_module": {"upstream_tool": "tshark", "required_topic": "TSHARK_BASE_TOPIC"},
-    "network_intrusion_detector": {"upstream_tool": "tshark", "required_topic": "TSHARK_BASE_TOPIC"},
+# Dependency map for tools that require upstream dependencies.
+# "mode": "all" requires every listed upstream tool active; "any" requires at least one.
+DEPENDENCY_MAP: Dict[str, Dict[str, Any]] = {
+    "snort3": {"mode": "all", "dependencies": ["tshark"]},
+    "flow_module": {"mode": "all", "dependencies": ["tshark"]},
+    "network_intrusion_detector": {"mode": "all", "dependencies": ["tshark"]},
+    "alert_manager": {"mode": "any", "dependencies": ["network_intrusion_detector", "falco", "snort3"]},
 }
 
+# Env var that NID uses to decide whether it also consumes flow_module's output.
+NID_ISOLATION_FOREST_ENV_VAR = "NID_ISOLATION_FOREST_ENABLED"
 
-def validate_dependency_state(tool_name: str, collection: Optional[Collection]) -> Tuple[bool, str]:
-    """
-    Generic validation for tools that depend on upstream tools and topics.
-    Ensures the tool can only be deployed when the upstream tool is actively running
-    and the required topic is available in MongoDB CM.
-    """
-    if tool_name not in DEPENDENCY_MAP:
-        return True, ""  # No dependency, allow
 
-    dep_config = DEPENDENCY_MAP[tool_name]
-    upstream_tool = dep_config["upstream_tool"]
-    required_topic = dep_config["required_topic"]
-
+def _check_single_dependency(upstream_tool: str, collection: Optional[Collection]) -> Tuple[bool, str]:
+    """Checks that an upstream tool is actively running and its producer topics are resolved in MongoDB CM."""
     upstream_runtime = get_tool_runtime_state(upstream_tool)
     if upstream_runtime.get("status") != "success":
         return False, str(upstream_runtime.get("message", f"Could not determine {upstream_tool} runtime state."))
@@ -617,24 +614,56 @@ def validate_dependency_state(tool_name: str, collection: Optional[Collection]) 
         runtime_status = str(upstream_runtime.get("runtime_status", "unknown"))
         return (
             False,
-            f"{tool_name} requires {upstream_tool} to be actively deployed first. "
+            f"{upstream_tool} must be actively deployed first. "
             f"Container '{container_name}' is currently '{runtime_status}'.",
         )
 
     if collection is None:
-        return (
-            False,
-            f"{tool_name} requires MongoDB CM to resolve {upstream_tool} topics, but MongoDB CM is unavailable.",
-        )
+        return False, f"MongoDB CM is unavailable to resolve {upstream_tool}'s topics."
 
     stored_topics = get_kafka_topics_from_mongo(collection)
-    topic_value = str(stored_topics.get(required_topic, "")).strip()
-    if not topic_value:
-        return (
-            False,
-            f"{tool_name} requires the {upstream_tool} topic to be present in MongoDB CM. "
-            f"Deploy {upstream_tool} first through the Configuration Manager.",
-        )
+    for required_topic in PRODUCER_TOPIC_VARS.get(upstream_tool, []):
+        if not str(stored_topics.get(required_topic, "")).strip():
+            return (
+                False,
+                f"{upstream_tool}'s topic '{required_topic}' is not present in MongoDB CM. "
+                f"Deploy {upstream_tool} first through the Configuration Manager.",
+            )
+
+    return True, ""
+
+
+def validate_dependency_state(
+    tool_name: str,
+    collection: Optional[Collection],
+    effective_env: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, str]:
+    """
+    Generic validation for tools that depend on upstream tools being actively deployed.
+    DEPENDENCY_MAP entries are combined with "all" (every dependency required) or
+    "any" (at least one required) semantics. Also enforces NID's extra dependency on
+    flow_module when its Isolation Forest detector is enabled in effective_env.
+    """
+    dep_config = DEPENDENCY_MAP.get(tool_name)
+    if dep_config is not None:
+        checks = [_check_single_dependency(dep, collection) for dep in dep_config["dependencies"]]
+        passed = [ok for ok, _ in checks]
+        failures = [reason for ok, reason in checks if not ok]
+
+        if dep_config["mode"] == "any":
+            if not any(passed):
+                return False, f"{tool_name} requires at least one of its dependencies active: {failures}"
+        elif not all(passed):
+            return False, f"{tool_name} requires all of its dependencies active: {failures}"
+
+    if tool_name == "network_intrusion_detector":
+        isolation_enabled = str((effective_env or {}).get(NID_ISOLATION_FOREST_ENV_VAR, "")).strip().lower() in {
+            "1", "true", "yes",
+        }
+        if isolation_enabled:
+            flow_ok, flow_reason = _check_single_dependency("flow_module", collection)
+            if not flow_ok:
+                return False, f"network_intrusion_detector requires flow_module when Isolation Forest is enabled: {flow_reason}"
 
     return True, ""
 
@@ -837,11 +866,6 @@ def process_deploy_request(
 
     collection = get_mongo_collection()
 
-    if tool_name in DEPENDENCY_MAP:
-        dependency_ok, dependency_error = validate_dependency_state(tool_name, collection)
-        if not dependency_ok:
-            return {"status": "error", "message": dependency_error}
-
     is_valid, error_msg, resolved_env = validate_and_parse_config(
         tool_name=tool_name,
         incoming_config=request.configuration or {}
@@ -849,6 +873,11 @@ def process_deploy_request(
 
     if not is_valid:
         return {"status": "error", "message": error_msg}
+
+    if tool_name in DEPENDENCY_MAP:
+        dependency_ok, dependency_error = validate_dependency_state(tool_name, collection, resolved_env)
+        if not dependency_ok:
+            return {"status": "error", "message": dependency_error}
 
     rules_config: Optional[Dict[str, Any]] = None
     previous_final_rules_exists = False
@@ -1025,11 +1054,6 @@ def process_update_configuration(
     if not are_rules_fields_valid:
         return {"status": "error", "message": rules_error_msg}
 
-    if tool_name in DEPENDENCY_MAP:
-        dependency_ok, dependency_error = validate_dependency_state(tool_name, collection)
-        if not dependency_ok:
-            return {"status": "error", "message": dependency_error}
-
     previous_final_rules_exists = False
     previous_final_rules_content: Optional[str] = None
     if tool_name == "snort3":
@@ -1113,6 +1137,11 @@ def process_update_configuration(
         return {"status": "error", "message": f"No configuration values{rules_tool_hint} were provided to update."}
 
     base_env.update(partial_env)
+
+    if tool_name in DEPENDENCY_MAP:
+        dependency_ok, dependency_error = validate_dependency_state(tool_name, collection, base_env)
+        if not dependency_ok:
+            return {"status": "error", "message": dependency_error}
 
     # Re-apply producer/consumer topic logic on update as well
     persist_producer_topics(tool_name, base_env, collection)
