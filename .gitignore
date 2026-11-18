@@ -46,3 +46,5 @@ PMP_NOVADEF/LICENSE
 PMP_NOVADEF/REQUIREMENTS.md
 PMP_NOVADEF/Aggregation_Normalisation_Module/Configuration_Files/Logstash/pipeline_topic_regex.conf
 PMP_NOVADEF/Aggregation_Normalisation_Module/Configuration_Files/Prometheus/generated/
+PMP_NOVADEF/Persistence/
+PMP_NOVADEF/Results/

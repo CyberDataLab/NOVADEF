@@ -81,6 +81,7 @@ API_TOOL_CONTAINERS = [
     "fluentd_novadef",
     "falco_novadef",
     "falco_exporter_novadef",
+    "falcosidekick_novadef",
     "alert_module_novadef",
     "network_intrusion_detector_novadef",
     "alert_manager_novadef",
@@ -91,6 +92,18 @@ ASSOCIATED_CONTAINERS = [
     "opensearch_dashboards_novadef", # This container is associated with OpenSearch, but it is not an API tool itself
     "logstash_novadef", # This container is associated with OpenSearch, but it is not an API tool itself
     "infra_discovery_watcher_novadef", # This container is associated with Intrusion_Detector_Module, but it is not an API tool itself
+]
+
+# One-shot init-job containers from the base compose files (db_module/aggregation_module).
+# These run to completion and exit, but Docker Compose still refuses to recreate them
+# under the same name unless they are removed first.
+INIT_JOB_CONTAINERS = [
+    "init_mongo_users_novadef",
+    "init_mimir",
+    "init_prometheus",
+    "init_prometheus_config",
+    "init_opensearch",
+    "init_opensearch_ism_policy",
 ]
 
 

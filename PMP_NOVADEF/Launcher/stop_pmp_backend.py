@@ -17,6 +17,7 @@ from launcher_common import (
     API_TOOL_CONTAINERS,
     BASE_CONTAINERS,
     ASSOCIATED_CONTAINERS,
+    INIT_JOB_CONTAINERS,
     BOOTSTRAP_LOG_FILE,
     HDR_API_CONTAINER_NAME,
     DT_API_CONTAINER_NAME,
@@ -352,7 +353,11 @@ def main() -> int:
             remove_docker_containers(API_TOOL_CONTAINERS, logger, "API-launched tool containers")
 
         if stop_base:
-            remove_docker_containers(BASE_CONTAINERS + ASSOCIATED_CONTAINERS, logger, "base containers")
+            remove_docker_containers(
+                BASE_CONTAINERS + ASSOCIATED_CONTAINERS + INIT_JOB_CONTAINERS,
+                logger,
+                "base containers",
+            )
 
         if purge:
             remove_matching_docker_containers(args.purge_name_pattern, logger)

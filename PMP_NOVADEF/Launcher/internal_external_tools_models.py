@@ -75,7 +75,7 @@ class FalcoConfig(BaseModel):
     # already uses). Always deployed alongside Falco, never on its own.
     FALCOSIDEKICK_LISTEN_PORT:              str = "2801"
     FALCOSIDEKICK_KAFKA_COMPRESSION:        str = "none"
-    FALCOSIDEKICK_KAFKA_REQUIRED_ACKS:      str = "1"
+    FALCOSIDEKICK_KAFKA_REQUIRED_ACKS:      str = "ONE"
     FALCOSIDEKICK_KAFKA_MINIMUM_PRIORITY:   str = ""
 
 
@@ -375,6 +375,8 @@ class AlertManagerConfig(BaseModel):
     ALERT_MANAGER_KAFKA_GROUP_ID:                    str = "alert-manager-v1"
     ALERT_MANAGER_CAMPAIGN_WINDOW_SECS:              str = "1800"
     ALERT_MANAGER_CAMPAIGN_TTL_SECS:                 str = "3600"
+    # Falco-only noise filter; events below this priority are dropped.
+    ALERT_MANAGER_FALCO_MIN_PRIORITY:                str = "WARNING"
 
 
 PUBLIC_TOOL_MODELS = {
@@ -693,6 +695,7 @@ TOOL_ENV_VARS = {
         "ALERT_MANAGER_KAFKA_GROUP_ID",
         "ALERT_MANAGER_CAMPAIGN_WINDOW_SECS",
         "ALERT_MANAGER_CAMPAIGN_TTL_SECS",
+        "ALERT_MANAGER_FALCO_MIN_PRIORITY",
     ],
 }
 

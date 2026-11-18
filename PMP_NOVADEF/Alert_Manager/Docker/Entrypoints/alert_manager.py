@@ -60,6 +60,25 @@ TOPIC_TAPCD_COMPAT    = os.getenv("ALERT_MANAGER_TAPCD_COMPAT_ALERTS")
 
 GROUP_ID = os.getenv("ALERT_MANAGER_KAFKA_GROUP_ID")
 
+# Falco-only noise filter (NID/Snort don't need it). Order = Falco's own
+# priority scale, syslog severity style; lower index = more severe.
+FALCO_PRIORITY_ORDER = [
+    "EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARNING", "NOTICE", "INFORMATIONAL", "DEBUG",
+]
+FALCO_MIN_PRIORITY = os.getenv("ALERT_MANAGER_FALCO_MIN_PRIORITY", "WARNING").strip().upper()
+
+
+def _falco_priority_rank(priority: str) -> int:
+    '''Returns a Falco priority's severity rank (lower = more severe); unknown values rank as the most severe, failing open.'''
+    normalized = str(priority or "").strip().upper()
+    try:
+        return FALCO_PRIORITY_ORDER.index(normalized)
+    except ValueError:
+        return 0
+
+
+_FALCO_MIN_PRIORITY_RANK = _falco_priority_rank(FALCO_MIN_PRIORITY)
+
 # Falco host-level rules (file/process activity, e.g. ransomware encryption)
 # often carry no network fields at all — there is no src/dst IP to extract from
 # a local `openssl enc` syscall. Resolve the currently active scenario victim
@@ -314,8 +333,14 @@ def _parse_falco_event(obj: dict) -> Optional[dict]:
             pass
 
     rule = obj.get("rule", "")
+    priority = obj.get("priority", "")
     output = obj.get("output", "")
     output_fields = obj.get("output_fields") or {}
+    tags = obj.get("tags") or []
+
+    if _falco_priority_rank(priority) > _FALCO_MIN_PRIORITY_RANK:
+        # Below threshold (e.g. a routine community-rule NOTICE) — drop early.
+        return None
 
     # Extract victim IP from output_fields (container.ip, fd.rip, evt.path, etc.)
     victim_ip = (
@@ -351,7 +376,8 @@ def _parse_falco_event(obj: dict) -> Optional[dict]:
         "victim_ip": victim_ip,
         "event_time": event_time,
         "rule": rule,
-        "priority": obj.get("priority", ""),
+        "priority": priority,
+        "tags": tags,
         "output": output,
         "output_fields": output_fields,
         "original": obj,
@@ -500,9 +526,14 @@ def _build_tapcd_compat_alert(parsed: dict, campaign_id: str) -> Optional[dict]:
         # the ransomware) and the victim from a network standpoint — there is
         # no separate attacker IP the way a network-phase alert has one.
         victim_ip = parsed["victim_ip"]
+        rule = str(parsed.get("rule") or "").strip() or "Host anomaly detected"
+        tags = ", ".join(str(t) for t in parsed.get("tags") or [])
+        # Always carry rule + tags, not just for ransomware — keeps future
+        # Falco rules identifiable without a per-attack-type special case.
+        msg = f"{rule} - {tags}" if tags else rule
         return {
             "timestamp": snort_ts,
-            "msg": f"Ransomware host activity on {victim_ip}",
+            "msg": msg,
             "src_ap": f"{victim_ip}:0",
             "dst_ap": f"{victim_ip}:0",
             "src_ip": victim_ip,

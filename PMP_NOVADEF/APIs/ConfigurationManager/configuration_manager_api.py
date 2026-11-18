@@ -201,11 +201,11 @@ async def deploy_service_tool(
 
 @app.post("/ConfigurationManager/DeploySecurityTool")
 async def deploy_security_tool(
-    toolName: str = Query(..., description="Name of the security tool to deploy. Valid values: snort3"),
+    toolName: str = Query(..., description=f"Name of the security tool to deploy. Valid values: {SECURITY_TOOLS}"),
     request: DeploySecurityRequest = None
 ):
     """
-    Deploy a security tool (snort3).
+    Deploy a security tool (snort3, network_intrusion_detector, alert_manager).
 
     - toolName: query parameter with the tool to deploy.
     - Body: optional JSON with env var overrides and optional custom rules payload.
